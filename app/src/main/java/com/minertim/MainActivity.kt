@@ -201,6 +201,17 @@ class MainActivity : AppCompatActivity() {
         isMining = true
         updateUiState()
         startStatsUpdates()
+
+        // Check after a delay if mining actually started
+        lifecycleScope.launch {
+            delay(3000)
+            if (miningService?.isMining() != true) {
+                isMining = false
+                updateUiState()
+                stopStatsUpdates()
+                Toast.makeText(this@MainActivity, "Failed to start mining. Check pool address and connection.", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun onStopMining() {

@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -127,17 +128,19 @@ class MiningService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Mining Status",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Shows mining status and statistics"
-            setShowBadge(false)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Mining Status",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows mining status and statistics"
+                setShowBadge(false)
+            }
 
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.createNotificationChannel(channel)
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.createNotificationChannel(channel)
+        }
     }
 
     private fun createNotification(): Notification {

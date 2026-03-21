@@ -17,6 +17,7 @@ rust:check:
   stage: check
   image: rust:${RUST_VERSION}
   before_script:
+    - apt-get update && apt-get install -y -qq build-essential
     - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
     - cargo install cargo-ndk
   script:

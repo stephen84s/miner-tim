@@ -1,7 +1,7 @@
 package com.minertim.security
 
-import org.junit.Assert.*
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Test
 
 class SecurityValidatorTest {
 
@@ -39,14 +39,14 @@ class SecurityValidatorTest {
     @Test
     fun `whitelisted pool has low risk`() {
         val result = SecurityValidator.validatePoolAddress("pool.supportxmr.com:443")
-        assertEquals(SecurityValidator.RiskLevel.LOW, result.riskLevel)
+        assertEquals(RiskLevel.LOW, result.riskLevel)
     }
 
     @Test
     fun `unknown pool has high risk`() {
         val result = SecurityValidator.validatePoolAddress("evil-pool.example.com:3333")
         assertTrue(result.isValid)
-        assertEquals(SecurityValidator.RiskLevel.HIGH, result.riskLevel)
+        assertEquals(RiskLevel.HIGH, result.riskLevel)
     }
 
     @Test
@@ -56,9 +56,8 @@ class SecurityValidatorTest {
     }
 
     @Test
-    fun `path traversal is rejected`() {
-        val sanitized = SecurityValidator.sanitizeInput("../../../etc/passwd")
-        assertFalse(sanitized.contains("../"))
+    fun `path traversal is detected`() {
+        assertTrue(SecurityValidator.containsDangerousInput("../../../etc/passwd"))
     }
 
     @Test

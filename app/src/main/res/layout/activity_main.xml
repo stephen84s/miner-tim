@@ -43,8 +43,10 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:hint="@string/wallet_address_hint"
-                        android:inputType="textNoSuggestions"
-                        android:maxLines="2" />
+                        android:inputType="textMultiLine|textNoSuggestions"
+                        android:minLines="2"
+                        android:maxLines="4"
+                        android:gravity="top|start" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <com.google.android.material.textfield.TextInputLayout

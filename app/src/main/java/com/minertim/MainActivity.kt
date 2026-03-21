@@ -66,12 +66,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        // Persist field values so they survive rotation/backgrounding
+        saveFieldValues()
         stopStatsUpdates()
         if (serviceBound) {
             unbindService(serviceConnection)
             serviceBound = false
             miningService = null
         }
+    }
+
+    private fun saveFieldValues() {
+        val prefs = getSharedPreferences("ui_state", Context.MODE_PRIVATE).edit()
+        prefs.putString("draft_wallet", binding.etWalletAddress.text.toString())
+        prefs.putString("draft_pool", binding.etPoolAddress.text.toString())
+        prefs.apply()
     }
 
     private fun setupUi() {
@@ -127,8 +136,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadConfig() {
-        binding.etWalletAddress.setText(miningConfig.getWalletAddress())
-        binding.etPoolAddress.setText(miningConfig.getPoolAddress())
+        val prefs = getSharedPreferences("ui_state", Context.MODE_PRIVATE)
+        val draftWallet = prefs.getString("draft_wallet", null)
+        val draftPool = prefs.getString("draft_pool", null)
+
+        binding.etWalletAddress.setText(draftWallet ?: miningConfig.getWalletAddress())
+        binding.etPoolAddress.setText(draftPool ?: miningConfig.getPoolAddress())
 
         val threads = miningConfig.getThreadCount()
         binding.seekThreads.progress = threads - 1

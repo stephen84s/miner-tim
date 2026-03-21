@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# Android
+app/build/
+app/src/main/jniLibs/
+
+# Rust
+app/src/main/rust/target/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Kotlin
+.kotlin/

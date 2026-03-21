@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source \"$HOME/.cargo/env\")",
+      "Bash(cargo check:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

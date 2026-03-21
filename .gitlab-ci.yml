@@ -35,7 +35,7 @@ build:debug:
   stage: build
   image: thyrlian/android-sdk:latest
   before_script:
-    # Install Rust
+    - apt-get update && apt-get install -y -qq curl
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
     - source "$HOME/.cargo/env"
     - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android

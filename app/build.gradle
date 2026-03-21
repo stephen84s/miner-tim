@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace 'com.minertim'
+    namespace = 'com.minertim'
     compileSdk 35
 
     defaultConfig {
@@ -46,7 +46,7 @@ android {
     }
 
     buildFeatures {
-        viewBinding true
+        viewBinding = true
     }
 
     testOptions {

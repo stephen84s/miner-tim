@@ -64,7 +64,9 @@ class MiningService : Service() {
     override fun onDestroy() {
         stopMining()
         serviceScope.cancel()
-        wakeLock?.release()
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
         super.onDestroy()
     }
 
@@ -109,7 +111,9 @@ class MiningService : Service() {
         }
 
         miningCore.stopMining()
-        wakeLock?.release()
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
         stopStatsUpdates()
         thermalManager?.stopMonitoring()
         stopForeground(STOP_FOREGROUND_REMOVE)

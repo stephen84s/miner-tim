@@ -1,0 +1,15 @@
+# Copy this file to .envrc and adjust paths for your system:
+#   cp .envrc.example .envrc
+#
+# Then either:
+#   1. Install direnv (https://direnv.net) and run: direnv allow
+#      This automatically loads .envrc when you cd into the project.
+#
+#   2. Or source it manually: source .envrc
+
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+
+# Rust (rustup)
+source "$HOME/.cargo/env"

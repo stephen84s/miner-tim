@@ -17,3 +17,6 @@ app/src/main/rust/target/
 
 # Kotlin
 .kotlin/
+
+# Environment (user-specific)
+.envrc

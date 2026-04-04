@@ -20,3 +20,4 @@ app/src/main/rust/target/
 
 # Environment (user-specific)
 .envrc
+mining.conf

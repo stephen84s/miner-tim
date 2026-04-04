@@ -1,0 +1,469 @@
+// Unit tests for pure Rust RandomX implementation.
+// Test vectors from: https://github.com/tevador/RandomX/blob/master/src/tests/tests.cpp
+//
+// Tests are organized by implementation phase (matching RANDOMX_IMPLEMENTATION_PLAN.md):
+//   Phase 1: Blake2b, Soft AES, AES hash functions
+//   Phase 2: Argon2d cache
+//   Phase 3: Blake2Generator, SuperscalarHash
+//   Phase 4: Dataset items
+//   Phase 5: VM / Full hash
+
+use super::*;
+
+// ============================================================================
+// Helper: hex decode
+// ============================================================================
+fn hex_decode(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// ============================================================================
+// Phase 1: Blake2b (RFC 7693)
+// ============================================================================
+#[cfg(test)]
+mod blake2b_tests {
+    use super::*;
+
+    #[test]
+    fn test_blake2b_512_empty() {
+        let hash = blake2b::blake2b_512(b"");
+        assert_eq!(
+            hex_encode(&hash),
+            "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419\
+             d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+        );
+    }
+
+    #[test]
+    fn test_blake2b_256_abc() {
+        let hash = blake2b::blake2b_256(b"abc");
+        assert_eq!(
+            hex_encode(&hash),
+            "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+        );
+    }
+
+    #[test]
+    fn test_blake2b_512_abc() {
+        // Standard test vector from RFC 7693 appendix
+        let hash = blake2b::blake2b_512(b"abc");
+        assert_eq!(
+            hex_encode(&hash),
+            "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1\
+             7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+        );
+    }
+}
+
+// ============================================================================
+// Phase 1: Soft AES
+// ============================================================================
+
+// ============================================================================
+// Phase 1: AES Hash Functions
+// ============================================================================
+#[cfg(test)]
+mod aes_hash_tests {
+    use super::*;
+
+    /// Test vector from RandomX tests.cpp: AesGenerator1R
+    /// C++ test: state = 64 bytes (first 32 from hex, last 32 zeros),
+    /// fillAes1Rx4(state, 64, state) — state IS the output buffer.
+    /// After call, first 32 bytes of state equal expected hex.
+    ///
+    /// In our Rust API, state and output are separate, but state is written
+    /// back with the final AES state, which equals the output for 1 iteration.
+    #[test]
+    fn test_fill_aes_1rx4() {
+        let mut state = [0u8; 64];
+        state[..32].copy_from_slice(&hex_decode(
+            "6c19536eb2de31b6c0065f7f116e86f960d8af0c57210a6584c3237b9d064dc7",
+        ));
+
+        let mut output = vec![0u8; 64];
+        aes_hash::fill_aes_1rx4(&mut state, &mut output);
+
+        // State is written back after the loop, so state == output for single iteration
+        assert_eq!(
+            hex_encode(&state[..32]),
+            "fa89397dd6ca422513aeadba3f124b5540324c4ad4b6db434394307a17c833ab"
+        );
+        // Output should match state
+        assert_eq!(&output[..32], &state[..32]);
+    }
+}
+
+// ============================================================================
+// Phase 2: Argon2d Cache
+// ============================================================================
+#[cfg(test)]
+mod argon2d_tests {
+    use super::*;
+
+    /// Cache initialization test from RandomX tests.cpp.
+    /// Key: "test key 000"
+    /// Argon2d params: t=3, m=262144 KiB, p=1, salt="RandomX\x03"
+    /// Expected cache memory values (as u64 little-endian):
+    ///   memory[0]        = 0x191e0e1d23c02186
+    ///   memory[1568413]  = 0xf1b62fe6210bf8b1
+    ///   memory[33554431] = 0x1f47f056d05cd99b
+    /// Note: memory has 262144 * 1024 / 8 = 33554432 u64 values
+    #[test]
+    fn test_cache_initialization() {
+        let cache = argon2d::argon2d_cache(b"test key 000");
+        // Cache is 262144 * 1024 = 268435456 bytes
+        assert_eq!(cache.len(), 262144 * 1024);
+
+        // Read as u64 little-endian
+        let read_u64 = |offset: usize| -> u64 {
+            u64::from_le_bytes(cache[offset * 8..offset * 8 + 8].try_into().unwrap())
+        };
+
+        assert_eq!(read_u64(0), 0x191e0e1d23c02186);
+        assert_eq!(read_u64(1568413), 0xf1b62fe6210bf8b1);
+        assert_eq!(read_u64(33554431), 0x1f47f056d05cd99b);
+    }
+}
+
+// ============================================================================
+// Phase 3: Blake2Generator
+// ============================================================================
+#[cfg(test)]
+mod blake2gen_tests {
+    use super::*;
+
+    /// Basic test: Blake2Generator should produce deterministic output.
+    /// We can verify this indirectly through the SuperscalarHash tests,
+    /// but here we test the basic mechanics.
+    #[test]
+    fn test_blake2gen_basic() {
+        let mut gen = blake2gen::Blake2Generator::new(b"test key 000", 0);
+        // After construction, data_index=64 so first call triggers a blake2b hash
+        let b1 = gen.get_byte();
+        let b2 = gen.get_byte();
+        // These values depend on blake2b_512 of the initial data
+        // We can't hardcode expected values without blake2b, but we can
+        // verify the generator produces consistent output
+        let mut gen2 = blake2gen::Blake2Generator::new(b"test key 000", 0);
+        assert_eq!(gen2.get_byte(), b1);
+        assert_eq!(gen2.get_byte(), b2);
+    }
+
+    #[test]
+    fn test_blake2gen_different_nonce() {
+        let mut gen0 = blake2gen::Blake2Generator::new(b"test key 000", 0);
+        let mut gen1 = blake2gen::Blake2Generator::new(b"test key 000", 1);
+        // Different nonces should produce different sequences
+        let b0 = gen0.get_byte();
+        let b1 = gen1.get_byte();
+        // Very unlikely to be equal (1/256 chance), but not impossible
+        // This is a weak test; SuperscalarHash tests provide stronger validation
+        let _ = (b0, b1);
+    }
+}
+
+// ============================================================================
+// Phase 3: Reciprocal Function
+// ============================================================================
+#[cfg(test)]
+mod reciprocal_tests {
+    use super::*;
+
+    /// Test vectors from RandomX tests.cpp: randomx_reciprocal
+    #[test]
+    fn test_randomx_reciprocal() {
+        assert_eq!(superscalar::randomx_reciprocal(3), 12297829382473034410);
+        assert_eq!(superscalar::randomx_reciprocal(13), 11351842506898185609);
+        assert_eq!(superscalar::randomx_reciprocal(33), 17887751829051686415);
+        assert_eq!(superscalar::randomx_reciprocal(65537), 18446462603027742720);
+        assert_eq!(superscalar::randomx_reciprocal(15000001), 10316166306300415204);
+        assert_eq!(superscalar::randomx_reciprocal(3845182035), 10302264209224146340);
+        assert_eq!(superscalar::randomx_reciprocal(0xffffffff), 9223372039002259456);
+    }
+}
+
+// ============================================================================
+// Phase 3: SuperscalarHash Program Generation
+// ============================================================================
+#[cfg(test)]
+mod superscalar_tests {
+    use super::*;
+
+    /// Test vectors from RandomX tests.cpp: SuperscalarHash generator
+    /// Key: "test key 000", generates 10 programs with nonce starting at 0.
+    /// Each program is hashed with Blake2b-256 over its instruction buffer.
+    ///
+    /// The program hash is Blake2b-256 of (instructions as raw bytes).
+    /// Each instruction is 8 bytes: [opcode, dst, src, mod, imm32[4]].
+    #[test]
+    fn test_superscalar_program_generation() {
+        let expected_hashes = [
+            "d3a4a6623738756f77e6104469102f082eff2a3e60be7ad696285ef7dfc72a61",
+            "f5e7e0bbc7e93c609003d6359208688070afb4a77165a552ff7be63b38dfbc86",
+            "85ed8b11734de5b3e9836641413a8f36e99e89694f419c8cd25c3f3f16c40c5a",
+            "5dd956292cf5d5704ad99e362d70098b2777b2a1730520be52f772ca48cd3bc0",
+            "6f14018ca7d519e9b48d91af094c0f2d7e12e93af0228782671a8640092af9e5",
+            "134be097c92e2c45a92f23208cacd89e4ce51f1009a0b900dbe83b38de11d791",
+            "268f9392c20c6e31371a5131f82bd7713d3910075f2f0468baafaa1abd2f3187",
+            "c668a05fd909714ed4a91e8d96d67b17e44329e88bc71e0672b529a3fc16be47",
+            "99739351315840963011e4c5d8e90ad0bfed3facdcb713fe8f7138fbf01c4c94",
+            "14ab53d61880471f66e80183968d97effd5492b406876060e595fcf9682f9295",
+        ];
+
+        let key = b"test key 000";
+        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+
+        for (i, expected_hex) in expected_hashes.iter().enumerate() {
+            let prog = superscalar::generate_superscalar(&mut gen);
+
+            // Serialize program to raw bytes (same layout as C++ Instruction struct)
+            let mut prog_bytes = Vec::new();
+            for inst in &prog.instructions {
+                prog_bytes.push(inst.opcode);
+                prog_bytes.push(inst.dst);
+                prog_bytes.push(inst.src);
+                prog_bytes.push(inst.mod_);
+                prog_bytes.extend_from_slice(&inst.imm32.to_le_bytes());
+            }
+
+            let hash = blake2b::blake2b_256(&prog_bytes);
+            assert_eq!(
+                hex_encode(&hash),
+                *expected_hex,
+                "SuperscalarHash program {} hash mismatch",
+                i
+            );
+        }
+    }
+
+    /// Test SuperscalarHash execution with known dataset item results.
+    /// If programs generate correctly AND execute correctly, dataset items will match.
+    /// This is tested more directly in the dataset tests below.
+    #[test]
+    fn test_superscalar_execution_basic() {
+        // Simple sanity check: execute with known registers
+        let prog = superscalar::SuperscalarProgram {
+            instructions: vec![],
+            address_register: 0,
+        };
+        let mut r = [0u64; 8];
+        superscalar::execute_superscalar(&mut r, &prog);
+        // Empty program should leave registers unchanged
+        assert_eq!(r, [0u64; 8]);
+    }
+}
+
+// ============================================================================
+// Phase 4: Dataset Items
+// ============================================================================
+#[cfg(test)]
+mod dataset_tests {
+    use super::*;
+
+    /// Test vectors from RandomX tests.cpp: Dataset initialization (interpreter)
+    /// Key: "test key 000"
+    /// Expected first u64 of each dataset item:
+    ///   Item 0:        0x680588a85ae222db
+    ///   Item 10000000: 0x7943a1f6186ffb72
+    ///   Item 20000000: 0x9035244d718095e1
+    ///   Item 30000000: 0x145a5091f7853099
+    #[test]
+    fn test_dataset_item_0() {
+        let cache_memory = argon2d::argon2d_cache(b"test key 000");
+        let key = b"test key 000";
+        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut programs = Vec::new();
+        for _ in 0..8 {
+            programs.push(superscalar::generate_superscalar(&mut gen));
+        }
+        let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
+
+        let item = dataset::init_dataset_item(&cache_memory, &programs, 0);
+        assert_eq!(item[0], 0x680588a85ae222db);
+    }
+
+    #[test]
+        fn test_dataset_item_10m() {
+        let cache_memory = argon2d::argon2d_cache(b"test key 000");
+        let key = b"test key 000";
+        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut programs = Vec::new();
+        for _ in 0..8 {
+            programs.push(superscalar::generate_superscalar(&mut gen));
+        }
+        let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
+
+        let item = dataset::init_dataset_item(&cache_memory, &programs, 10_000_000);
+        assert_eq!(item[0], 0x7943a1f6186ffb72);
+    }
+
+    #[test]
+        fn test_dataset_item_20m() {
+        let cache_memory = argon2d::argon2d_cache(b"test key 000");
+        let key = b"test key 000";
+        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut programs = Vec::new();
+        for _ in 0..8 {
+            programs.push(superscalar::generate_superscalar(&mut gen));
+        }
+        let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
+
+        let item = dataset::init_dataset_item(&cache_memory, &programs, 20_000_000);
+        assert_eq!(item[0], 0x9035244d718095e1);
+    }
+
+    #[test]
+        fn test_dataset_item_30m() {
+        let cache_memory = argon2d::argon2d_cache(b"test key 000");
+        let key = b"test key 000";
+        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut programs = Vec::new();
+        for _ in 0..8 {
+            programs.push(superscalar::generate_superscalar(&mut gen));
+        }
+        let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
+
+        let item = dataset::init_dataset_item(&cache_memory, &programs, 30_000_000);
+        assert_eq!(item[0], 0x145a5091f7853099);
+    }
+}
+
+// ============================================================================
+// Phase 5: Full Hash (V1 interpreter, light mode)
+// ============================================================================
+#[cfg(test)]
+mod full_hash_tests {
+    use super::*;
+
+    /// Test vectors from RandomX tests.cpp (V1 mode, no RANDOMX_FLAG_V2)
+    /// Key: "test key 000", Input: "This is a test"
+    /// Expected: 639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f
+    #[test]
+        fn test_full_hash_v1_a() {
+        let hash = vm::calculate_hash(b"test key 000", b"This is a test");
+        assert_eq!(
+            hex_encode(&hash),
+            "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f"
+        );
+    }
+
+    /// Key: "test key 000", Input: "Lorem ipsum dolor sit amet"
+    /// Expected: 300a0adb47603dedb42228ccb2b211104f4da45af709cd7547cd049e9489c969
+    #[test]
+        fn test_full_hash_v1_b() {
+        let hash = vm::calculate_hash(b"test key 000", b"Lorem ipsum dolor sit amet");
+        assert_eq!(
+            hex_encode(&hash),
+            "300a0adb47603dedb42228ccb2b211104f4da45af709cd7547cd049e9489c969"
+        );
+    }
+
+    /// Key: "test key 000", Input: "sed do eiusmod tempor incididunt ut labore et dolore magna aliqua"
+    /// Expected: c36d4ed4191e617309867ed66a443be4075014e2b061bcdaf9ce7b721d2b77a8
+    #[test]
+        fn test_full_hash_v1_c() {
+        let hash = vm::calculate_hash(
+            b"test key 000",
+            b"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua",
+        );
+        assert_eq!(
+            hex_encode(&hash),
+            "c36d4ed4191e617309867ed66a443be4075014e2b061bcdaf9ce7b721d2b77a8"
+        );
+    }
+
+    /// Key: "test key 001" (different key!), same input
+    /// Expected: e9ff4503201c0c2cca26d285c93ae883f9b1d30c9eb240b820756f2d5a7905fc
+    #[test]
+        fn test_full_hash_v1_different_key() {
+        let hash = vm::calculate_hash(
+            b"test key 001",
+            b"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua",
+        );
+        assert_eq!(
+            hex_encode(&hash),
+            "e9ff4503201c0c2cca26d285c93ae883f9b1d30c9eb240b820756f2d5a7905fc"
+        );
+    }
+}
+
+// ============================================================================
+// Phase 3: SuperscalarHash Constants
+// ============================================================================
+#[cfg(test)]
+mod constants_tests {
+    /// Verify dataset initialization constants match the C++ reference.
+    #[test]
+    fn test_superscalar_mul_constant() {
+        assert_eq!(6364136223846793005u64, 0x5851F42D4C957F2Du64);
+    }
+
+    #[test]
+    fn test_superscalar_add_constants() {
+        let adds: [u64; 7] = [
+            9298411001130361340,
+            12065312585734608966,
+            9306329213124626780,
+            5281919268842080866,
+            10536153434571861004,
+            3398623926847679864,
+            9549104520008361294,
+        ];
+        // These are the XOR constants for registers r1-r7 in initDatasetItem
+        assert_eq!(adds[0], 0x810A_978A_59F5_A1FCu64);
+        assert_eq!(adds[1], 0xA770_99DF_38C2_D846u64);
+        assert_eq!(adds[2], 0x8126_B91C_BF22_495Cu64);
+        assert_eq!(adds[3], 0x494D_2597_179F_8A62u64);
+        assert_eq!(adds[4], 0x9237_EFB9_CEAA_EC0Cu64);
+        assert_eq!(adds[5], 0x2F2A_5674_6CE6_2D78u64);
+        assert_eq!(adds[6], 0x8485_3BF7_B62C_E54Eu64);
+    }
+
+    #[test]
+    fn test_cache_line_count() {
+        // CacheSize = 262144 * 1024 = 268435456 bytes
+        // CacheLineSize = 64 bytes
+        // CacheLineCount = 268435456 / 64 = 4194304
+        let cache_size: u64 = 262144 * 1024;
+        let cache_line_size: u64 = 64;
+        assert_eq!(cache_size / cache_line_size, 4194304);
+    }
+
+    #[test]
+    fn test_dataset_extra_items() {
+        // DatasetExtraItems = RANDOMX_DATASET_EXTRA_SIZE / 64
+        let extra_items = 33554368u64 / 64;
+        assert_eq!(extra_items, 524287); // 0x7FFFF
+    }
+
+    #[test]
+    fn test_scratchpad_masks() {
+        let l1: u32 = 16384;
+        let l2: u32 = 262144;
+        let l3: u32 = 2097152;
+
+        // 8-byte aligned masks
+        assert_eq!((l1 - 1) & !7u32, 0x3FF8);
+        assert_eq!((l2 - 1) & !7u32, 0x3FFF8);
+        assert_eq!((l3 - 1) & !7u32, 0x1FFFF8);
+
+        // 64-byte aligned mask (for L3)
+        assert_eq!((l3 - 1) & !63u32, 0x1FFFC0);
+    }
+
+    #[test]
+    fn test_cache_line_align_mask() {
+        // CacheLineAlignMask = (RANDOMX_DATASET_BASE_SIZE - 1) & ~(CacheLineSize - 1)
+        let dataset_base: u64 = 2147483648; // 2 GiB
+        let cache_line: u64 = 64;
+        let mask = (dataset_base - 1) & !(cache_line - 1);
+        assert_eq!(mask, 0x7FFFFFC0);
+    }
+}

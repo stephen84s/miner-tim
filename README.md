@@ -1,17 +1,21 @@
 # MinerTim - Android Monero Miner
 
-CPU-based Monero (XMR) mining app for Android with thermal and battery protection. Built with Kotlin + Rust.
+CPU-based Monero (XMR) miner for Android and macOS/Linux. Android app with thermal and battery protection (Kotlin UI + Rust JNI). Native CLI binary for desktop mining. Pure Rust mining engine — no C/FFI dependencies.
 
 > **Disclaimer:** Mining on mobile devices will generate heat, drain battery, and is generally unprofitable. This project is for educational purposes and Monero network support. Use on devices you own, at your own risk.
 
 ## Requirements
 
-### Device
+### Android Device
 - Android 5.0+ (API 21)
 - ARM, ARM64, x86, or x86_64 architecture
 - 2+ CPU cores, 2GB+ RAM recommended
 
-### Development Machine
+### Desktop (CLI)
+- **macOS** (tested) or Linux
+- **Rust 1.94+** via [rustup](https://rustup.rs)
+
+### Development (Android builds)
 - **macOS** (tested), Linux should also work
 - **Java 17** (e.g. Temurin via SDKMAN)
 - **Rust 1.94+** via [rustup](https://rustup.rs)
@@ -83,16 +87,75 @@ The Gradle build automatically cross-compiles the Rust native library for all 4 
 
 ## Build Commands
 
+All commands are available via `make help`.
+
 | Command | Description |
 |---|---|
-| `./gradlew assembleDebug` | Debug APK (auto-builds Rust) |
-| `./gradlew assembleRelease` | Release APK |
-| `./gradlew test` | Run unit tests |
-| `./gradlew connectedAndroidTest` | Run instrumentation tests (device required) |
-| `./gradlew clean` | Clean all build artifacts |
-| `cd app/src/main/rust && cargo check` | Quick Rust type-check (host target) |
+| `make build` | Debug APK (auto-builds Rust) |
+| `make release` | Release APK |
+| `make test` | Run unit tests |
+| `make rust-check` | Quick Rust type-check (host target) |
+| `make rust-test` | Run Rust unit tests |
+| `make cli` | Build CLI miner binary (native macOS/Linux) |
+| `make cli-run` | Build + run CLI miner (reads `mining.conf`) |
+| `make clean` | Clean all build artifacts |
 
-## Deploy to Device
+## Desktop CLI Mining
+
+The Rust mining engine can run natively on macOS/Linux without Android.
+
+### Quick Start
+
+```bash
+# 1. Configure
+cp mining.conf.example mining.conf
+# Edit mining.conf — set WALLET to your Monero address
+
+# 2. Build and run
+make cli-run
+```
+
+### Configuration
+
+Create `mining.conf` from the example:
+
+```bash
+cp mining.conf.example mining.conf
+```
+
+```ini
+# mining.conf
+POOL=pool.supportxmr.com:443
+WALLET=4...your_monero_address
+THREADS=2
+```
+
+Values can also be overridden on the command line:
+
+```bash
+make cli-run POOL=pool.hashvault.pro:443 WALLET=4...addr THREADS=4
+```
+
+Or run the binary directly:
+
+```bash
+cd app/src/main/rust
+cargo build --release --bin minertim
+./target/release/minertim pool.supportxmr.com:443 <wallet> 4
+```
+
+### Distributing the Binary
+
+The CLI binary is self-contained (pure Rust, no C dependencies). To share it:
+
+1. Build: `make cli`
+2. Binary is at `app/src/main/rust/target/release/minertim`
+3. For macOS distribution, codesign to avoid Gatekeeper warnings:
+   ```bash
+   codesign -s - app/src/main/rust/target/release/minertim  # ad-hoc (local use)
+   ```
+
+## Deploy to Device (Android)
 
 ### USB (ADB)
 
@@ -189,11 +252,14 @@ miner-tim/
 │       │   ├── Cargo.toml
 │       │   └── src/
 │       │       ├── lib.rs              # JNI bridge
+│       │       ├── bin/minertim.rs     # CLI binary entry point
 │       │       ├── miner.rs            # Mining workers
-│       │       ├── pool_connection.rs  # Stratum protocol
-│       │       └── randomx.rs          # RandomX hash algorithm
+│       │       ├── pool_connection.rs  # Stratum protocol (TCP/TLS)
+│       │       └── randomx/            # Pure Rust RandomX (light mode)
 │       ├── res/                        # Layouts, themes, drawables
 │       └── AndroidManifest.xml
+├── Makefile                            # Build targets (make help)
+├── mining.conf.example                 # CLI config template
 ├── build.gradle                        # Root: AGP 9.1.0 plugin
 ├── settings.gradle                     # Repository config
 ├── gradle/wrapper/                     # Gradle 9.4.1 wrapper
@@ -202,15 +268,16 @@ miner-tim/
 
 ## Architecture
 
-**Kotlin** handles the Android UI, services, configuration, and security validation. **Rust** handles the performance-critical mining engine, pool communication, and RandomX hashing — connected via JNI.
+**Kotlin** handles the Android UI, services, configuration, and security validation. **Rust** handles the performance-critical mining engine, pool communication, and RandomX hashing. The Rust crate builds as both a JNI library (Android) and a native CLI binary (macOS/Linux).
 
 ```
-UI (MainActivity) -> Service (MiningService) -> JNI (MiningCore.kt)
-                                                    |
-                                            Rust (libminertim.so)
-                                            ├── miner.rs (thread pool)
-                                            ├── pool_connection.rs (Stratum TCP)
-                                            └── randomx.rs (hash computation)
+Android:  UI (MainActivity) -> Service (MiningService) -> JNI (MiningCore.kt)
+                                                              |
+Desktop:  CLI (bin/minertim.rs) ─────────────────────────────┘
+                                                              |
+                                                  Rust (miner.rs)
+                                                  ├── pool_connection.rs (Stratum TCP/TLS)
+                                                  └── randomx/ (pure Rust, light mode)
 ```
 
 For detailed architecture documentation, see [CLAUDE.md](CLAUDE.md).

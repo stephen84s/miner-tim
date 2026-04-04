@@ -1,4 +1,7 @@
-.PHONY: build release test clean install run logs rust-check rust-build help
+# Load config if present (copy mining.conf.example to mining.conf)
+-include mining.conf
+
+.PHONY: build release test clean install run logs rust-check rust-build rust-test cli cli-run help
 
 # Default target
 help:
@@ -16,6 +19,8 @@ help:
 	@echo "  make rust-check   - Quick Rust type-check (host target)"
 	@echo "  make rust-build   - Build Rust for single ABI (arm64-v8a)"
 	@echo "  make rust-test    - Run Rust unit tests"
+	@echo "  make cli          - Build CLI miner binary (native macOS)"
+	@echo "  make cli-run      - Run CLI miner (usage: make cli-run POOL=host:port WALLET=addr [THREADS=N])"
 	@echo ""
 
 # Android builds
@@ -54,3 +59,17 @@ rust-build:
 
 rust-test:
 	cd app/src/main/rust && cargo test
+
+# CLI miner (native macOS/Linux) — defaults from mining.conf
+POOL ?= pool.supportxmr.com:443
+WALLET ?=
+THREADS ?= 2
+
+cli:
+	cd app/src/main/rust && cargo build --release --bin minertim
+
+cli-run: cli
+ifndef WALLET
+	$(error WALLET is required. Usage: make cli-run POOL=host:port WALLET=your_address THREADS=4)
+endif
+	cd app/src/main/rust && ./target/release/minertim $(POOL) $(WALLET) $(THREADS)

@@ -1,6 +1,6 @@
 # CLAUDE.md - MinerTim
 
-Android Monero (XMR) CPU mining app. Kotlin UI/services + Rust native mining engine via JNI. Designed for older Android devices with thermal/battery protection.
+Monero (XMR) CPU mining app. Runs on Android (Kotlin UI + Rust JNI) and natively on macOS/Linux (CLI binary). Pure Rust mining engine — no C/FFI dependencies. Designed for older Android devices with thermal/battery protection.
 
 ## Build & Run
 
@@ -10,20 +10,28 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
 ```
 
-**Commands:**
+**Commands (via Makefile):**
 ```bash
-./gradlew assembleDebug          # Build debug APK (auto-builds Rust)
-./gradlew assembleRelease        # Build release APK
-./gradlew test                   # Unit tests
-./gradlew connectedAndroidTest   # Instrumentation tests
-./gradlew clean                  # Clean build artifacts
-
-# Rust only (fast iteration)
-cd app/src/main/rust && cargo check                      # Type-check (host target)
-cd app/src/main/rust && cargo ndk -t arm64-v8a -o ../jniLibs build --release  # Single ABI
+make help              # List all targets
+make build             # Debug APK (auto-builds Rust)
+make release           # Release APK
+make test              # Unit tests
+make rust-check        # Quick Rust type-check (host target)
+make rust-test         # Rust unit tests
+make cli               # Build CLI miner binary (native macOS/Linux)
+make cli-run           # Build + run CLI miner (reads mining.conf)
 ```
 
-**Prerequisites:** Rust 1.94+ via rustup, `cargo-ndk`, Android SDK (platform 35, NDK 26.1), Java 17.
+**CLI miner configuration:** Copy `mining.conf.example` to `mining.conf` and set `POOL`, `WALLET`, `THREADS`. Values can also be passed on the command line: `make cli-run POOL=host:port WALLET=addr THREADS=4`.
+
+**Direct commands (without Make):**
+```bash
+./gradlew assembleDebug          # Build debug APK (auto-builds Rust)
+cd app/src/main/rust && cargo check                      # Type-check (host target)
+cd app/src/main/rust && cargo build --release --bin minertim  # Build CLI binary
+```
+
+**Prerequisites:** Rust 1.94+ via rustup, `cargo-ndk` (Android only), Android SDK (platform 35, NDK 26.1), Java 17.
 Rust Android targets: `rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android`
 
 ## Versions
@@ -54,12 +62,23 @@ app/src/main/
 │   └── security/
 │       └── SecurityValidator.kt     # Address validation, pool whitelist, input sanitization
 ├── rust/                             # Native mining engine
-│   ├── Cargo.toml                   # jni 0.22, serde_json, android_logger
+│   ├── Cargo.toml                   # jni 0.22, serde_json, android_logger, rustls
 │   └── src/
 │       ├── lib.rs                   # JNI entry point (9 exported functions)
+│       ├── bin/minertim.rs          # CLI binary entry point (native macOS/Linux)
 │       ├── miner.rs                 # Worker thread pool, hashrate tracking, share submission
-│       ├── pool_connection.rs       # Stratum protocol: TCP socket, JSON-RPC, keepalive
-│       └── randomx.rs              # RandomX VM: Blake2b, SipHash, program gen/exec
+│       ├── pool_connection.rs       # Stratum protocol: TCP/TLS socket, JSON-RPC, keepalive
+│       └── randomx/                 # Pure Rust RandomX implementation (rx/0 light mode)
+│           ├── mod.rs               # Module exports
+│           ├── vm.rs                # RandomX VM: program compilation & execution, hash computation
+│           ├── blake2b.rs           # Blake2b hash
+│           ├── blake2gen.rs         # Blake2 generator for key/program derivation
+│           ├── soft_aes.rs          # Software AES (no hardware intrinsics)
+│           ├── aes_hash.rs          # AES-based hash functions (fillAes1Rx4, hashAes1Rx4)
+│           ├── argon2d.rs           # Argon2d cache initialization (256 MiB)
+│           ├── superscalar.rs       # SuperscalarHash program generation
+│           ├── dataset.rs           # Dataset item computation from cache
+│           └── tests.rs             # 31 test vectors (Blake2b, AES, Argon2d, full hash)
 ├── res/
 │   ├── layout/activity_main.xml    # Material CardView layout
 │   ├── mipmap-anydpi-v26/          # Adaptive icons (requires SDK 26+)
@@ -182,6 +201,23 @@ NDK path is resolved from `ANDROID_NDK_HOME` env var, falling back to `$ANDROID_
 - **Rust:** snake_case functions/variables, PascalCase types, UPPER_SNAKE_CASE consts
 - **XML resources:** snake_case (`activity_main`, `ic_play_arrow`)
 - **Logging:** Android Log API with TAG constants (Kotlin), `log` crate with `android_logger` (Rust)
+
+## CLI Binary
+
+The Rust crate builds as both `cdylib` (Android JNI) and `rlib` (Rust library). A CLI binary at `src/bin/minertim.rs` reuses the same `Miner` engine for native desktop mining.
+
+```bash
+# Build and run directly
+cd app/src/main/rust && cargo build --release --bin minertim
+./target/release/minertim pool.supportxmr.com:443 <wallet> 4
+
+# Or via Makefile (reads mining.conf for defaults)
+make cli-run
+```
+
+The CLI uses `env_logger` (instead of `android_logger`) and handles Ctrl+C via `ctrlc` crate. It prints hashrate/share stats every 10 seconds.
+
+**Distribution:** The binary is self-contained (pure Rust, no C dependencies). For macOS distribution to others, build a universal binary with `lipo` and codesign + notarize to avoid Gatekeeper warnings.
 
 ## Known Issues / Legacy
 - AES encryption uses ECB mode (`AES/ECB/PKCS5Padding`) which is not semantically secure. Should migrate to GCM.

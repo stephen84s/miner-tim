@@ -1,7 +1,6 @@
-mod miner;
-mod pool_connection;
-#[allow(dead_code)]
-mod randomx;
+pub mod miner;
+pub mod pool_connection;
+pub mod randomx;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};

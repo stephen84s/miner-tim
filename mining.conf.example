@@ -1,0 +1,7 @@
+# MinerTim CLI configuration
+# Copy to mining.conf and fill in your values:
+#   cp mining.conf.example mining.conf
+
+POOL=pool.supportxmr.com:443
+WALLET=YOUR_WALLET_ADDRESS_HERE
+THREADS=2

@@ -13,7 +13,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 3 || args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 light mode)");
+        eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
         eprintln!("Usage: {} <pool:port> <wallet> [threads]", args[0]);
         eprintln!();
@@ -71,18 +71,80 @@ fn main() {
         if !mining_active.load(Ordering::SeqCst) {
             break;
         }
-        let hashrate = miner.get_hashrate();
+
+        let snap = miner.snapshot_hashrates();
         let accepted = miner.get_accepted_shares();
         let rejected = miner.get_rejected_shares();
+        let difficulty = miner.get_difficulty();
+        let best = miner.get_best_hash_val();
+        let share_stats = miner.get_share_stats();
+
+        let fmt_rate = |r: Option<f64>| match r {
+            Some(v) => format!("{:.1}", v),
+            None => "-".to_string(),
+        };
+
+        let current = snap.rate_1m.or(snap.rate_5m).unwrap_or(0.0);
+
+        // Average time between shares at current hashrate
+        let avg_share_secs = if current > 0.0 && difficulty > 0 {
+            Some(difficulty as f64 / current)
+        } else {
+            None
+        };
+
+        // Elapsed since last share (or since start if no shares yet)
+        let elapsed_str = match share_stats.last_found_elapsed_secs {
+            Some(e) => format_duration(e),
+            None => "?".to_string(),
+        };
+
+        let avg_str = match avg_share_secs {
+            Some(s) => format_duration(s),
+            None => "?".to_string(),
+        };
+
+        let target_val = if difficulty > 0 { 0xFFFFFFFF_u64 / difficulty } else { 0 };
+        let progress = if target_val > 0 && best < u32::MAX {
+            let pct = (target_val as f64 / best as f64 * 100.0).min(999.0);
+            format!("best={} target={} ({:.0}%)", best, target_val, pct)
+        } else {
+            "waiting".to_string()
+        };
+
+        let share_label = if share_stats.total_found > 0 {
+            format!("since last share")
+        } else {
+            format!("no shares yet")
+        };
+
         log::info!(
-            "Hashrate: {:.2} H/s | Accepted: {} | Rejected: {}",
-            hashrate,
+            "H/s 1m:{} 5m:{} 10m:{} | Shares: {}/{} (found:{}) | Diff: {} | {} elapsed ({}, avg {}) | {}",
+            fmt_rate(snap.rate_1m),
+            fmt_rate(snap.rate_5m),
+            fmt_rate(snap.rate_10m),
             accepted,
-            rejected
+            rejected,
+            share_stats.total_found,
+            difficulty,
+            elapsed_str,
+            share_label,
+            avg_str,
+            progress,
         );
     }
 
     miner.stop();
     log::info!("Miner stopped. Final stats: {} accepted, {} rejected",
         miner.get_accepted_shares(), miner.get_rejected_shares());
+}
+
+fn format_duration(secs: f64) -> String {
+    if secs < 60.0 {
+        format!("{:.0}s", secs)
+    } else if secs < 3600.0 {
+        format!("{:.0}m{:.0}s", secs / 60.0, secs % 60.0)
+    } else {
+        format!("{:.0}h{:.0}m", secs / 3600.0, (secs % 3600.0) / 60.0)
+    }
 }

@@ -1,19 +1,19 @@
 // RandomX VM - program execution and full hash calculation
 // Reference: RandomX src/vm_interpreted.cpp, src/virtual_machine.cpp, src/bytecode_machine.cpp
 
-use super::aes_hash::{fill_aes_1rx4, fill_aes_4rx4, hash_aes_1rx4};
+use super::aes_hash::{fill_aes_1rx4, fill_aes_4rx4, hash_aes_1rx4, hash_and_fill_aes_1rx4};
 use super::argon2d::argon2d_cache;
 use super::blake2b::{blake2b, blake2b_512};
 use super::blake2gen::Blake2Generator;
-use super::dataset::init_dataset_item;
-use super::soft_aes::{soft_aesdec, soft_aesenc};
+use super::dataset::{init_dataset_item, RandomXDataset};
 use super::superscalar::{generate_superscalar, randomx_reciprocal, SuperscalarProgram};
+use std::sync::Arc;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-const RANDOMX_PROGRAM_SIZE: usize = 256; // V1
+pub(crate) const RANDOMX_PROGRAM_SIZE: usize = 256; // V1
 const RANDOMX_PROGRAM_ITERATIONS: usize = 2048;
 const RANDOMX_PROGRAM_COUNT: usize = 8;
 const RANDOMX_PROGRAM_MAX_SIZE: usize = 384;
@@ -90,7 +90,7 @@ const CEIL_ISTORE: u16 = CEIL_CFROUND + 16;     // 256
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum InstructionType {
+pub(crate) enum InstructionType {
     IaddRs,
     IaddM,
     IsubR,
@@ -162,22 +162,22 @@ impl RawInstruction {
 // Compiled bytecode instruction
 // ============================================================================
 
-struct BytecodeInstruction {
-    itype: InstructionType,
-    dst: usize,  // register index
-    src: usize,  // register index (or 8 for "zero"/immediate)
-    imm: u64,
-    mem_mask: u32,
-    shift: u32,
-    target: i16,  // for CBRANCH
+pub(crate) struct BytecodeInstruction {
+    pub(crate) itype: InstructionType,
+    pub(crate) dst: usize,  // register index
+    pub(crate) src: usize,  // register index (or 8 for "zero"/immediate)
+    pub(crate) imm: u64,
+    pub(crate) mem_mask: u32,
+    pub(crate) shift: u32,
+    pub(crate) target: i16,  // for CBRANCH
     // For FP instructions: dst_is_e indicates whether dst references e[] or f[]
-    dst_is_e: bool,
+    pub(crate) dst_is_e: bool,
     // For FSWAP: whether dst is in e-register group
-    fswap_is_e: bool,
+    pub(crate) fswap_is_e: bool,
 }
 
 impl BytecodeInstruction {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         BytecodeInstruction {
             itype: InstructionType::Nop,
             dst: 0,
@@ -196,15 +196,16 @@ impl BytecodeInstruction {
 // VM register file
 // ============================================================================
 
-struct NativeRegisterFile {
-    r: [u64; REGISTERS_COUNT],
-    f: [(f64, f64); REGISTER_COUNT_FLT],
-    e: [(f64, f64); REGISTER_COUNT_FLT],
-    a: [(f64, f64); REGISTER_COUNT_FLT],
+#[repr(C)]
+pub(crate) struct NativeRegisterFile {
+    pub(crate) r: [u64; REGISTERS_COUNT],
+    pub(crate) f: [(f64, f64); REGISTER_COUNT_FLT],
+    pub(crate) e: [(f64, f64); REGISTER_COUNT_FLT],
+    pub(crate) a: [(f64, f64); REGISTER_COUNT_FLT],
 }
 
 impl NativeRegisterFile {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         NativeRegisterFile {
             r: [0u64; REGISTERS_COUNT],
             f: [(0.0, 0.0); REGISTER_COUNT_FLT],
@@ -212,14 +213,45 @@ impl NativeRegisterFile {
             a: [(0.0, 0.0); REGISTER_COUNT_FLT],
         }
     }
+
+    /// Unchecked register access — indices are always < 8 (masked during compilation).
+    #[inline(always)]
+    unsafe fn r(&self, i: usize) -> u64 {
+        *self.r.get_unchecked(i)
+    }
+    #[inline(always)]
+    unsafe fn r_mut(&mut self, i: usize) -> &mut u64 {
+        self.r.get_unchecked_mut(i)
+    }
+    #[inline(always)]
+    unsafe fn f(&self, i: usize) -> (f64, f64) {
+        *self.f.get_unchecked(i)
+    }
+    #[inline(always)]
+    unsafe fn f_mut(&mut self, i: usize) -> &mut (f64, f64) {
+        self.f.get_unchecked_mut(i)
+    }
+    #[inline(always)]
+    unsafe fn e(&self, i: usize) -> (f64, f64) {
+        *self.e.get_unchecked(i)
+    }
+    #[inline(always)]
+    unsafe fn e_mut(&mut self, i: usize) -> &mut (f64, f64) {
+        self.e.get_unchecked_mut(i)
+    }
+    #[inline(always)]
+    unsafe fn a(&self, i: usize) -> (f64, f64) {
+        *self.a.get_unchecked(i)
+    }
 }
 
-struct ProgramConfiguration {
-    e_mask: [u64; 2],
-    read_reg0: usize,
-    read_reg1: usize,
-    read_reg2: usize,
-    read_reg3: usize,
+#[repr(C)]
+pub(crate) struct ProgramConfiguration {
+    pub(crate) e_mask: [u64; 2],
+    pub(crate) read_reg0: usize,
+    pub(crate) read_reg1: usize,
+    pub(crate) read_reg2: usize,
+    pub(crate) read_reg3: usize,
 }
 
 // ============================================================================
@@ -233,12 +265,18 @@ fn sign_extend_2s_compl(x: u32) -> u64 {
 
 #[inline(always)]
 fn load64(scratchpad: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(scratchpad[offset..offset + 8].try_into().unwrap())
+    // Safety: callers always mask offset to be within scratchpad bounds
+    // (SCRATCHPAD_L1/L2/L3_MASK ensures offset + 8 <= SCRATCHPAD_L3_SIZE)
+    unsafe {
+        (scratchpad.as_ptr().add(offset) as *const u64).read_unaligned()
+    }
 }
 
 #[inline(always)]
 fn store64(scratchpad: &mut [u8], offset: usize, val: u64) {
-    scratchpad[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
+    unsafe {
+        (scratchpad.as_mut_ptr().add(offset) as *mut u64).write_unaligned(val);
+    }
 }
 
 #[inline(always)]
@@ -332,9 +370,11 @@ fn restore_rounding_mode(saved: u32) {
 /// Reads 8 bytes: first 4 as i32 -> f64 (lo), next 4 as i32 -> f64 (hi)
 #[inline(always)]
 fn cvt_packed_int_vec_f128(scratchpad: &[u8], offset: usize) -> (f64, f64) {
-    let lo_i32 = i32::from_le_bytes(scratchpad[offset..offset + 4].try_into().unwrap());
-    let hi_i32 = i32::from_le_bytes(scratchpad[offset + 4..offset + 8].try_into().unwrap());
-    (lo_i32 as f64, hi_i32 as f64)
+    unsafe {
+        let lo_i32 = (scratchpad.as_ptr().add(offset) as *const i32).read_unaligned();
+        let hi_i32 = (scratchpad.as_ptr().add(offset + 4) as *const i32).read_unaligned();
+        (lo_i32 as f64, hi_i32 as f64)
+    }
 }
 
 /// Get small positive float bits from entropy value
@@ -389,8 +429,10 @@ fn swap_f128(a: (f64, f64)) -> (f64, f64) {
 /// Store (f64, f64) to scratchpad at offset
 #[inline(always)]
 fn store_f128(scratchpad: &mut [u8], offset: usize, val: (f64, f64)) {
-    scratchpad[offset..offset + 8].copy_from_slice(&f64::to_bits(val.0).to_le_bytes());
-    scratchpad[offset + 8..offset + 16].copy_from_slice(&f64::to_bits(val.1).to_le_bytes());
+    unsafe {
+        (scratchpad.as_mut_ptr().add(offset) as *mut u64).write_unaligned(f64::to_bits(val.0));
+        (scratchpad.as_mut_ptr().add(offset + 8) as *mut u64).write_unaligned(f64::to_bits(val.1));
+    }
 }
 
 /// Serialize the register file to 256 bytes (little-endian) for Blake2b
@@ -428,17 +470,17 @@ fn serialize_register_file(nreg: &NativeRegisterFile) -> [u8; 256] {
 fn compile_program(
     program_bytes: &[u8], // raw program bytes (instructions start at offset 128)
     register_usage: &mut [i32; REGISTERS_COUNT],
-) -> Vec<BytecodeInstruction> {
+    bytecode: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+) {
     for r in register_usage.iter_mut() {
         *r = -1;
     }
 
-    let mut bytecode = Vec::with_capacity(RANDOMX_PROGRAM_SIZE);
-
     for i in 0..RANDOMX_PROGRAM_SIZE {
         let instr_offset = INSTRUCTIONS_OFFSET + i * 8; // instructions after entropy
         let instr = RawInstruction::from_bytes(&program_bytes[instr_offset..instr_offset + 8]);
-        let mut ibc = BytecodeInstruction::new();
+        let ibc = &mut bytecode[i];
+        *ibc = BytecodeInstruction::new();
 
         let opcode = instr.opcode as u16;
 
@@ -781,10 +823,7 @@ fn compile_program(
             }
         }
 
-        bytecode.push(ibc);
     }
-
-    bytecode
 }
 
 // ============================================================================
@@ -792,285 +831,207 @@ fn compile_program(
 // ============================================================================
 
 fn execute_bytecode(
-    bytecode: &[BytecodeInstruction],
+    bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
     config: &ProgramConfiguration,
 ) {
     let mut pc: i32 = 0;
-    let len = bytecode.len() as i32;
+    let len = RANDOMX_PROGRAM_SIZE as i32;
 
+    // Safety: all register indices (dst, src) are < 8 (masked to % 8 during compilation).
+    // All scratchpad offsets are masked to be within SCRATCHPAD_L3_SIZE.
+    // Bytecode indices are bounded by RANDOMX_PROGRAM_SIZE.
+    unsafe {
     while pc < len {
-        let ibc = &bytecode[pc as usize];
+        let ibc = bytecode.get_unchecked(pc as usize);
         match ibc.itype {
             InstructionType::IaddRs => {
-                let src_val = nreg.r[ibc.src];
-                nreg.r[ibc.dst] = nreg.r[ibc.dst]
+                let src_val = nreg.r(ibc.src);
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst)
                     .wrapping_add((src_val << ibc.shift).wrapping_add(ibc.imm));
             }
             InstructionType::IaddM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_add(load64(scratchpad, addr));
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_add(load64(scratchpad, addr));
             }
             InstructionType::IsubR => {
-                let src_val = if ibc.src < 8 {
-                    nreg.r[ibc.src]
-                } else {
-                    ibc.imm
-                };
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_sub(src_val);
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { ibc.imm };
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_sub(src_val);
             }
             InstructionType::IsubM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_sub(load64(scratchpad, addr));
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_sub(load64(scratchpad, addr));
             }
             InstructionType::ImulR => {
-                let src_val = if ibc.src < 8 {
-                    nreg.r[ibc.src]
-                } else {
-                    ibc.imm
-                };
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_mul(src_val);
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { ibc.imm };
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_mul(src_val);
             }
             InstructionType::ImulM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_mul(load64(scratchpad, addr));
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_mul(load64(scratchpad, addr));
             }
             InstructionType::ImulhR => {
-                nreg.r[ibc.dst] = mulh(nreg.r[ibc.dst], nreg.r[ibc.src]);
+                *nreg.r_mut(ibc.dst) = mulh(nreg.r(ibc.dst), nreg.r(ibc.src));
             }
             InstructionType::ImulhM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] = mulh(nreg.r[ibc.dst], load64(scratchpad, addr));
+                *nreg.r_mut(ibc.dst) = mulh(nreg.r(ibc.dst), load64(scratchpad, addr));
             }
             InstructionType::IsmulhR => {
-                nreg.r[ibc.dst] =
-                    smulh(nreg.r[ibc.dst] as i64, nreg.r[ibc.src] as i64);
+                *nreg.r_mut(ibc.dst) = smulh(nreg.r(ibc.dst) as i64, nreg.r(ibc.src) as i64);
             }
             InstructionType::IsmulhM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] =
-                    smulh(nreg.r[ibc.dst] as i64, load64(scratchpad, addr) as i64);
+                *nreg.r_mut(ibc.dst) = smulh(nreg.r(ibc.dst) as i64, load64(scratchpad, addr) as i64);
             }
             InstructionType::InegR => {
-                nreg.r[ibc.dst] = (!nreg.r[ibc.dst]).wrapping_add(1);
+                *nreg.r_mut(ibc.dst) = (!nreg.r(ibc.dst)).wrapping_add(1);
             }
             InstructionType::IxorR => {
-                let src_val = if ibc.src < 8 {
-                    nreg.r[ibc.src]
-                } else {
-                    ibc.imm
-                };
-                nreg.r[ibc.dst] ^= src_val;
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { ibc.imm };
+                *nreg.r_mut(ibc.dst) ^= src_val;
             }
             InstructionType::IxorM => {
-                let src_val = if ibc.src < 8 { nreg.r[ibc.src] } else { 0 };
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { 0 };
                 let addr = (src_val.wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                nreg.r[ibc.dst] ^= load64(scratchpad, addr);
+                *nreg.r_mut(ibc.dst) ^= load64(scratchpad, addr);
             }
             InstructionType::IrorR => {
-                let src_val = if ibc.src < 8 {
-                    nreg.r[ibc.src]
-                } else {
-                    ibc.imm
-                };
-                nreg.r[ibc.dst] = rotr64(nreg.r[ibc.dst], src_val);
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { ibc.imm };
+                *nreg.r_mut(ibc.dst) = rotr64(nreg.r(ibc.dst), src_val);
             }
             InstructionType::IrolR => {
-                let src_val = if ibc.src < 8 {
-                    nreg.r[ibc.src]
-                } else {
-                    ibc.imm
-                };
-                nreg.r[ibc.dst] = rotl64(nreg.r[ibc.dst], src_val);
+                let src_val = if ibc.src < 8 { nreg.r(ibc.src) } else { ibc.imm };
+                *nreg.r_mut(ibc.dst) = rotl64(nreg.r(ibc.dst), src_val);
             }
             InstructionType::IswapR => {
-                let tmp = nreg.r[ibc.dst];
-                nreg.r[ibc.dst] = nreg.r[ibc.src];
-                nreg.r[ibc.src] = tmp;
+                let tmp = nreg.r(ibc.dst);
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.src);
+                *nreg.r_mut(ibc.src) = tmp;
             }
             InstructionType::FswapR => {
                 if ibc.fswap_is_e {
-                    nreg.e[ibc.dst] = swap_f128(nreg.e[ibc.dst]);
+                    *nreg.e_mut(ibc.dst) = swap_f128(nreg.e(ibc.dst));
                 } else {
-                    nreg.f[ibc.dst] = swap_f128(nreg.f[ibc.dst]);
+                    *nreg.f_mut(ibc.dst) = swap_f128(nreg.f(ibc.dst));
                 }
             }
             InstructionType::FaddR => {
-                let (lo, hi) = nreg.f[ibc.dst];
-                let (slo, shi) = nreg.a[ibc.src];
-                nreg.f[ibc.dst] = (lo + slo, hi + shi);
+                let (lo, hi) = nreg.f(ibc.dst);
+                let (slo, shi) = nreg.a(ibc.src);
+                *nreg.f_mut(ibc.dst) = (lo + slo, hi + shi);
             }
             InstructionType::FaddM => {
-                let addr =
-                    (nreg.r[ibc.src].wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
+                let addr = (nreg.r(ibc.src).wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
                 let fsrc = cvt_packed_int_vec_f128(scratchpad, addr);
-                let (lo, hi) = nreg.f[ibc.dst];
-                nreg.f[ibc.dst] = (lo + fsrc.0, hi + fsrc.1);
+                let (lo, hi) = nreg.f(ibc.dst);
+                *nreg.f_mut(ibc.dst) = (lo + fsrc.0, hi + fsrc.1);
             }
             InstructionType::FsubR => {
-                let (lo, hi) = nreg.f[ibc.dst];
-                let (slo, shi) = nreg.a[ibc.src];
-                nreg.f[ibc.dst] = (lo - slo, hi - shi);
+                let (lo, hi) = nreg.f(ibc.dst);
+                let (slo, shi) = nreg.a(ibc.src);
+                *nreg.f_mut(ibc.dst) = (lo - slo, hi - shi);
             }
             InstructionType::FsubM => {
-                let addr =
-                    (nreg.r[ibc.src].wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
+                let addr = (nreg.r(ibc.src).wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
                 let fsrc = cvt_packed_int_vec_f128(scratchpad, addr);
-                let (lo, hi) = nreg.f[ibc.dst];
-                nreg.f[ibc.dst] = (lo - fsrc.0, hi - fsrc.1);
+                let (lo, hi) = nreg.f(ibc.dst);
+                *nreg.f_mut(ibc.dst) = (lo - fsrc.0, hi - fsrc.1);
             }
             InstructionType::FscalR => {
                 let mask = 0x80F0000000000000u64;
-                let (lo, hi) = nreg.f[ibc.dst];
-                nreg.f[ibc.dst] = (
+                let (lo, hi) = nreg.f(ibc.dst);
+                *nreg.f_mut(ibc.dst) = (
                     f64::from_bits(f64::to_bits(lo) ^ mask),
                     f64::from_bits(f64::to_bits(hi) ^ mask),
                 );
             }
             InstructionType::FmulR => {
-                let (lo, hi) = nreg.e[ibc.dst];
-                let (slo, shi) = nreg.a[ibc.src];
-                nreg.e[ibc.dst] = (lo * slo, hi * shi);
+                let (lo, hi) = nreg.e(ibc.dst);
+                let (slo, shi) = nreg.a(ibc.src);
+                *nreg.e_mut(ibc.dst) = (lo * slo, hi * shi);
             }
             InstructionType::FdivM => {
-                let addr =
-                    (nreg.r[ibc.src].wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
+                let addr = (nreg.r(ibc.src).wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
                 let fsrc = mask_register_exponent_mantissa(
                     config,
                     cvt_packed_int_vec_f128(scratchpad, addr),
                 );
-                let (lo, hi) = nreg.e[ibc.dst];
-                nreg.e[ibc.dst] = (lo / fsrc.0, hi / fsrc.1);
+                let (lo, hi) = nreg.e(ibc.dst);
+                *nreg.e_mut(ibc.dst) = (lo / fsrc.0, hi / fsrc.1);
             }
             InstructionType::FsqrtR => {
-                let (lo, hi) = nreg.e[ibc.dst];
-                nreg.e[ibc.dst] = (lo.sqrt(), hi.sqrt());
+                let (lo, hi) = nreg.e(ibc.dst);
+                *nreg.e_mut(ibc.dst) = (lo.sqrt(), hi.sqrt());
             }
             InstructionType::Cbranch => {
-                nreg.r[ibc.dst] = nreg.r[ibc.dst].wrapping_add(ibc.imm);
-                if (nreg.r[ibc.dst] & ibc.mem_mask as u64) == 0 {
+                *nreg.r_mut(ibc.dst) = nreg.r(ibc.dst).wrapping_add(ibc.imm);
+                if (nreg.r(ibc.dst) & ibc.mem_mask as u64) == 0 {
                     pc = ibc.target as i32;
                 }
             }
             InstructionType::Cfround => {
-                let src_val = nreg.r[ibc.src];
-                let rm = (src_val.rotate_right(ibc.imm as u32)) & 3;
+                let rm = (nreg.r(ibc.src).rotate_right(ibc.imm as u32)) & 3;
                 set_rounding_mode(rm as u32);
             }
             InstructionType::Istore => {
-                let addr =
-                    (nreg.r[ibc.dst].wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
-                store64(scratchpad, addr, nreg.r[ibc.src]);
+                let addr = (nreg.r(ibc.dst).wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
+                store64(scratchpad, addr, nreg.r(ibc.src));
             }
             InstructionType::Nop => {}
         }
 
         pc += 1;
     }
-}
-
-// ============================================================================
-// hashAndFillAes1Rx4 - combined hash + fill
-// ============================================================================
-
-/// Combined hash-and-fill: hashes scratchpad into 64-byte hash while
-/// simultaneously refilling it using fill_state.
-/// This matches the C++ hashAndFillAes1Rx4 function.
-fn hash_and_fill_aes_1rx4(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) {
-    use super::aes_hash::{HASH_1R_STATE0, HASH_1R_STATE1, HASH_1R_STATE2, HASH_1R_STATE3};
-    use super::aes_hash::{HASH_1R_XKEY0, HASH_1R_XKEY1};
-    use super::aes_hash::{GEN_1R_KEY0, GEN_1R_KEY1, GEN_1R_KEY2, GEN_1R_KEY3};
-
-    let scratchpad_size = scratchpad.len();
-    assert!(scratchpad_size % 64 == 0);
-
-    fn load_block(data: &[u8], offset: usize) -> [u8; 16] {
-        data[offset..offset + 16].try_into().unwrap()
-    }
-    fn store_block(data: &mut [u8], offset: usize, block: &[u8; 16]) {
-        data[offset..offset + 16].copy_from_slice(block);
-    }
-
-    // Initial hash state
-    let mut hs0 = HASH_1R_STATE0;
-    let mut hs1 = HASH_1R_STATE1;
-    let mut hs2 = HASH_1R_STATE2;
-    let mut hs3 = HASH_1R_STATE3;
-
-    // Fill state
-    let mut fs0 = load_block(fill_state, 0);
-    let mut fs1 = load_block(fill_state, 16);
-    let mut fs2 = load_block(fill_state, 32);
-    let mut fs3 = load_block(fill_state, 48);
-
-    let mut offset: usize = 0;
-    while offset < scratchpad_size {
-        // Hash: use current scratchpad data as round keys
-        let in0 = load_block(scratchpad, offset);
-        let in1 = load_block(scratchpad, offset + 16);
-        let in2 = load_block(scratchpad, offset + 32);
-        let in3 = load_block(scratchpad, offset + 48);
-
-        hs0 = soft_aesenc(&hs0, &in0);
-        hs1 = soft_aesdec(&hs1, &in1);
-        hs2 = soft_aesenc(&hs2, &in2);
-        hs3 = soft_aesdec(&hs3, &in3);
-
-        // Fill: generate new data
-        fs0 = soft_aesdec(&fs0, &GEN_1R_KEY0);
-        fs1 = soft_aesenc(&fs1, &GEN_1R_KEY1);
-        fs2 = soft_aesdec(&fs2, &GEN_1R_KEY2);
-        fs3 = soft_aesenc(&fs3, &GEN_1R_KEY3);
-
-        // Write fill data back to scratchpad
-        store_block(scratchpad, offset, &fs0);
-        store_block(scratchpad, offset + 16, &fs1);
-        store_block(scratchpad, offset + 32, &fs2);
-        store_block(scratchpad, offset + 48, &fs3);
-
-        offset += 64;
-    }
-
-    // Save fill state
-    store_block(fill_state, 0, &fs0);
-    store_block(fill_state, 16, &fs1);
-    store_block(fill_state, 32, &fs2);
-    store_block(fill_state, 48, &fs3);
-
-    // Two extra hash finalization rounds
-    hs0 = soft_aesenc(&hs0, &HASH_1R_XKEY0);
-    hs1 = soft_aesdec(&hs1, &HASH_1R_XKEY0);
-    hs2 = soft_aesenc(&hs2, &HASH_1R_XKEY0);
-    hs3 = soft_aesdec(&hs3, &HASH_1R_XKEY0);
-
-    hs0 = soft_aesenc(&hs0, &HASH_1R_XKEY1);
-    hs1 = soft_aesdec(&hs1, &HASH_1R_XKEY1);
-    hs2 = soft_aesenc(&hs2, &HASH_1R_XKEY1);
-    hs3 = soft_aesdec(&hs3, &HASH_1R_XKEY1);
-
-    // Output hash
-    store_block(hash_out, 0, &hs0);
-    store_block(hash_out, 16, &hs1);
-    store_block(hash_out, 32, &hs2);
-    store_block(hash_out, 48, &hs3);
+    } // unsafe
 }
 
 // ============================================================================
 // VM execution for one program chain
 // ============================================================================
 
+#[cfg(target_arch = "aarch64")]
 fn execute_vm(
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
-    program_bytes: &[u8], // raw program (entropy + instructions)
+    program_bytes: &[u8],
     cache_memory: &[u8],
     ss_programs: &[SuperscalarProgram; 8],
+    dataset: Option<&RandomXDataset>,
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    jit: Option<&mut super::jit::JitCompiler>,
+) {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn execute_vm(
+    nreg: &mut NativeRegisterFile,
+    scratchpad: &mut [u8],
+    program_bytes: &[u8],
+    cache_memory: &[u8],
+    ss_programs: &[SuperscalarProgram; 8],
+    dataset: Option<&RandomXDataset>,
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+) {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf)
+}
+
+fn execute_vm_inner(
+    nreg: &mut NativeRegisterFile,
+    scratchpad: &mut [u8],
+    program_bytes: &[u8],
+    cache_memory: &[u8],
+    ss_programs: &[SuperscalarProgram; 8],
+    dataset: Option<&RandomXDataset>,
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    #[cfg(target_arch = "aarch64")] mut jit: Option<&mut super::jit::JitCompiler>,
 ) {
     // NOTE: Rounding mode is NOT reset per-chain. C++ resets once before all chains,
     // and lets CFROUND changes carry over between chains. Caller must call set_rounding_mode(0)
@@ -1118,18 +1079,28 @@ fn execute_vm(
         read_reg3,
     };
 
-    // Compile program
+    // Compile program into pre-allocated buffer
     let mut register_usage = [0i32; REGISTERS_COUNT];
-    let bytecode = compile_program(program_bytes, &mut register_usage);
+    compile_program(program_bytes, &mut register_usage, bytecode_buf);
+    let bytecode = &*bytecode_buf;
+
+    // JIT compile the bytecode to native code (aarch64 only)
+    #[cfg(target_arch = "aarch64")]
+    let jit_fn = jit.as_mut().map(|jit| {
+        jit.compile(bytecode_buf);
+        unsafe { jit.get_fn() }
+    });
 
     let mut sp_addr0 = mx;
     let mut sp_addr1 = ma;
     let mut mem_mx = mx;
     let mut mem_ma = ma;
 
-    // Main execution loop
+    // Main execution loop — all register accesses are unchecked since indices
+    // are always valid (read_reg0..3 are 0-7, loop i is 0-7 or 0-3).
     for _ic in 0..RANDOMX_PROGRAM_ITERATIONS {
-        let sp_mix = nreg.r[config.read_reg0] ^ nreg.r[config.read_reg1];
+        unsafe {
+        let sp_mix = nreg.r(config.read_reg0) ^ nreg.r(config.read_reg1);
         sp_addr0 ^= sp_mix as u32;
         sp_addr0 &= SCRATCHPAD_L3_MASK64;
         sp_addr1 ^= (sp_mix >> 32) as u32;
@@ -1137,17 +1108,17 @@ fn execute_vm(
 
         // Load r-registers from scratchpad
         for i in 0..REGISTERS_COUNT {
-            nreg.r[i] ^= load64(scratchpad, sp_addr0 as usize + 8 * i);
+            *nreg.r_mut(i) ^= load64(scratchpad, sp_addr0 as usize + 8 * i);
         }
 
         // Load f-registers (convert int pairs to float)
         for i in 0..REGISTER_COUNT_FLT {
-            nreg.f[i] = cvt_packed_int_vec_f128(scratchpad, sp_addr1 as usize + 8 * i);
+            *nreg.f_mut(i) = cvt_packed_int_vec_f128(scratchpad, sp_addr1 as usize + 8 * i);
         }
 
         // Load e-registers (convert int pairs to float, then mask)
         for i in 0..REGISTER_COUNT_FLT {
-            nreg.e[i] = mask_register_exponent_mantissa(
+            *nreg.e_mut(i) = mask_register_exponent_mantissa(
                 &config,
                 cvt_packed_int_vec_f128(
                     scratchpad,
@@ -1155,21 +1126,36 @@ fn execute_vm(
                 ),
             );
         }
+        } // unsafe
 
-        // Execute bytecode
+        // Execute bytecode — JIT on aarch64, interpreter fallback elsewhere
+        #[cfg(target_arch = "aarch64")]
+        {
+            if let Some(f) = jit_fn {
+                // JIT: call native code. It reads/writes nreg directly.
+                unsafe { f(nreg as *mut NativeRegisterFile, scratchpad.as_mut_ptr(), &config as *const ProgramConfiguration) };
+            } else {
+                execute_bytecode(&bytecode, nreg, scratchpad, &config);
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         execute_bytecode(&bytecode, nreg, scratchpad, &config);
 
-        // Dataset read (light mode: compute on-the-fly)
+        // Dataset read
         let read_ptr = dataset_offset + (mem_ma as u64 & CACHE_LINE_ALIGN_MASK as u64);
 
         // V1: update mem_mx
-        mem_mx ^= (nreg.r[config.read_reg2] ^ nreg.r[config.read_reg3]) as u32;
+        unsafe {
+        mem_mx ^= (nreg.r(config.read_reg2) ^ nreg.r(config.read_reg3)) as u32;
 
-        // Compute dataset item and XOR into r-registers
+        // Full mode: array lookup. Light mode: compute on-the-fly.
         let item_number = read_ptr / CACHE_LINE_SIZE as u64;
-        let dataset_line = init_dataset_item(cache_memory, ss_programs, item_number);
+        let dataset_line = match dataset {
+            Some(ds) => *ds.get_item(item_number),
+            None => init_dataset_item(cache_memory, ss_programs, item_number),
+        };
         for i in 0..REGISTERS_COUNT {
-            nreg.r[i] ^= dataset_line[i];
+            *nreg.r_mut(i) ^= *dataset_line.get_unchecked(i);
         }
 
         // Swap mx and ma
@@ -1177,21 +1163,22 @@ fn execute_vm(
 
         // Store r-registers back to scratchpad
         for i in 0..REGISTERS_COUNT {
-            store64(scratchpad, sp_addr1 as usize + 8 * i, nreg.r[i]);
+            store64(scratchpad, sp_addr1 as usize + 8 * i, nreg.r(i));
         }
 
         // V1: f[i] = f[i] XOR e[i]
         for i in 0..REGISTER_COUNT_FLT {
-            nreg.f[i] = xor_f128(nreg.f[i], nreg.e[i]);
+            *nreg.f_mut(i) = xor_f128(nreg.f(i), nreg.e(i));
         }
 
         // Store f-registers back to scratchpad
         for i in 0..REGISTER_COUNT_FLT {
-            store_f128(scratchpad, sp_addr0 as usize + 16 * i, nreg.f[i]);
+            store_f128(scratchpad, sp_addr0 as usize + 16 * i, nreg.f(i));
         }
 
         sp_addr0 = 0;
         sp_addr1 = 0;
+        } // unsafe
     }
 }
 
@@ -1236,23 +1223,27 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
     set_rounding_mode(0);
 
     // Step 5: Execute program chains
+    let mut bytecode_buf: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]> =
+        Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+    let mut program_bytes = vec![0u8; PROGRAM_BYTES_SIZE];
     for chain in 0..RANDOMX_PROGRAM_COUNT {
         // Generate program from tempHash using fillAes4Rx4
-        // Program layout: entropy[16] (128 bytes) + instructions[256] (2048 bytes) = 2176 bytes
-        let mut program_bytes = vec![0u8; PROGRAM_BYTES_SIZE];
         fill_aes_4rx4(
             <&[u8; 64]>::try_from(&temp_hash[..]).unwrap(),
             &mut program_bytes,
         );
 
-
-        // Execute VM
+        // Execute VM (light mode)
         execute_vm(
             &mut nreg,
             &mut scratchpad,
             &program_bytes,
             &cache_memory,
             &ss_programs,
+            None,
+            &mut bytecode_buf,
+            #[cfg(target_arch = "aarch64")]
+            None,
         );
 
         if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1293,14 +1284,22 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
 
 /// A RandomX VM that caches the Argon2d cache and SuperscalarHash programs
 /// across multiple hash calculations with the same key.
+/// Supports both light mode (no dataset) and full mode (precomputed 2 GiB dataset).
 pub struct RandomXVm {
     cache_memory: Vec<u8>,
     ss_programs: [SuperscalarProgram; 8],
+    dataset: Option<Arc<RandomXDataset>>,
+    scratchpad: Vec<u8>,
+    program_bytes: Vec<u8>,
+    bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]>,
+    nreg: NativeRegisterFile,
+    pipeline_state: [u8; 64],
+    #[cfg(target_arch = "aarch64")]
+    jit: Option<super::jit::JitCompiler>,
 }
 
 impl RandomXVm {
-    /// Create a new VM initialized with the given key (seed_hash).
-    /// This computes the 256 MiB Argon2d cache and 8 SuperscalarHash programs.
+    /// Create a new VM in light mode (256 MiB cache, computes dataset items on-the-fly).
     pub fn new(key: &[u8]) -> Self {
         let cache_memory = argon2d_cache(key);
         let mut gen = Blake2Generator::new(key, 0);
@@ -1308,60 +1307,99 @@ impl RandomXVm {
         RandomXVm {
             cache_memory,
             ss_programs,
+            dataset: None,
+            scratchpad: vec![0u8; SCRATCHPAD_L3_SIZE],
+            program_bytes: vec![0u8; PROGRAM_BYTES_SIZE],
+            bytecode: Box::new(std::array::from_fn(|_| BytecodeInstruction::new())),
+            nreg: NativeRegisterFile::new(),
+            pipeline_state: [0u8; 64],
+            #[cfg(target_arch = "aarch64")]
+            jit: super::jit::JitCompiler::new().ok(),
         }
     }
 
-    /// Reinitialize the cache for a new key (when pool changes seed_hash).
-    pub fn reinit(&mut self, key: &[u8]) {
+    /// Create a new VM in full mode with a precomputed dataset.
+    pub fn new_full(key: &[u8], dataset: Arc<RandomXDataset>) -> Self {
+        let cache_memory = argon2d_cache(key);
+        let mut gen = Blake2Generator::new(key, 0);
+        let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut gen));
+        RandomXVm {
+            cache_memory,
+            ss_programs,
+            dataset: Some(dataset),
+            scratchpad: vec![0u8; SCRATCHPAD_L3_SIZE],
+            program_bytes: vec![0u8; PROGRAM_BYTES_SIZE],
+            bytecode: Box::new(std::array::from_fn(|_| BytecodeInstruction::new())),
+            nreg: NativeRegisterFile::new(),
+            pipeline_state: [0u8; 64],
+            #[cfg(target_arch = "aarch64")]
+            jit: super::jit::JitCompiler::new().ok(),
+        }
+    }
+
+    /// Reinitialize for a new key. Pass `Some(dataset)` for full mode, `None` for light mode.
+    pub fn reinit(&mut self, key: &[u8], dataset: Option<Arc<RandomXDataset>>) {
         self.cache_memory = argon2d_cache(key);
         let mut gen = Blake2Generator::new(key, 0);
         self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut gen));
+        self.dataset = dataset;
+    }
+
+    /// Get references to cache and programs (for dataset generation).
+    pub fn cache_and_programs(&self) -> (&[u8], &[SuperscalarProgram; 8]) {
+        (&self.cache_memory, &self.ss_programs)
     }
 
     /// Calculate a RandomX hash using the cached state.
-    pub fn calculate_hash(&self, input: &[u8]) -> [u8; 32] {
+    /// Reuses pre-allocated scratchpad, program, bytecode, and register file buffers.
+    pub fn calculate_hash(&mut self, input: &[u8]) -> [u8; 32] {
         let saved_rm = save_rounding_mode();
 
         // Blake2b-512(input) -> tempHash
         let mut temp_hash = blake2b_512(input);
 
-        // Fill scratchpad
-        let mut scratchpad = vec![0u8; SCRATCHPAD_L3_SIZE];
+        // Fill scratchpad (reuse pre-allocated buffer)
         fill_aes_1rx4(
             <&mut [u8; 64]>::try_from(&mut temp_hash[..]).unwrap(),
-            &mut scratchpad,
+            &mut self.scratchpad,
         );
 
-        let mut nreg = NativeRegisterFile::new();
+        self.nreg = NativeRegisterFile::new();
         set_rounding_mode(0);
+
+        let ds_ref = self.dataset.as_deref();
 
         // Execute 8 program chains
         for chain in 0..RANDOMX_PROGRAM_COUNT {
-            let mut program_bytes = vec![0u8; PROGRAM_BYTES_SIZE];
             fill_aes_4rx4(
                 <&[u8; 64]>::try_from(&temp_hash[..]).unwrap(),
-                &mut program_bytes,
+                &mut self.program_bytes,
             );
 
             execute_vm(
-                &mut nreg,
-                &mut scratchpad,
-                &program_bytes,
+                &mut self.nreg,
+                &mut self.scratchpad,
+                &self.program_bytes,
                 &self.cache_memory,
                 &self.ss_programs,
+                ds_ref,
+                &mut self.bytecode,
+                #[cfg(target_arch = "aarch64")]
+                self.jit.as_mut(),
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
-                let reg_bytes = serialize_register_file(&nreg);
+                let reg_bytes = serialize_register_file(&self.nreg);
                 temp_hash = blake2b_512(&reg_bytes);
             }
         }
 
-        // Final result
-        let aes_hash = hash_aes_1rx4(&scratchpad);
+        // Final result: hash the scratchpad with AES
+        // If we have a next_input, pipeline the hash with the fill for the next hash
+        let aes_hash = hash_aes_1rx4(&self.scratchpad);
         for i in 0..REGISTER_COUNT_FLT {
             let off = i * 16;
-            nreg.a[i] = (
+            self.nreg.a[i] = (
                 f64::from_bits(u64::from_le_bytes(
                     aes_hash[off..off + 8].try_into().unwrap(),
                 )),
@@ -1371,10 +1409,221 @@ impl RandomXVm {
             );
         }
 
-        let reg_bytes = serialize_register_file(&nreg);
+        let reg_bytes = serialize_register_file(&self.nreg);
         let result: [u8; 32] = blake2b(32, &reg_bytes).try_into().unwrap();
 
         restore_rounding_mode(saved_rm);
+        result
+    }
+
+    /// Calculate a RandomX hash while simultaneously filling the scratchpad for the next hash.
+    /// `next_input` is the blob for the next hash — its Blake2b-512 seeds the fill.
+    /// Returns the hash of `input` (the scratchpad must already be filled from a prior call).
+    /// Use `prepare_scratchpad` first, then call this in a loop for pipelined mining.
+    pub fn calculate_hash_pipelined(&mut self, next_input: &[u8]) -> [u8; 32] {
+        let saved_rm = save_rounding_mode();
+
+        self.nreg = NativeRegisterFile::new();
+        set_rounding_mode(0);
+
+        let ds_ref = self.dataset.as_deref();
+
+        // temp_hash was set by prepare_scratchpad or previous pipeline step
+        let mut temp_hash = self.pipeline_state;
+
+        // Execute 8 program chains
+        for chain in 0..RANDOMX_PROGRAM_COUNT {
+            fill_aes_4rx4(
+                <&[u8; 64]>::try_from(&temp_hash[..]).unwrap(),
+                &mut self.program_bytes,
+            );
+
+            execute_vm(
+                &mut self.nreg,
+                &mut self.scratchpad,
+                &self.program_bytes,
+                &self.cache_memory,
+                &self.ss_programs,
+                ds_ref,
+                &mut self.bytecode,
+                #[cfg(target_arch = "aarch64")]
+                self.jit.as_mut(),
+            );
+
+            if chain < RANDOMX_PROGRAM_COUNT - 1 {
+                let reg_bytes = serialize_register_file(&self.nreg);
+                temp_hash = blake2b_512(&reg_bytes);
+            }
+        }
+
+        // Combined hash+fill: hash current scratchpad while filling for next input
+        let mut next_temp_hash = blake2b_512(next_input);
+        let mut aes_hash = [0u8; 64];
+        hash_and_fill_aes_1rx4(
+            &mut self.scratchpad,
+            &mut aes_hash,
+            <&mut [u8; 64]>::try_from(&mut next_temp_hash[..]).unwrap(),
+        );
+        self.pipeline_state = next_temp_hash;
+
+        for i in 0..REGISTER_COUNT_FLT {
+            let off = i * 16;
+            self.nreg.a[i] = (
+                f64::from_bits(u64::from_le_bytes(
+                    aes_hash[off..off + 8].try_into().unwrap(),
+                )),
+                f64::from_bits(u64::from_le_bytes(
+                    aes_hash[off + 8..off + 16].try_into().unwrap(),
+                )),
+            );
+        }
+
+        let reg_bytes = serialize_register_file(&self.nreg);
+        let result: [u8; 32] = blake2b(32, &reg_bytes).try_into().unwrap();
+
+        restore_rounding_mode(saved_rm);
+        result
+    }
+
+    /// Prepare the scratchpad for the first pipelined hash.
+    /// Must be called once before the `calculate_hash_pipelined` loop.
+    pub fn prepare_scratchpad(&mut self, input: &[u8]) {
+        let mut temp_hash = blake2b_512(input);
+        fill_aes_1rx4(
+            <&mut [u8; 64]>::try_from(&mut temp_hash[..]).unwrap(),
+            &mut self.scratchpad,
+        );
+        self.pipeline_state = temp_hash;
+    }
+
+    /// Same as `calculate_hash` but prints timing breakdown for each phase.
+    /// Used for profiling only -- call with `cargo test -- --nocapture`.
+    #[cfg(test)]
+    pub(crate) fn calculate_hash_profiled(&mut self, input: &[u8]) -> [u8; 32] {
+        use std::time::Instant;
+
+        let total_start = Instant::now();
+        let saved_rm = save_rounding_mode();
+
+        // Phase 1: Blake2b-512 (initial)
+        let t = Instant::now();
+        let mut temp_hash = blake2b_512(input);
+        let blake2b_initial = t.elapsed();
+
+        // Phase 2: fill_aes_1rx4 (scratchpad fill, 2 MiB)
+        let t = Instant::now();
+        fill_aes_1rx4(
+            <&mut [u8; 64]>::try_from(&mut temp_hash[..]).unwrap(),
+            &mut self.scratchpad,
+        );
+        let scratchpad_fill = t.elapsed();
+
+        self.nreg = NativeRegisterFile::new();
+        set_rounding_mode(0);
+
+        let ds_ref = self.dataset.as_deref();
+
+        let mut total_fill_aes_4rx4 = std::time::Duration::ZERO;
+        let mut total_execute_vm = std::time::Duration::ZERO;
+        let mut total_compile = std::time::Duration::ZERO;
+        let mut total_blake2b_inter = std::time::Duration::ZERO;
+
+        // Execute 8 program chains
+        for chain in 0..RANDOMX_PROGRAM_COUNT {
+            // Phase 3: fill_aes_4rx4 (program generation)
+            let t = Instant::now();
+            fill_aes_4rx4(
+                <&[u8; 64]>::try_from(&temp_hash[..]).unwrap(),
+                &mut self.program_bytes,
+            );
+            total_fill_aes_4rx4 += t.elapsed();
+
+            // Phase 4: compile_program (timed separately, extra call)
+            let t = Instant::now();
+            let mut register_usage = [0i32; REGISTERS_COUNT];
+            compile_program(&self.program_bytes, &mut register_usage, &mut self.bytecode);
+            total_compile += t.elapsed();
+
+            // Phase 5: execute_vm (includes its own compile_program + 2048 iters + dataset)
+            let t = Instant::now();
+            execute_vm(
+                &mut self.nreg,
+                &mut self.scratchpad,
+                &self.program_bytes,
+                &self.cache_memory,
+                &self.ss_programs,
+                ds_ref,
+                &mut self.bytecode,
+                #[cfg(target_arch = "aarch64")]
+                self.jit.as_mut(),
+            );
+            total_execute_vm += t.elapsed();
+
+            if chain < RANDOMX_PROGRAM_COUNT - 1 {
+                let t = Instant::now();
+                let reg_bytes = serialize_register_file(&self.nreg);
+                temp_hash = blake2b_512(&reg_bytes);
+                total_blake2b_inter += t.elapsed();
+            }
+        }
+
+        // Phase 6: hash_aes_1rx4 (final scratchpad hash)
+        let t = Instant::now();
+        let aes_hash = hash_aes_1rx4(&self.scratchpad);
+        let hash_aes_final = t.elapsed();
+
+        for i in 0..REGISTER_COUNT_FLT {
+            let off = i * 16;
+            self.nreg.a[i] = (
+                f64::from_bits(u64::from_le_bytes(
+                    aes_hash[off..off + 8].try_into().unwrap(),
+                )),
+                f64::from_bits(u64::from_le_bytes(
+                    aes_hash[off + 8..off + 16].try_into().unwrap(),
+                )),
+            );
+        }
+
+        // Phase 7: Blake2b (final)
+        let t = Instant::now();
+        let reg_bytes = serialize_register_file(&self.nreg);
+        let result: [u8; 32] = blake2b(32, &reg_bytes).try_into().unwrap();
+        let blake2b_final = t.elapsed();
+
+        restore_rounding_mode(saved_rm);
+
+        let total = total_start.elapsed();
+
+        // compile_program is called separately above AND inside execute_vm,
+        // so total_compile shows standalone cost; execute_vm includes its own call.
+        println!("\n=== RandomX Hash Profile (light mode) ===");
+        println!("  1. blake2b_512 (initial)           {:>10.3?}", blake2b_initial);
+        println!("  2. fill_aes_1rx4 (scratchpad 2M)   {:>10.3?}", scratchpad_fill);
+        println!("  3. fill_aes_4rx4 (x8 programs)     {:>10.3?}", total_fill_aes_4rx4);
+        println!("  4. compile_program (x8, standalone) {:>10.3?}", total_compile);
+        println!("  5. execute_vm (x8, incl compile)   {:>10.3?}", total_execute_vm);
+        println!("  6. hash_aes_1rx4 (final)           {:>10.3?}", hash_aes_final);
+        println!("  7. blake2b_512 (x7 inter-chain)    {:>10.3?}", total_blake2b_inter);
+        println!("  8. blake2b (final 32B)             {:>10.3?}", blake2b_final);
+        println!("  ─────────────────────────────────────────────");
+        println!("  TOTAL                              {:>10.3?}", total);
+        println!();
+        println!("  Breakdown of execute_vm (x8 chains):");
+        println!("    compile_program alone:   {:>10.3?} ({:.1}%)",
+            total_compile,
+            total_compile.as_secs_f64() / total.as_secs_f64() * 100.0);
+        println!("    execute_vm (w/ compile): {:>10.3?} ({:.1}%)",
+            total_execute_vm,
+            total_execute_vm.as_secs_f64() / total.as_secs_f64() * 100.0);
+        let vm_loop_only = total_execute_vm.saturating_sub(total_compile);
+        println!("    => VM loop + dataset:    {:>10.3?} ({:.1}%)",
+            vm_loop_only,
+            vm_loop_only.as_secs_f64() / total.as_secs_f64() * 100.0);
+        println!();
+        let hash_rate = 1.0 / total.as_secs_f64();
+        println!("  Estimated single-thread: {:.1} H/s", hash_rate);
+        println!("==========================================\n");
+
         result
     }
 }

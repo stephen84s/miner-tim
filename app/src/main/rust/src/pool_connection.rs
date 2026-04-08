@@ -232,6 +232,13 @@ impl PoolConnection {
             }
             if let Some(job_data) = result.get("job") {
                 if let Some(job) = parse_job(job_data) {
+                    let diff = target_to_difficulty(&job.target);
+                    log::info!(
+                        "Initial job: {} (difficulty: {}, target: {})",
+                        job.job_id,
+                        diff,
+                        hex_encode_bytes(&job.target),
+                    );
                     if let Ok(mut current) = self.current_job.lock() {
                         *current = Some(job);
                     }
@@ -369,7 +376,13 @@ impl PoolConnection {
 
                             if let Some(job_data) = job_params {
                                 if let Some(job) = parse_job(job_data) {
-                                    log::info!("New job received: {}", job.job_id);
+                                    let diff = target_to_difficulty(&job.target);
+                                    log::info!(
+                                        "New job: {} (difficulty: {}, target: {})",
+                                        job.job_id,
+                                        diff,
+                                        hex_encode_bytes(&job.target),
+                                    );
                                     if let Ok(mut current) = current_job.lock() {
                                         *current = Some(job);
                                     }
@@ -517,4 +530,23 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
         bytes.push(byte);
     }
     Some(bytes)
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn target_to_difficulty(target: &[u8]) -> u64 {
+    if target.len() < 4 {
+        return 0;
+    }
+    let target_val = u32::from_le_bytes([target[0], target[1], target[2], target[3]]);
+    if target_val == 0 {
+        return u64::MAX;
+    }
+    0xFFFFFFFF_u64 / target_val as u64
 }

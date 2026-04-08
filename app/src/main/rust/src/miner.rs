@@ -1,10 +1,101 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::pool_connection::PoolConnection;
+use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
+
+/// Shared dataset cache — generated once per seed_hash, shared across all workers.
+struct DatasetCache {
+    seed_hash: Vec<u8>,
+    dataset: Arc<RandomXDataset>,
+}
+
+type SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>;
+
+/// Tracks the best (lowest) hash top-4-bytes seen across all workers.
+struct MiningStats {
+    best_hash_val: AtomicU32,
+    current_difficulty: AtomicU64,
+    shares_found: AtomicU64,
+    /// Epoch millis of last share found (0 = never)
+    last_share_time_ms: AtomicU64,
+    start_time_ms: AtomicU64,
+}
+
+// ============================================================================
+// Rolling hashrate tracker
+// ============================================================================
+
+/// A timestamped hash count sample.
+struct HashSample {
+    time: Instant,
+    hashes: u64,
+}
+
+/// Tracks hashrate over rolling 1m, 5m, and 10m windows.
+/// Call `record()` periodically (e.g. every 5s) with the current cumulative hash count.
+pub struct HashrateTracker {
+    samples: VecDeque<HashSample>,
+}
+
+impl HashrateTracker {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::new(),
+        }
+    }
+
+    fn record(&mut self, hashes: u64) {
+        self.samples.push_back(HashSample {
+            time: Instant::now(),
+            hashes,
+        });
+        // Keep at most 10 minutes + a little margin of samples
+        let cutoff = Instant::now() - std::time::Duration::from_secs(660);
+        while self.samples.front().map_or(false, |s| s.time < cutoff) {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Compute hashrate over the given window (seconds).
+    /// Returns None if there aren't enough samples.
+    fn rate_over(&self, window_secs: u64) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let now = Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(window_secs);
+
+        // Find the oldest sample within the window
+        let oldest = self.samples.iter().find(|s| s.time >= cutoff)?;
+        let newest = self.samples.back()?;
+
+        let elapsed = newest.time.duration_since(oldest.time).as_secs_f64();
+        if elapsed < 1.0 {
+            return None;
+        }
+        let delta_hashes = newest.hashes.saturating_sub(oldest.hashes);
+        Some(delta_hashes as f64 / elapsed)
+    }
+}
+
+/// Snapshot of rolling hashrates returned to the caller.
+pub struct HashrateSnapshot {
+    pub rate_1m: Option<f64>,
+    pub rate_5m: Option<f64>,
+    pub rate_10m: Option<f64>,
+}
+
+/// Tracks shares found and timing for the CLI display.
+pub struct ShareStats {
+    pub total_found: u64,
+    pub last_found_elapsed_secs: Option<f64>,
+}
+
 
 #[allow(dead_code)]
 pub struct Miner {
@@ -15,6 +106,8 @@ pub struct Miner {
     mining_active: Arc<AtomicBool>,
     start_time: Option<Instant>,
     total_hashes: Arc<AtomicU64>,
+    stats: Option<Arc<MiningStats>>,
+    hashrate_tracker: HashrateTracker,
 }
 
 impl Miner {
@@ -27,6 +120,8 @@ impl Miner {
             mining_active,
             start_time: None,
             total_hashes: Arc::new(AtomicU64::new(0)),
+            stats: None,
+            hashrate_tracker: HashrateTracker::new(),
         }
     }
 
@@ -69,12 +164,26 @@ impl Miner {
         self.total_hashes.store(0, Ordering::SeqCst);
 
         let thread_count = self.thread_count as u32;
+        let dataset_cache: SharedDatasetCache = Arc::new(Mutex::new(None));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let stats = Arc::new(MiningStats {
+            best_hash_val: AtomicU32::new(u32::MAX),
+            current_difficulty: AtomicU64::new(0),
+            shares_found: AtomicU64::new(0),
+            last_share_time_ms: AtomicU64::new(0),
+            start_time_ms: AtomicU64::new(now_ms),
+        });
 
         for thread_id in 0..thread_count {
             let mining_active = self.mining_active.clone();
             let pool_conn = pool.clone();
             let total_hashes = self.total_hashes.clone();
             let hashrate_bits = self.hashrate_bits.clone();
+            let ds_cache = dataset_cache.clone();
+            let stats = stats.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("miner-worker-{}", thread_id))
@@ -86,6 +195,8 @@ impl Miner {
                         pool_conn,
                         total_hashes,
                         hashrate_bits,
+                        ds_cache,
+                        stats,
                     );
                 })
                 .map_err(|e| format!("Failed to spawn worker {}: {}", thread_id, e))?;
@@ -93,8 +204,61 @@ impl Miner {
             self.workers.push(handle);
         }
 
+        self.stats = Some(stats);
+
         log::info!("Started {} mining worker threads", thread_count);
         Ok(())
+    }
+
+    /// Get the current pool difficulty (0 if not yet known).
+    pub fn get_difficulty(&self) -> u64 {
+        self.stats.as_ref()
+            .map(|s| s.current_difficulty.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Get the best (lowest) hash value seen so far. Lower = closer to finding a share.
+    pub fn get_best_hash_val(&self) -> u32 {
+        self.stats.as_ref()
+            .map(|s| s.best_hash_val.load(Ordering::Relaxed))
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Get share timing stats for display.
+    pub fn get_share_stats(&self) -> ShareStats {
+        let stats = match &self.stats {
+            Some(s) => s,
+            None => return ShareStats { total_found: 0, last_found_elapsed_secs: None },
+        };
+        let total_found = stats.shares_found.load(Ordering::Relaxed);
+        let last_ms = stats.last_share_time_ms.load(Ordering::Relaxed);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let elapsed = if last_ms > 0 {
+            Some((now_ms - last_ms) as f64 / 1000.0)
+        } else {
+            // Time since mining started
+            let start_ms = stats.start_time_ms.load(Ordering::Relaxed);
+            if start_ms > 0 {
+                Some((now_ms - start_ms) as f64 / 1000.0)
+            } else {
+                None
+            }
+        };
+        ShareStats { total_found, last_found_elapsed_secs: elapsed }
+    }
+
+    /// Record a sample and return rolling hashrate snapshots.
+    pub fn snapshot_hashrates(&mut self) -> HashrateSnapshot {
+        let hashes = self.total_hashes.load(Ordering::Relaxed);
+        self.hashrate_tracker.record(hashes);
+        HashrateSnapshot {
+            rate_1m: self.hashrate_tracker.rate_over(60),
+            rate_5m: self.hashrate_tracker.rate_over(300),
+            rate_10m: self.hashrate_tracker.rate_over(600),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -144,6 +308,8 @@ fn worker_loop(
     pool: Arc<PoolConnection>,
     total_hashes: Arc<AtomicU64>,
     hashrate_bits: Arc<AtomicU64>,
+    dataset_cache: SharedDatasetCache,
+    stats: Arc<MiningStats>,
 ) {
     log::info!("Worker {} started", thread_id);
 
@@ -165,31 +331,31 @@ fn worker_loop(
 
         // Reinitialize VM if the seed hash changed
         if job.seed_hash != current_key || vm.is_none() {
-            log::info!("Worker {} initializing RandomX VM with seed_hash", thread_id);
+            let dataset = get_or_generate_dataset(
+                &dataset_cache,
+                &job.seed_hash,
+                thread_id,
+            );
+            log::info!("Worker {} ready with full dataset", thread_id);
+
             if let Some(ref mut existing_vm) = vm {
-                existing_vm.reinit(&job.seed_hash);
+                existing_vm.reinit(&job.seed_hash, Some(dataset));
             } else {
-                vm = Some(RandomXVm::new(&job.seed_hash));
+                vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
             }
             current_key = job.seed_hash.clone();
         }
 
-        let rx_vm = vm.as_ref().unwrap();
+        let rx_vm = vm.as_mut().unwrap();
 
-        // Prepare input blob with nonce
+        // Prepare input blob with nonce (4 bytes at offset 39–42, CryptoNote standard)
         let mut input = job.blob.clone();
-        if input.len() >= 47 {
+        if input.len() >= 43 {
             let nonce_bytes = (nonce as u32).to_le_bytes();
             input[39] = nonce_bytes[0];
             input[40] = nonce_bytes[1];
             input[41] = nonce_bytes[2];
             input[42] = nonce_bytes[3];
-            // Extended nonce bytes for additional entropy
-            let nonce_high = ((nonce >> 32) as u32).to_le_bytes();
-            input[43] = nonce_high[0];
-            input[44] = nonce_high[1];
-            input[45] = nonce_high[2];
-            input[46] = nonce_high[3];
         }
 
         // Compute hash
@@ -197,16 +363,39 @@ fn worker_loop(
         local_hashes += 1;
         nonce += thread_count as u64;
 
+        // Track best hash and difficulty for progress reporting
+        let hash_val = u32::from_le_bytes([hash[28], hash[29], hash[30], hash[31]]);
+        let _ = stats.best_hash_val.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            if hash_val < current { Some(hash_val) } else { None }
+        });
+        if job.target.len() >= 4 {
+            let target_val = u32::from_le_bytes([job.target[0], job.target[1], job.target[2], job.target[3]]);
+            if target_val > 0 {
+                stats.current_difficulty.store(0xFFFFFFFF_u64 / target_val as u64, Ordering::Relaxed);
+            }
+        }
+
         // Compare hash to target (little-endian comparison)
         if meets_target(&hash, &job.target) {
             let nonce_hex = hex_encode(&input[39..43]);
             let result_hex = hex_encode(&hash);
 
+            // Record share timing
+            stats.shares_found.fetch_add(1, Ordering::Relaxed);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            stats.last_share_time_ms.store(now_ms, Ordering::Relaxed);
+
             log::info!(
-                "Worker {} found share! job_id={}, nonce={}",
+                "Worker {} SHARE FOUND! job_id={}, nonce={}, hash_val={}, target_val={}, hash={}",
                 thread_id,
                 job.job_id,
-                nonce_hex
+                nonce_hex,
+                hash_val,
+                u32::from_le_bytes([job.target[0], job.target[1], job.target[2], job.target[3]]),
+                result_hex
             );
 
             if let Err(e) = pool.submit_share(&job.job_id, &nonce_hex, &result_hex) {
@@ -214,18 +403,21 @@ fn worker_loop(
             }
         }
 
-        // Update hashrate from thread 0 every 5 seconds
-        if thread_id == 0 && last_hashrate_update.elapsed().as_secs() >= 5 {
-            let global_hashes = total_hashes.load(Ordering::Relaxed) + local_hashes;
-            total_hashes.store(global_hashes, Ordering::Relaxed);
+        // All threads flush their local hashes periodically
+        if last_hashrate_update.elapsed().as_secs() >= 5 {
+            total_hashes.fetch_add(local_hashes, Ordering::Relaxed);
             local_hashes = 0;
-
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                let rate = global_hashes as f64 / elapsed;
-                hashrate_bits.store(rate.to_bits(), Ordering::Relaxed);
-            }
             last_hashrate_update = Instant::now();
+
+            // Thread 0 computes and stores the hashrate
+            if thread_id == 0 {
+                let global_hashes = total_hashes.load(Ordering::Relaxed);
+                let elapsed = start_time.elapsed().as_secs_f64();
+                if elapsed > 0.0 {
+                    let rate = global_hashes as f64 / elapsed;
+                    hashrate_bits.store(rate.to_bits(), Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -233,6 +425,53 @@ fn worker_loop(
     total_hashes.fetch_add(local_hashes, Ordering::Relaxed);
 
     log::info!("Worker {} stopped", thread_id);
+}
+
+/// Get a cached dataset or generate one. The first thread to encounter a new
+/// seed_hash generates the dataset (using all CPU cores); other threads block
+/// until it's ready.
+fn get_or_generate_dataset(
+    cache: &SharedDatasetCache,
+    seed_hash: &[u8],
+    thread_id: u32,
+) -> Arc<RandomXDataset> {
+    let mut guard = cache.lock().unwrap();
+
+    // Already generated for this seed_hash?
+    if let Some(ref cached) = *guard {
+        if cached.seed_hash == seed_hash {
+            return cached.dataset.clone();
+        }
+    }
+
+    // We're the first thread — generate the dataset
+    log::info!(
+        "Worker {} generating full RandomX dataset (~2 GiB)...",
+        thread_id,
+    );
+    let gen_start = Instant::now();
+
+    // Build cache + programs (needed for dataset generation)
+    let vm = RandomXVm::new(seed_hash);
+    let (cache_memory, ss_programs) = vm.cache_and_programs();
+
+    let num_cpus = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let dataset = Arc::new(RandomXDataset::generate(cache_memory, ss_programs, num_cpus));
+
+    log::info!(
+        "Dataset generated in {:.1}s",
+        gen_start.elapsed().as_secs_f64(),
+    );
+
+    *guard = Some(DatasetCache {
+        seed_hash: seed_hash.to_vec(),
+        dataset: dataset.clone(),
+    });
+
+    dataset
 }
 
 /// Compare a 32-byte hash against a target in little-endian order.

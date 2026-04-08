@@ -113,6 +113,8 @@ cp mining.conf.example mining.conf
 
 # 2. Build and run
 make cli-run
+
+# Binary output: app/src/main/rust/target/release/minertim
 ```
 
 ### Configuration
@@ -143,6 +145,14 @@ cd app/src/main/rust
 cargo build --release --bin minertim
 ./target/release/minertim pool.supportxmr.com:443 <wallet> 4
 ```
+
+### Build Output
+
+| Target | Path |
+|---|---|
+| CLI binary | `app/src/main/rust/target/release/minertim` |
+| Debug APK | `app/build/outputs/apk/debug/app-debug.apk` |
+| Release APK | `app/build/outputs/apk/release/app-release.apk` |
 
 ### Distributing the Binary
 

@@ -25,3 +25,4 @@ ctrlc = "3.4"
 lto = true
 opt-level = 3
 strip = true
+codegen-units = 1

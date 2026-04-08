@@ -66,7 +66,7 @@ WALLET ?=
 THREADS ?= 2
 
 cli:
-	cd app/src/main/rust && cargo build --release --bin minertim
+	cd app/src/main/rust && RUSTFLAGS="-C target-cpu=native" cargo build --release --bin minertim
 
 cli-run: cli
 ifndef WALLET

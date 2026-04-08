@@ -1,5 +1,8 @@
-// Dataset item computation (light mode)
+// Dataset item computation
 // Reference: RandomX src/dataset.cpp
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use super::superscalar::{execute_superscalar, SuperscalarProgram};
 
@@ -18,6 +21,12 @@ const SUPERSCALAR_ADD: [u64; 7] = [
     3398623926847679864,
     9549104520008361294,
 ];
+
+/// Full dataset: 2 GiB + 32 MiB = 2,181,038,080 bytes
+const DATASET_BASE_SIZE: usize = 2_147_483_648;
+const DATASET_EXTRA_SIZE: usize = 33_554_432;
+const DATASET_TOTAL_SIZE: usize = DATASET_BASE_SIZE + DATASET_EXTRA_SIZE;
+pub const DATASET_ITEM_COUNT: usize = DATASET_TOTAL_SIZE / CACHE_LINE_SIZE; // 34,078,720
 
 /// Read a native-endian u64 from cache memory at byte offset.
 #[inline(always)]
@@ -59,4 +68,64 @@ pub fn init_dataset_item(
     }
 
     rl
+}
+
+// ============================================================================
+// Full dataset (precomputed, ~2 GiB)
+// ============================================================================
+
+/// Precomputed full RandomX dataset. Read-only after generation, shared across
+/// all mining threads via `Arc`.
+pub struct RandomXDataset {
+    items: Vec<[u64; 8]>,
+}
+
+impl RandomXDataset {
+    /// Generate the full dataset from cache using `num_threads` threads.
+    /// This allocates ~2 GiB and takes 30-120 seconds depending on CPU.
+    pub fn generate(
+        cache_memory: &[u8],
+        programs: &[SuperscalarProgram; 8],
+        num_threads: usize,
+    ) -> Self {
+        let mut items = vec![[0u64; 8]; DATASET_ITEM_COUNT];
+        let num_threads = num_threads.max(1);
+        let chunk_size = (DATASET_ITEM_COUNT + num_threads - 1) / num_threads;
+
+        let progress = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|s| {
+            for (thread_idx, chunk) in items.chunks_mut(chunk_size).enumerate() {
+                let start_item = thread_idx * chunk_size;
+                let progress = progress.clone();
+                s.spawn(move || {
+                    for (i, slot) in chunk.iter_mut().enumerate() {
+                        *slot = init_dataset_item(cache_memory, programs, (start_item + i) as u64);
+                        if i % 500_000 == 0 && i > 0 {
+                            let done = progress.fetch_add(500_000, Ordering::Relaxed) + 500_000;
+                            if thread_idx == 0 {
+                                log::info!(
+                                    "Dataset generation: {:.1}%",
+                                    done as f64 / DATASET_ITEM_COUNT as f64 * 100.0
+                                );
+                            }
+                        }
+                    }
+                    // Count remaining items in this chunk
+                    let remainder = chunk.len() % 500_000;
+                    if remainder > 0 {
+                        progress.fetch_add(remainder, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        RandomXDataset { items }
+    }
+
+    /// Look up a precomputed dataset item by index.
+    #[inline(always)]
+    pub fn get_item(&self, item_number: u64) -> &[u64; 8] {
+        &self.items[item_number as usize]
+    }
 }

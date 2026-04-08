@@ -392,6 +392,65 @@ mod full_hash_tests {
             "e9ff4503201c0c2cca26d285c93ae883f9b1d30c9eb240b820756f2d5a7905fc"
         );
     }
+
+    /// Test RandomXVm::calculate_hash (uses JIT on aarch64) matches known hash.
+    /// Uses full mode (precomputed dataset) for speed.
+    #[test]
+    fn test_vm_calculate_hash_jit() {
+        use std::sync::Arc;
+        use super::dataset::RandomXDataset;
+
+        let key = b"test key 000";
+        let input = b"This is a test";
+        let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
+
+        // Build dataset (full mode)
+        let vm_light = vm::RandomXVm::new(key);
+        let (cache, programs) = vm_light.cache_and_programs();
+        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
+
+        // Full mode VM (uses JIT on aarch64)
+        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        let hash = vm_full.calculate_hash(input);
+
+        assert_eq!(
+            hex_encode(&hash),
+            expected,
+            "RandomXVm (JIT) hash must match known test vector"
+        );
+    }
+
+    /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
+    /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn test_full_mode_matches_light_mode() {
+        use std::sync::Arc;
+        use super::dataset::RandomXDataset;
+
+        let key = b"test key 000";
+        let input = b"This is a test";
+
+        // Light mode hash (known-good from test_full_hash_v1_a)
+        let light_hash = vm::calculate_hash(key, input);
+        assert_eq!(
+            hex_encode(&light_hash),
+            "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f"
+        );
+
+        // Full mode hash
+        let vm_light = vm::RandomXVm::new(key);
+        let (cache, programs) = vm_light.cache_and_programs();
+        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
+        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        let full_hash = vm_full.calculate_hash(input);
+
+        assert_eq!(
+            hex_encode(&full_hash),
+            hex_encode(&light_hash),
+            "Full mode hash must match light mode hash"
+        );
+    }
 }
 
 // ============================================================================
@@ -465,5 +524,68 @@ mod constants_tests {
         let cache_line: u64 = 64;
         let mask = (dataset_base - 1) & !(cache_line - 1);
         assert_eq!(mask, 0x7FFFFFC0);
+    }
+}
+
+// ============================================================================
+// Profiling: timing breakdown of a single RandomX hash
+// ============================================================================
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    /// Profile the time spent in each phase of a RandomX hash computation.
+    /// Run with: cargo test -p minertim test_hash_profile --release -- --ignored --nocapture
+    ///
+    /// Uses light mode (no dataset precomputation) which is what the miner uses
+    /// on low-memory devices. The execute_vm phase includes dataset item computation
+    /// on-the-fly via SuperscalarHash, which is the main bottleneck vs full mode.
+    #[test]
+    #[ignore]
+    fn test_hash_profile() {
+        let key = b"test key 000";
+        let input = b"This is a test";
+
+        println!("\n--- Allocating RandomX VM (light mode, includes Argon2d cache init) ---");
+        let t = std::time::Instant::now();
+        let mut vm = vm::RandomXVm::new(key);
+        println!("  VM creation (Argon2d + SuperscalarHash gen): {:?}\n", t.elapsed());
+
+        // Warm up: compute one hash to ensure all code paths are hot
+        println!("--- Warm-up hash ---");
+        let _ = vm.calculate_hash(input);
+
+        // Profiled hash
+        println!("--- Profiled hash ---");
+        let hash = vm.calculate_hash_profiled(input);
+        println!("  Result: {}", hex_encode(&hash));
+
+        // Verify correctness
+        assert_eq!(
+            hex_encode(&hash),
+            "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f",
+            "Profiled hash must match known test vector"
+        );
+
+        // Run a few more to get stable average
+        println!("--- Batch of 5 hashes for averaging ---");
+        let mut total = std::time::Duration::ZERO;
+        for i in 0..5 {
+            let modified_input = format!("This is test input {}", i);
+            let t = std::time::Instant::now();
+            let _ = vm.calculate_hash(modified_input.as_bytes());
+            let elapsed = t.elapsed();
+            total += elapsed;
+            println!("  Hash {}: {:?} ({:.1} H/s)", i, elapsed, 1.0 / elapsed.as_secs_f64());
+        }
+        let avg = total / 5;
+        println!("  Average: {:?} ({:.1} H/s single-thread)", avg, 1.0 / avg.as_secs_f64());
+        println!();
+
+        // Print the detailed profile one more time with a different input
+        // to show it's consistent
+        println!("--- Second profiled hash (different input) ---");
+        let hash2 = vm.calculate_hash_profiled(b"Different input data for profiling");
+        println!("  Result: {}", hex_encode(&hash2));
     }
 }

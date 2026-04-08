@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test] fn test_jit_isub_r_imm() {
-        let mut bytecode = make_single_instruction(InstructionType::IsubR, 0, 8, 30, 0, 0);
+        let bytecode = make_single_instruction(InstructionType::IsubR, 0, 8, 30, 0, 0);
         let mut nreg = NativeRegisterFile::new();
         nreg.r[0] = 100;
         run_jit(&bytecode, &mut nreg);
@@ -792,7 +792,7 @@ mod tests {
     #[test] fn test_jit_ismulh_r() {
         let bytecode = make_single_instruction(InstructionType::IsmulhR, 0, 1, 0, 0, 0);
         let mut nreg = NativeRegisterFile::new();
-        nreg.r[0] = (-5i64 as u64); nreg.r[1] = 3;
+        nreg.r[0] = -5i64 as u64; nreg.r[1] = 3;
         run_jit(&bytecode, &mut nreg);
         let expected = ((-5i64 as i128 * 3i128) >> 64) as u64;
         assert_eq!(nreg.r[0], expected);
@@ -885,15 +885,12 @@ mod tests {
     }
 
     #[test] fn test_jit_and_bitmask_l3() {
-        // Isolated test: AND x0, x0, #0x1FFFF8
+        // Verify AND bitmask immediate encoding for scratchpad L3 mask (0x1FFFF8).
+        // This caught a bug where immr rotation was computed incorrectly.
         use super::super::aarch64::Emitter;
         let (n, immr, imms) = Emitter::encode_bitmask_imm(0x1FFFF8).unwrap();
-        eprintln!("L3 mask 0x1FFFF8: n={}, immr={}, imms={}", n, immr, imms);
-        let mut e = Emitter::new();
-        e.and_imm(reg::X0, reg::X0, n, immr, imms);
-        eprintln!("Encoded instruction: 0x{:08X}", e.code[0]);
 
-        // Write & execute: MOV x0, #0x1FFFFF; AND x0, x0, #0x1FFFF8; RET
+        // Execute: MOV x0, #0x1FFFFF; AND x0, x0, #0x1FFFF8; RET
         let mut mem = super::super::memory::JitMemory::new(4096).unwrap();
         let mut e = Emitter::new();
         e.mov_imm64(reg::X0, 0x1FFFFF);
@@ -905,6 +902,42 @@ mod tests {
             f()
         };
         assert_eq!(result, 0x1FFFF8, "AND bitmask failed: got 0x{:X}", result);
+    }
+
+    #[test] fn test_jit_and_bitmask_l1() {
+        // Verify L1 scratchpad mask (0x3FF8)
+        use super::super::aarch64::Emitter;
+        let (n, immr, imms) = Emitter::encode_bitmask_imm(0x3FF8).unwrap();
+
+        let mut mem = super::super::memory::JitMemory::new(4096).unwrap();
+        let mut e = Emitter::new();
+        e.mov_imm64(reg::X0, 0xFFFFFFFF);
+        e.and_imm(reg::X0, reg::X0, n, immr, imms);
+        e.ret();
+        mem.write_code(&e.code);
+        let result = unsafe {
+            let f: extern "C" fn() -> u64 = mem.as_fn();
+            f()
+        };
+        assert_eq!(result, 0x3FF8, "L1 AND bitmask failed: got 0x{:X}", result);
+    }
+
+    #[test] fn test_jit_and_bitmask_l2() {
+        // Verify L2 scratchpad mask (0x3FFF8)
+        use super::super::aarch64::Emitter;
+        let (n, immr, imms) = Emitter::encode_bitmask_imm(0x3FFF8).unwrap();
+
+        let mut mem = super::super::memory::JitMemory::new(4096).unwrap();
+        let mut e = Emitter::new();
+        e.mov_imm64(reg::X0, 0xFFFFFFFF);
+        e.and_imm(reg::X0, reg::X0, n, immr, imms);
+        e.ret();
+        mem.write_code(&e.code);
+        let result = unsafe {
+            let f: extern "C" fn() -> u64 = mem.as_fn();
+            f()
+        };
+        assert_eq!(result, 0x3FFF8, "L2 AND bitmask failed: got 0x{:X}", result);
     }
 
     #[test] fn test_jit_istore() {
@@ -973,6 +1006,112 @@ mod tests {
             f(&mut nreg as *mut _, scratchpad.as_mut_ptr(), &config as *const _);
         }
         assert_eq!(nreg.r[0], 10 + 42);
+    }
+
+    #[test] fn test_jit_isub_m() {
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        bytecode[0].itype = InstructionType::IsubM;
+        bytecode[0].dst = 0;
+        bytecode[0].src = 1;
+        bytecode[0].imm = 0;
+        bytecode[0].mem_mask = 0x3FF8;
+
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile(&bytecode);
+        let mut scratchpad = vec![0u8; 2097152];
+        scratchpad[0x100..0x108].copy_from_slice(&7u64.to_le_bytes());
+        let config = ProgramConfiguration {
+            e_mask: [0x3FF0000000000000, 0x3FF0000000000000],
+            read_reg0: 0, read_reg1: 1, read_reg2: 2, read_reg3: 3,
+        };
+        let mut nreg = NativeRegisterFile::new();
+        nreg.r[0] = 50;
+        nreg.r[1] = 0x100;
+        unsafe {
+            let f = jit.get_fn();
+            f(&mut nreg as *mut _, scratchpad.as_mut_ptr(), &config as *const _);
+        }
+        assert_eq!(nreg.r[0], 50 - 7);
+    }
+
+    #[test] fn test_jit_imul_m() {
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        bytecode[0].itype = InstructionType::ImulM;
+        bytecode[0].dst = 0;
+        bytecode[0].src = 1;
+        bytecode[0].imm = 0;
+        bytecode[0].mem_mask = 0x3FF8;
+
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile(&bytecode);
+        let mut scratchpad = vec![0u8; 2097152];
+        scratchpad[0x100..0x108].copy_from_slice(&6u64.to_le_bytes());
+        let config = ProgramConfiguration {
+            e_mask: [0x3FF0000000000000, 0x3FF0000000000000],
+            read_reg0: 0, read_reg1: 1, read_reg2: 2, read_reg3: 3,
+        };
+        let mut nreg = NativeRegisterFile::new();
+        nreg.r[0] = 7;
+        nreg.r[1] = 0x100;
+        unsafe {
+            let f = jit.get_fn();
+            f(&mut nreg as *mut _, scratchpad.as_mut_ptr(), &config as *const _);
+        }
+        assert_eq!(nreg.r[0], 42);
+    }
+
+    #[test] fn test_jit_ixor_m() {
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        bytecode[0].itype = InstructionType::IxorM;
+        bytecode[0].dst = 0;
+        bytecode[0].src = 1;
+        bytecode[0].imm = 0;
+        bytecode[0].mem_mask = 0x3FF8;
+
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile(&bytecode);
+        let mut scratchpad = vec![0u8; 2097152];
+        scratchpad[0x100..0x108].copy_from_slice(&0xFF00u64.to_le_bytes());
+        let config = ProgramConfiguration {
+            e_mask: [0x3FF0000000000000, 0x3FF0000000000000],
+            read_reg0: 0, read_reg1: 1, read_reg2: 2, read_reg3: 3,
+        };
+        let mut nreg = NativeRegisterFile::new();
+        nreg.r[0] = 0xFFFF;
+        nreg.r[1] = 0x100;
+        unsafe {
+            let f = jit.get_fn();
+            f(&mut nreg as *mut _, scratchpad.as_mut_ptr(), &config as *const _);
+        }
+        assert_eq!(nreg.r[0], 0xFFFF ^ 0xFF00);
+    }
+
+    #[test] fn test_jit_ldr_str_register_offset() {
+        // Regression test: LDR/STR register-offset encoding must use option=011 (LSL).
+        // A prior bug used option=000 (UXTB) which caused SIGILL.
+        use super::super::aarch64::Emitter;
+        let mut buf = vec![0u8; 64]; // buffer for store/load
+        let buf_ptr = buf.as_mut_ptr() as u64;
+
+        let mut mem = super::super::memory::JitMemory::new(4096).unwrap();
+        let mut e = Emitter::new();
+        // x0 = 0xCAFE; x1 = buf_ptr; x2 = 0 (offset)
+        e.movz(reg::X0, 0xCAFE, 0);
+        e.mov_imm64(reg::X1, buf_ptr);
+        e.movz(reg::X2, 0, 0);
+        e.str_reg(reg::X0, reg::X1, reg::X2); // STR x0, [x1, x2]
+        e.movz(reg::X0, 0, 0); // clear x0
+        e.ldr_reg(reg::X0, reg::X1, reg::X2); // LDR x0, [x1, x2]
+        e.ret();
+        mem.write_code(&e.code);
+        let result = unsafe {
+            let f: extern "C" fn() -> u64 = mem.as_fn();
+            f()
+        };
+        assert_eq!(result, 0xCAFE, "LDR/STR register offset failed: got 0x{:X}", result);
     }
 
     #[test]

@@ -309,6 +309,12 @@ For detailed architecture documentation, see [CLAUDE.md](CLAUDE.md).
 **No shares after extended mining**
 — Normal for low hashrate devices. At 10 H/s it can take hours to find a share depending on pool difficulty.
 
+## Acknowledgements
+
+- **[tevador/RandomX](https://github.com/tevador/RandomX)** — The RandomX proof-of-work algorithm and its C++ reference implementation. The Rust mining engine (`randomx/`) is a port of the reference implementation, following the same algorithmic structure for the VM, AES hashing, Argon2d cache, Blake2b, SuperscalarHash, and dataset generation. RandomX is licensed under BSD 3-Clause.
+
+- **[XMRig](https://github.com/xmrig/xmrig)** — The aarch64 JIT compiler design (register allocation scheme, JIT memory management approach, and scratchpad/dataset prefetch strategy) was informed by XMRig's RandomX JIT implementation. XMRig is licensed under GPL-3.0.
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE).

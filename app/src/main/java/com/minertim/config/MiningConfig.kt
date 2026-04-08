@@ -8,8 +8,10 @@ import com.minertim.security.ValidationResult
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import android.util.Base64
+import java.security.SecureRandom
 
 class MiningConfig(private val context: Context) {
     companion object {
@@ -24,6 +26,10 @@ class MiningConfig(private val context: Context) {
         const val KEY_MINING_INTENSITY = "mining_intensity"
         const val KEY_AUTO_START = "auto_start"
         const val KEY_WIFI_ONLY = "wifi_only"
+
+        // AES/GCM parameters
+        private const val GCM_IV_LENGTH = 12   // 96-bit IV recommended for GCM
+        private const val GCM_TAG_BITS = 128   // 128-bit authentication tag
 
         // Default values
         const val DEFAULT_POOL_ADDRESS = "pool.supportxmr.com:443"
@@ -243,18 +249,34 @@ class MiningConfig(private val context: Context) {
     }
 
     private fun encrypt(plaintext: String): String {
-        val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
-        cipher.init(Cipher.ENCRYPT_MODE, encryptionKey)
-        val encrypted = cipher.doFinal(plaintext.toByteArray())
-        return Base64.encodeToString(encrypted, Base64.DEFAULT)
+        val iv = ByteArray(GCM_IV_LENGTH)
+        SecureRandom().nextBytes(iv)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, encryptionKey, GCMParameterSpec(GCM_TAG_BITS, iv))
+        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+        // Prepend IV to ciphertext before Base64-encoding
+        val combined = iv + ciphertext
+        return Base64.encodeToString(combined, Base64.DEFAULT)
     }
 
-    private fun decrypt(ciphertext: String): String {
+    private fun decrypt(encoded: String): String {
+        val combined = Base64.decode(encoded, Base64.DEFAULT)
+        if (combined.size > GCM_IV_LENGTH) {
+            try {
+                // GCM format: first GCM_IV_LENGTH bytes are the IV
+                val iv = combined.copyOfRange(0, GCM_IV_LENGTH)
+                val ciphertext = combined.copyOfRange(GCM_IV_LENGTH, combined.size)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, encryptionKey, GCMParameterSpec(GCM_TAG_BITS, iv))
+                return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+            } catch (_: Exception) {
+                // GCM auth failed — fall through to legacy ECB path
+            }
+        }
+        // Legacy ECB fallback — re-encrypt with GCM on next save
         val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, encryptionKey)
-        val encrypted = Base64.decode(ciphertext, Base64.DEFAULT)
-        val decrypted = cipher.doFinal(encrypted)
-        return String(decrypted)
+        return String(cipher.doFinal(combined), Charsets.UTF_8)
     }
 
     fun getRecommendedThreadCount(): Int {

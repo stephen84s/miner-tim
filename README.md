@@ -285,7 +285,7 @@ miner-tim/
 │       │       ├── bin/minertim.rs     # CLI binary entry point
 │       │       ├── miner.rs            # Mining workers
 │       │       ├── pool_connection.rs  # Stratum protocol (TCP/TLS)
-│       │       └── randomx/            # Pure Rust RandomX (light mode)
+│       │       └── randomx/            # Pure Rust RandomX (light mode on Android, full mode on CLI)
 │       ├── res/                        # Layouts, themes, drawables
 │       └── AndroidManifest.xml
 ├── Makefile                            # Build targets (make help)
@@ -307,7 +307,7 @@ Desktop:  CLI (bin/minertim.rs) ────────────────
                                                               |
                                                   Rust (miner.rs)
                                                   ├── pool_connection.rs (Stratum TCP/TLS)
-                                                  └── randomx/ (pure Rust, light mode)
+                                                  └── randomx/ (pure Rust; light mode on Android, full mode on CLI)
 ```
 
 For detailed architecture documentation, see [CLAUDE.md](CLAUDE.md).

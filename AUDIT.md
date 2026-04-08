@@ -2,6 +2,33 @@
 
 This file tracks implementation changes made in this repository.
 
+## 2026-04-09 - Migrate wallet encryption from AES/ECB to AES/GCM
+
+### Request
+Address the documented known issue: wallet address stored in SharedPreferences used AES-256-ECB mode (not semantically secure — identical plaintexts produce identical ciphertexts, no IV).
+
+### Goal
+Migrate to AES-256-GCM with a random 12-byte IV per encryption operation, while preserving backward-compatibility with existing ECB-encrypted installs.
+
+### Files Modified
+- `app/src/main/java/com/minertim/config/MiningConfig.kt`
+- `CLAUDE.md`
+- `AGENTS.md`
+
+### Behavior / API Changes
+- `encrypt()` now uses `AES/GCM/NoPadding` with a `SecureRandom` 12-byte IV prepended to the ciphertext before Base64 encoding. Each call produces a different ciphertext even for identical inputs.
+- `decrypt()` attempts GCM decryption first (takes first 12 bytes as IV); on auth failure falls back to the legacy `AES/ECB/PKCS5Padding` path. The next `setWalletAddress()` call will silently re-encrypt with GCM, completing migration.
+- New imports: `GCMParameterSpec`, `SecureRandom`.
+- New companion constants: `GCM_IV_LENGTH = 12`, `GCM_TAG_BITS = 128`.
+
+### Verification Performed
+- Code review: `encrypt`/`decrypt` round-trip logic verified by inspection.
+- No Android build run (NDK environment not configured in this session); existing `cargo test` scope unaffected.
+
+### Notes
+- The encryption key itself remains stored as Base64 in SharedPreferences (same as before). For production hardening the key should move to the Android Keystore; that is a separate, larger change.
+- The "Known Issues / Legacy" section was removed from `CLAUDE.md` and `AGENTS.md` as there are no remaining documented issues.
+
 ## 2026-04-08 - Hot Path Optimization Batch
 
 ### Request
@@ -74,6 +101,33 @@ Document the benchmark hardware used to produce the 12-thread CLI performance nu
 - Logical CPUs: 12 (8 performance + 4 efficiency)
 - Memory: 32 GB
 - OS/arch: Darwin 25.3.0 (arm64)
+
+## 2026-04-09 - Android light mode / CLI full mode split
+
+### Request
+Android devices cannot safely allocate the 2 GiB RandomX full dataset — even 3 GB phones like the Samsung Galaxy S6 Edge leave only ~1.5 GB free after OS overhead. Wire in light mode (256 MiB cache, on-the-fly dataset item computation) for the Android build while keeping full mode for the CLI.
+
+### Goal
+`cfg!(target_os = "android")` selects light mode at compile time. No user-visible configuration needed.
+
+### Files Modified
+- `app/src/main/rust/src/miner.rs`
+- `CLAUDE.md`, `AGENTS.md`, `README.md`
+
+### Behavior / API Changes
+- `Miner` gains a `light_mode: bool` field, set to `cfg!(target_os = "android")` in `Miner::new()`.
+- `Miner::start()` skips `SharedDatasetCache` allocation when `light_mode` is true, logging "Starting in light mode".
+- `worker_loop` parameter `dataset_cache: SharedDatasetCache` changed to `Option<SharedDatasetCache>` — `None` = light mode.
+- In the VM key-change branch: `Some(ds_cache)` path unchanged (full mode), `None` path uses `RandomXVm::new()` / `reinit(key, None)` (light mode).
+- CLI binary (`bin/minertim.rs`) unchanged — still runs full mode.
+
+### Memory profile (light mode, 2 threads on S6 Edge)
+- 2 × 256 MiB cache = 512 MiB
+- Android OS overhead: ~1.2 GB
+- Total: ~1.7 GB — comfortably within 3 GB RAM
+
+### Verification Performed
+- `cargo check` — clean (no new warnings or errors)
 
 ## 2026-04-08 - 15+ Minute Benchmark Recalibration
 

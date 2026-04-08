@@ -1,4 +1,4 @@
-# CLAUDE.md - MinerTim
+# AGENTS.md - MinerTim
 
 Monero (XMR) CPU mining app. Runs on Android (Kotlin UI + Rust JNI) and natively on macOS/Linux (CLI binary). Pure Rust mining engine — no C/FFI dependencies. Designed for older Android devices with thermal/battery protection.
 
@@ -148,8 +148,7 @@ Global state: `static MINER: Mutex<Option<Miner>>` and `static MINING_ACTIVE: At
 2. Calls `MiningCore.initializeMiner()` → Rust creates `PoolConnection`, TCP connects, sends Stratum `login` JSON-RPC
 3. Pool connection worker thread receives job notifications (blob + target + difficulty)
 4. `MiningCore.startMining()` → Rust spawns N worker threads, each:
-   - **Android (light mode):** initializes a 256 MiB Argon2d cache per worker; dataset items computed on the fly (~8–10× slower than full mode but fits in mobile RAM)
-   - **CLI (full mode):** first thread generates the shared 2 GiB dataset; all threads then use it via `Arc`
+   - Initializes local RandomX VM (dataset + cache from key)
    - Loops: get work → set nonce at blob[39..47] → compute RandomX hash → compare to target
    - On share found: `pool.submit_share()` sends JSON-RPC `submit`
    - Nonces interleaved: `nonce += thread_count` to avoid overlap
@@ -202,20 +201,6 @@ NDK path is resolved from `ANDROID_NDK_HOME` env var, falling back to `$ANDROID_
 - **Rust:** snake_case functions/variables, PascalCase types, UPPER_SNAKE_CASE consts
 - **XML resources:** snake_case (`activity_main`, `ic_play_arrow`)
 - **Logging:** Android Log API with TAG constants (Kotlin), `log` crate with `android_logger` (Rust)
-
-## AI Session Audit Requirement
-
-For any AI-assisted implementation session:
-
-- Maintain an audit log in repository root: `AUDIT.md`.
-- Append an entry for each implementation batch that changes repo-tracked files.
-- Each entry should include:
-  - request/goal summary,
-  - files changed,
-  - behavior/API changes,
-  - verification performed (build/tests/runtime checks),
-  - notable assumptions or constraints.
-- Do not delete prior audit history; append chronologically.
 
 ## CLI Binary
 

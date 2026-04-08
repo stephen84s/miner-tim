@@ -9,6 +9,7 @@ use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
 
 /// Shared dataset cache — generated once per seed_hash, shared across all workers.
+/// Only used in full mode (CLI). Android uses light mode (no dataset).
 struct DatasetCache {
     seed_hash: Vec<u8>,
     dataset: Arc<RandomXDataset>,
@@ -108,6 +109,8 @@ pub struct Miner {
     total_hashes: Arc<AtomicU64>,
     stats: Option<Arc<MiningStats>>,
     hashrate_tracker: HashrateTracker,
+    /// True on Android: workers use light mode (256 MiB cache, no 2 GiB dataset).
+    light_mode: bool,
 }
 
 impl Miner {
@@ -122,6 +125,7 @@ impl Miner {
             total_hashes: Arc::new(AtomicU64::new(0)),
             stats: None,
             hashrate_tracker: HashrateTracker::new(),
+            light_mode: cfg!(target_os = "android"),
         }
     }
 
@@ -164,7 +168,14 @@ impl Miner {
         self.total_hashes.store(0, Ordering::SeqCst);
 
         let thread_count = self.thread_count as u32;
-        let dataset_cache: SharedDatasetCache = Arc::new(Mutex::new(None));
+        // Full mode only: shared dataset cache (2 GiB). Light mode (Android) passes None.
+        let dataset_cache: Option<SharedDatasetCache> = if self.light_mode {
+            log::info!("Starting in light mode (256 MiB cache per worker, no dataset)");
+            None
+        } else {
+            log::info!("Starting in full mode (2 GiB dataset, shared across workers)");
+            Some(Arc::new(Mutex::new(None)))
+        };
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -195,7 +206,7 @@ impl Miner {
                         pool_conn,
                         total_hashes,
                         hashrate_bits,
-                        ds_cache,
+                        ds_cache,  // None = light mode, Some = full mode
                         stats,
                     );
                 })
@@ -308,7 +319,7 @@ fn worker_loop(
     pool: Arc<PoolConnection>,
     total_hashes: Arc<AtomicU64>,
     hashrate_bits: Arc<AtomicU64>,
-    dataset_cache: SharedDatasetCache,
+    dataset_cache: Option<SharedDatasetCache>,  // None = light mode, Some = full mode
     stats: Arc<MiningStats>,
 ) {
     log::info!("Worker {} started", thread_id);
@@ -347,17 +358,27 @@ fn worker_loop(
 
         // Reinitialize VM if the seed hash changed
         if job.seed_hash != current_key || vm.is_none() {
-            let dataset = get_or_generate_dataset(
-                &dataset_cache,
-                &job.seed_hash,
-                thread_id,
-            );
-            log::info!("Worker {} ready with full dataset", thread_id);
-
-            if let Some(ref mut existing_vm) = vm {
-                existing_vm.reinit(&job.seed_hash, Some(dataset));
-            } else {
-                vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
+            match &dataset_cache {
+                Some(ds_cache) => {
+                    // Full mode: generate/reuse the shared 2 GiB dataset
+                    let dataset = get_or_generate_dataset(ds_cache, &job.seed_hash, thread_id);
+                    log::info!("Worker {} ready with full dataset", thread_id);
+                    if let Some(ref mut existing_vm) = vm {
+                        existing_vm.reinit(&job.seed_hash, Some(dataset));
+                    } else {
+                        vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
+                    }
+                }
+                None => {
+                    // Light mode: 256 MiB Argon2d cache per worker, dataset items on-the-fly
+                    log::info!("Worker {} initializing light-mode cache (256 MiB)...", thread_id);
+                    if let Some(ref mut existing_vm) = vm {
+                        existing_vm.reinit(&job.seed_hash, None);
+                    } else {
+                        vm = Some(RandomXVm::new(&job.seed_hash));
+                    }
+                    log::info!("Worker {} light-mode cache ready", thread_id);
+                }
             }
             current_key = job.seed_hash.clone();
             pipeline_ready = false;

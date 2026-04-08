@@ -131,7 +131,7 @@ fn is_tls_port(address: &str) -> bool {
 
 pub struct PoolConnection {
     stream: Mutex<Option<PoolStream>>,
-    current_job: Arc<Mutex<Option<Job>>>,
+    current_job: Arc<Mutex<Option<Arc<Job>>>>,
     connected: AtomicBool,
     request_id: AtomicU64,
     address: Mutex<String>,
@@ -240,7 +240,7 @@ impl PoolConnection {
                         hex_encode_bytes(&job.target),
                     );
                     if let Ok(mut current) = self.current_job.lock() {
-                        *current = Some(job);
+                        *current = Some(Arc::new(job));
                     }
                 }
             }
@@ -252,7 +252,7 @@ impl PoolConnection {
         }
     }
 
-    pub fn get_work(&self) -> Option<Job> {
+    pub fn get_work(&self) -> Option<Arc<Job>> {
         self.current_job.lock().ok()?.clone()
     }
 
@@ -384,7 +384,7 @@ impl PoolConnection {
                                         hex_encode_bytes(&job.target),
                                     );
                                     if let Ok(mut current) = current_job.lock() {
-                                        *current = Some(job);
+                                        *current = Some(Arc::new(job));
                                     }
                                 }
                             }

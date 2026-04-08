@@ -202,6 +202,20 @@ NDK path is resolved from `ANDROID_NDK_HOME` env var, falling back to `$ANDROID_
 - **XML resources:** snake_case (`activity_main`, `ic_play_arrow`)
 - **Logging:** Android Log API with TAG constants (Kotlin), `log` crate with `android_logger` (Rust)
 
+## AI Session Audit Requirement
+
+For any AI-assisted implementation session:
+
+- Maintain an audit log in repository root: `AUDIT.md`.
+- Append an entry for each implementation batch that changes repo-tracked files.
+- Each entry should include:
+  - request/goal summary,
+  - files changed,
+  - behavior/API changes,
+  - verification performed (build/tests/runtime checks),
+  - notable assumptions or constraints.
+- Do not delete prior audit history; append chronologically.
+
 ## CLI Binary
 
 The Rust crate builds as both `cdylib` (Android JNI) and `rlib` (Rust library). A CLI binary at `src/bin/minertim.rs` reuses the same `Miner` engine for native desktop mining.

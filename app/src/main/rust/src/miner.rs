@@ -315,10 +315,15 @@ fn worker_loop(
 
     let mut vm: Option<RandomXVm> = None;
     let mut current_key: Vec<u8> = Vec::new();
+    let mut current_job_id = String::new();
+    let mut job_blob_current: Vec<u8> = Vec::new();
+    let mut job_blob_next: Vec<u8> = Vec::new();
+    let mut warned_short_blob_for_job = false;
     let mut nonce: u64 = thread_id as u64;
     let mut local_hashes: u64 = 0;
     let start_time = Instant::now();
     let mut last_hashrate_update = Instant::now();
+    let mut pipeline_ready = false;
 
     while mining_active.load(Ordering::Relaxed) {
         let job = match pool.get_work() {
@@ -328,6 +333,17 @@ fn worker_loop(
                 continue;
             }
         };
+
+        if job.job_id != current_job_id {
+            current_job_id = job.job_id.clone();
+            pipeline_ready = false;
+            warned_short_blob_for_job = false;
+
+            job_blob_current.clear();
+            job_blob_current.extend_from_slice(&job.blob);
+            job_blob_next.clear();
+            job_blob_next.extend_from_slice(&job.blob);
+        }
 
         // Reinitialize VM if the seed hash changed
         if job.seed_hash != current_key || vm.is_none() {
@@ -344,22 +360,36 @@ fn worker_loop(
                 vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
             }
             current_key = job.seed_hash.clone();
+            pipeline_ready = false;
         }
 
         let rx_vm = vm.as_mut().unwrap();
 
-        // Prepare input blob with nonce (4 bytes at offset 39–42, CryptoNote standard)
-        let mut input = job.blob.clone();
-        if input.len() >= 43 {
-            let nonce_bytes = (nonce as u32).to_le_bytes();
-            input[39] = nonce_bytes[0];
-            input[40] = nonce_bytes[1];
-            input[41] = nonce_bytes[2];
-            input[42] = nonce_bytes[3];
+        if job_blob_current.len() < 43 || job_blob_next.len() < 43 {
+            if !warned_short_blob_for_job {
+                log::warn!(
+                    "Skipping malformed job {}: blob too short ({} bytes, expected >= 43)",
+                    job.job_id,
+                    job.blob.len()
+                );
+                warned_short_blob_for_job = true;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         }
 
-        // Compute hash
-        let hash = rx_vm.calculate_hash(&input);
+        // Overlap final hashing of the current nonce with scratchpad fill for the next one.
+        let next_nonce = nonce + thread_count as u64;
+        write_nonce_le(&mut job_blob_current, nonce as u32);
+        write_nonce_le(&mut job_blob_next, next_nonce as u32);
+
+        let hash = if pipeline_ready {
+            rx_vm.calculate_hash_pipelined(&job_blob_next)
+        } else {
+            rx_vm.prepare_scratchpad(&job_blob_current);
+            pipeline_ready = true;
+            rx_vm.calculate_hash_pipelined(&job_blob_next)
+        };
         local_hashes += 1;
         nonce += thread_count as u64;
 
@@ -377,7 +407,7 @@ fn worker_loop(
 
         // Compare hash to target (little-endian comparison)
         if meets_target(&hash, &job.target) {
-            let nonce_hex = hex_encode(&input[39..43]);
+            let nonce_hex = hex_encode(&job_blob_current[39..43]);
             let result_hex = hex_encode(&hash);
 
             // Record share timing
@@ -492,6 +522,15 @@ fn meets_target(hash: &[u8; 32], target: &[u8]) -> bool {
     // Compare the last 4 bytes of the hash (big-endian most significant)
     let hash_val = u32::from_le_bytes([hash[28], hash[29], hash[30], hash[31]]);
     hash_val <= target_val
+}
+
+#[inline(always)]
+fn write_nonce_le(blob: &mut [u8], nonce: u32) {
+    let nonce_bytes = nonce.to_le_bytes();
+    blob[39] = nonce_bytes[0];
+    blob[40] = nonce_bytes[1];
+    blob[41] = nonce_bytes[2];
+    blob[42] = nonce_bytes[3];
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

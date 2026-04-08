@@ -1161,6 +1161,15 @@ fn execute_vm_inner(
         // Swap mx and ma
         std::mem::swap(&mut mem_mx, &mut mem_ma);
 
+        // Prefetch the next dataset line (mem_ma is now what was mem_mx).
+        // Issued early so the hardware has the full remainder of the iteration to fetch.
+        #[cfg(target_arch = "aarch64")]
+        if let Some(ds) = dataset {
+            let next_read_ptr = dataset_offset + (mem_ma as u64 & CACHE_LINE_ALIGN_MASK as u64);
+            let addr = ds.as_ptr().add(next_read_ptr as usize);
+            std::arch::asm!("prfm pldl1keep, [{addr}]", addr = in(reg) addr, options(nostack, readonly, preserves_flags));
+        }
+
         // Store r-registers back to scratchpad
         for i in 0..REGISTERS_COUNT {
             store64(scratchpad, sp_addr1 as usize + 8 * i, nreg.r(i));
@@ -1174,6 +1183,31 @@ fn execute_vm_inner(
         // Store f-registers back to scratchpad
         for i in 0..REGISTER_COUNT_FLT {
             store_f128(scratchpad, sp_addr0 as usize + 16 * i, nreg.f(i));
+        }
+
+        // Prefetch the next iteration's scratchpad regions.
+        // sp_addr0/sp_addr1 reset to 0, so the next values are simply
+        // (sp_mix as u32) & MASK and ((sp_mix >> 32) as u32) & MASK
+        // where sp_mix uses r-registers AFTER the dataset XOR above.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let next_sp_mix = nreg.r(config.read_reg0) ^ nreg.r(config.read_reg1);
+            let next_sp_addr0 = (next_sp_mix as u32 & SCRATCHPAD_L3_MASK64) as usize;
+            let next_sp_addr1 = ((next_sp_mix >> 32) as u32 & SCRATCHPAD_L3_MASK64) as usize;
+            let base = scratchpad.as_ptr();
+            let a0 = base.add(next_sp_addr0);
+            let a1 = base.add(next_sp_addr0 + 64);
+            let a2 = base.add(next_sp_addr1);
+            let a3 = base.add(next_sp_addr1 + 64);
+            std::arch::asm!(
+                "prfm pldl1keep, [{a0}]",
+                "prfm pldl1keep, [{a1}]",
+                "prfm pldl1keep, [{a2}]",
+                "prfm pldl1keep, [{a3}]",
+                a0 = in(reg) a0, a1 = in(reg) a1,
+                a2 = in(reg) a2, a3 = in(reg) a3,
+                options(nostack, readonly, preserves_flags),
+            );
         }
 
         sp_addr0 = 0;

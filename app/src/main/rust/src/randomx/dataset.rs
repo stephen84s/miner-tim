@@ -128,4 +128,10 @@ impl RandomXDataset {
     pub fn get_item(&self, item_number: u64) -> &[u64; 8] {
         &self.items[item_number as usize]
     }
+
+    /// Raw pointer to the dataset backing store, for prefetch hints.
+    #[inline(always)]
+    pub(crate) fn as_ptr(&self) -> *const u8 {
+        self.items.as_ptr() as *const u8
+    }
 }

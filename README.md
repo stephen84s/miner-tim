@@ -238,6 +238,26 @@ Other Stratum-compatible pools will work but show a risk warning.
 | Mid-range (6-8 cores) | 20-50 H/s |
 | Flagship | 40-80 H/s |
 
+### CLI Benchmark (Measured)
+
+Latest long-run CLI measurement (native desktop, 12 threads):
+
+- Date: 2026-04-08
+- Command: `make cli-run THREADS=12`
+- Pool: `monerohash.com:2222`
+- Benchmark hardware:
+  - CPU: Apple M2 Max
+  - Logical CPUs: 12 (8 performance + 4 efficiency)
+  - Memory: 32 GB
+  - OS/arch: Darwin 25.3.0 (arm64)
+- Run duration: 15+ minutes
+- Full dataset initialization: 46.0s (`Dataset generated in 46.0s`)
+- Peak rolling `1m` hashrate: 4472.9 H/s
+- Post-warmup 10-minute average (`1m` hashrate samples): 4269.1 H/s
+  - Window definition: final 60 `1m` samples (10-second cadence), warmup excluded
+  - Window range: 3918.7–4472.9 H/s
+  - Final reported rolling `10m` hashrate near run end: 4264.4 H/s
+
 Mobile mining is not profitable. Electricity costs will exceed earnings.
 
 ## Project Structure

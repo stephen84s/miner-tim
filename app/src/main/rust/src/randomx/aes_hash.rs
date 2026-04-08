@@ -118,7 +118,20 @@ pub fn hash_aes_1rx4(input: &[u8]) -> [u8; 64] {
 /// Matches the C++ hashAndFillAes1Rx4 function.
 pub fn hash_and_fill_aes_1rx4(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) {
     assert!(scratchpad.len() % 64 == 0);
-    // TODO: add hardware-accelerated (NEON / AES-NI) implementations
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("aes") {
+            unsafe { hash_and_fill_aes_1rx4_neon(scratchpad, hash_out, fill_state) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("aes") {
+            unsafe { hash_and_fill_aes_1rx4_aesni(scratchpad, hash_out, fill_state) };
+            return;
+        }
+    }
     hash_and_fill_aes_1rx4_soft(scratchpad, hash_out, fill_state);
 }
 

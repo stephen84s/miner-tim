@@ -149,3 +149,56 @@ Re-run 12-thread benchmark for at least 15 minutes and compute a consistent post
 - Post-warmup 10-minute average (`1m` samples): 4269.1 H/s
 - Final 10-minute rolling hashrate near run end: 4264.4 H/s
 - Final 10-minute window range: 3918.7–4472.9 H/s
+
+## 2026-04-10 - Fix JIT CBRANCH overflow (compiler.rs:544)
+
+### Request
+Investigate failing test `test_vm_calculate_hash_jit` found during routine test run.
+
+### Goal
+Fix arithmetic overflow in the JIT CBRANCH branch-target calculation.
+
+### Files Changed
+- `app/src/main/rust/src/randomx/jit/compiler.rs`
+- `app/src/main/rust/src/randomx/jit/audit.md`
+
+### Behavior/API Changes
+No API change. Bug fix only: CBRANCH JIT emission no longer panics when `ibc.target == -1` (the common case where a register has no prior usage before CBRANCH).
+
+### Root Cause
+`ibc.target` is `i16` (initialized to `-1`). The expression `(ibc.target as usize) + 1` cast `-1i16` to `usize::MAX` then added 1, causing an integer overflow panic in debug builds. The fix casts through `i32` first: `(ibc.target as i32) + 1`, matching the interpreter's `pc = target; pc += 1` semantics. A `target` of `-1` correctly produces index `0` (branch to program start).
+
+### Verification
+`cargo test --lib randomx::tests::full_hash_tests::test_vm_calculate_hash_jit` — passes, produces correct hash `639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f`. Full suite: **87 passed, 0 failed, 2 ignored**.
+
+### Notable Constraints
+Fix only affects aarch64 JIT path (cfg-gated). Interpreter was unaffected; JIT was broken for any program where CBRANCH references a register used at program start (-1 sentinel).
+
+---
+
+## 2026-04-11 - Add full dataset mode to Android + dataset mode toggle in UI
+
+### Request
+Default Android app to full mode (2 GiB dataset, same as CLI) and add a UI toggle to switch between full and light mode before starting mining.
+
+### Files Changed
+- `app/src/main/rust/src/miner.rs` — Changed `Miner::new()` default `light_mode` from `cfg!(target_os = "android")` to `false` (full mode everywhere). Added `pub fn set_light_mode(bool)`.
+- `app/src/main/rust/src/lib.rs` — Added `Java_com_minertim_mining_MiningCore_setLightMode` JNI export.
+- `app/src/main/java/com/minertim/mining/MiningCore.kt` — Declared `external fun setLightMode(lightMode: Boolean): Boolean`.
+- `app/src/main/java/com/minertim/config/MiningConfig.kt` — Added `KEY_LIGHT_MODE`, `getLightMode()` (default `false` = full mode), `setLightMode(Boolean)`.
+- `app/src/main/java/com/minertim/mining/MiningService.kt` — Calls `miningCore.setLightMode(config.getLightMode())` between `initializeMiner` and `startMining`.
+- `app/src/main/res/layout/activity_main.xml` — Added Switch + hint TextView row in the configuration card.
+- `app/src/main/java/com/minertim/MainActivity.kt` — Wired up Switch: loads from config, saves on change, disabled while mining, hint text updates dynamically.
+- `app/src/main/res/values/strings.xml` — Added `full_dataset_mode`, `full_dataset_mode_hint_on`, `full_dataset_mode_hint_off`.
+
+### Behavior / API Changes
+- Android now defaults to full mode (2 GiB shared dataset) on first install. Existing installs default to full mode since `KEY_LIGHT_MODE` pref is absent → `getLightMode()` returns `false`.
+- Users can switch to light mode (256 MiB, slower) via the new toggle before starting mining. Toggle is disabled while mining is active.
+- `Miner::new()` no longer uses `cfg!(target_os = "android")` to auto-select mode; mode must be set explicitly via `set_light_mode()` if non-default behavior is needed.
+- CLI binary unaffected: `set_light_mode` is never called so it uses the `new()` default of `false` (full mode), same as before.
+
+### Verification
+`cargo check` — clean (warnings are pre-existing, no new errors). Kotlin changes are syntactically straightforward ViewBinding wiring with no logic changes to mining path.
+
+### Notable Constraints
+Full mode on Android requires ~2 GiB of free RAM. Devices with less available memory may OOM during dataset generation. The UI hint text ("~2 GiB RAM · faster hashing") informs users of the requirement.

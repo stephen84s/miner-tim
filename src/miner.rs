@@ -125,7 +125,7 @@ impl Miner {
             total_hashes: Arc::new(AtomicU64::new(0)),
             stats: None,
             hashrate_tracker: HashrateTracker::new(),
-            light_mode: cfg!(target_os = "android"),
+            light_mode: false,
         }
     }
 

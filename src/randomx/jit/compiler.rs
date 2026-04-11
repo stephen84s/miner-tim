@@ -541,11 +541,12 @@ fn emit_cbranch(
 
     // Branch target: the interpreter does `pc = target; pc += 1`, so the next
     // instruction executed is target + 1. In the JIT, branch to offsets[target + 1].
-    let target_idx = (ibc.target as usize) + 1;
-    let target_offset = if target_idx < RANDOMX_PROGRAM_SIZE {
-        offsets[target_idx]
+    // ibc.target is i16 — cast to i32 first to avoid overflow on negative values.
+    let target_signed = (ibc.target as i32) + 1;
+    let target_offset = if target_signed >= 0 && (target_signed as usize) < RANDOMX_PROGRAM_SIZE {
+        offsets[target_signed as usize]
     } else {
-        // Target is past the last instruction — fall through (no branch needed)
+        // Target is out of bounds — fall through (no branch needed)
         e.len() + 1 // make rel == 1 which skips nothing (B.EQ +1 = next instruction)
     };
     let current = e.len();

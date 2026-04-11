@@ -20,6 +20,9 @@
 - `randomx/vm.rs` — Added `#[repr(C)]`, `pub(crate)` visibility, JIT integration in execute_vm
 - `randomx/tests.rs` — Added `test_vm_calculate_hash_jit` (full mode, known test vector)
 
+## Bug Fix (2026-04-10)
+4. **CBRANCH overflow** (`compiler.rs:544`): `(ibc.target as usize) + 1` overflowed when `ibc.target == -1` (register never used). Fixed to `(ibc.target as i32) + 1` — matches interpreter semantics (`pc = target; pc += 1`). All 87 tests pass post-fix.
+
 ## Key Bugs Fixed During Development
 1. **Bitmask immediate encoding** (`encode_bitmask_imm`): immr rotation was wrong — needed `(size - rotation) % size` instead of `rotation`
 2. **Register-offset load/store**: `ldr_reg`/`str_reg` had wrong option field (000=UXTB instead of 011=LSL), causing SIGILL

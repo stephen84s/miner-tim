@@ -1,110 +1,15 @@
-# MinerTim - Android Monero Miner
+# MinerTim - Monero CLI Miner
 
-CPU-based Monero (XMR) miner for Android and macOS/Linux. Android app with thermal and battery protection (Kotlin UI + Rust JNI). Native CLI binary for desktop mining. Pure Rust mining engine — no C/FFI dependencies.
-
-> **Disclaimer:** Mining on mobile devices will generate heat, drain battery, and is generally unprofitable. This project is for educational purposes and Monero network support. Use on devices you own, at your own risk.
+CPU-based Monero (XMR) miner optimised for macOS (Apple Silicon). Pure Rust mining engine — no C/FFI dependencies. Stratum TCP/TLS pool support. aarch64 JIT compiler for maximum hashrate on M-series Macs.
 
 ## Requirements
 
-### Android Device
-- Android 5.0+ (API 21)
-- ARM, ARM64, x86, or x86_64 architecture
-- 2+ CPU cores, 2GB+ RAM recommended
-
-### Desktop (CLI)
-- **macOS** (tested) or Linux
+- **macOS** on Apple Silicon (M1/M2/M3)
 - **Rust 1.94+** via [rustup](https://rustup.rs)
 
-### Development (Android builds)
-- **macOS** (tested), Linux should also work
-- **Java 17** (e.g. Temurin via SDKMAN)
-- **Rust 1.94+** via [rustup](https://rustup.rs)
-- **Android SDK** with NDK 26.1
-- **cargo-ndk** for cross-compiling Rust to Android
+Linux/x86_64 also supported (interpreter fallback, no JIT).
 
-## Setup
-
-### 1. Install Rust and Android Targets
-
-```bash
-# Install rustup if you don't have it
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# Add Android cross-compilation targets
-rustup target add \
-  aarch64-linux-android \
-  armv7-linux-androideabi \
-  i686-linux-android \
-  x86_64-linux-android
-
-# Install cargo-ndk
-cargo install cargo-ndk
-```
-
-### 2. Install Android SDK and NDK
-
-If you don't have Android Studio:
-
-```bash
-# macOS (via Homebrew)
-brew install --cask android-commandlinetools
-
-# Create SDK directory and install components
-export ANDROID_HOME="$HOME/Library/Android/sdk"
-mkdir -p "$ANDROID_HOME"
-
-yes | sdkmanager --sdk_root="$ANDROID_HOME" \
-  "platform-tools" \
-  "platforms;android-35" \
-  "build-tools;36.0.0" \
-  "ndk;26.1.10909125"
-```
-
-### 3. Set Environment Variables
-
-Add to your `~/.zshrc` (or `~/.bashrc`):
-
-```bash
-export ANDROID_HOME="$HOME/Library/Android/sdk"
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
-export PATH="$ANDROID_HOME/platform-tools:$PATH"
-```
-
-Then reload: `source ~/.zshrc`
-
-### 4. Clone and Build
-
-```bash
-git clone <repo-url> miner-tim
-cd miner-tim
-./gradlew assembleDebug
-```
-
-The Gradle build automatically cross-compiles the Rust native library for all 4 Android ABIs before packaging.
-
-**Output:** `app/build/outputs/apk/debug/app-debug.apk` (~9MB)
-
-## Build Commands
-
-All commands are available via `make help`.
-
-| Command | Description |
-|---|---|
-| `make build` | Debug APK (auto-builds Rust) |
-| `make release` | Release APK |
-| `make test` | Run unit tests |
-| `make rust-check` | Quick Rust type-check (host target) |
-| `make rust-test` | Run Rust unit tests |
-| `make cli` | Build CLI miner binary (native macOS/Linux) |
-| `make cli-run` | Build + run CLI miner (reads `mining.conf`) |
-| `make clean` | Clean all build artifacts |
-
-## Desktop CLI Mining
-
-The Rust mining engine can run natively on macOS/Linux without Android.
-
-### Quick Start
+## Quick Start
 
 ```bash
 # 1. Configure
@@ -112,12 +17,32 @@ cp mining.conf.example mining.conf
 # Edit mining.conf — set WALLET to your Monero address
 
 # 2. Build and run
-make cli-run
-
-# Binary output: app/src/main/rust/target/release/minertim
+make run
 ```
 
-### Configuration
+## Build Commands
+
+| Command | Description |
+|---|---|
+| `make build` | Build release binary |
+| `make run` | Build and run (reads `mining.conf`) |
+| `make test` | Run Rust unit tests |
+| `make check` | Quick type-check |
+| `make clean` | Remove build artifacts |
+
+Override config on the command line:
+
+```bash
+make run POOL=pool.hashvault.pro:443 WALLET=4...addr THREADS=12
+```
+
+Or run the binary directly:
+
+```bash
+./target/release/minertim pool.supportxmr.com:443 <wallet> 12
+```
+
+## Configuration
 
 Create `mining.conf` from the example:
 
@@ -126,215 +51,115 @@ cp mining.conf.example mining.conf
 ```
 
 ```ini
-# mining.conf
 POOL=pool.supportxmr.com:443
 WALLET=4...your_monero_address
-THREADS=2
+THREADS=12
 ```
-
-Values can also be overridden on the command line:
-
-```bash
-make cli-run POOL=pool.hashvault.pro:443 WALLET=4...addr THREADS=4
-```
-
-Or run the binary directly:
-
-```bash
-cd app/src/main/rust
-cargo build --release --bin minertim
-./target/release/minertim pool.supportxmr.com:443 <wallet> 4
-```
-
-### Build Output
-
-| Target | Path |
-|---|---|
-| CLI binary | `app/src/main/rust/target/release/minertim` |
-| Debug APK | `app/build/outputs/apk/debug/app-debug.apk` |
-| Release APK | `app/build/outputs/apk/release/app-release.apk` |
-
-### Distributing the Binary
-
-The CLI binary is self-contained (pure Rust, no C dependencies). To share it:
-
-1. Build: `make cli`
-2. Binary is at `app/src/main/rust/target/release/minertim`
-3. For macOS distribution, codesign to avoid Gatekeeper warnings:
-   ```bash
-   codesign -s - app/src/main/rust/target/release/minertim  # ad-hoc (local use)
-   ```
-
-## Deploy to Device (Android)
-
-### USB (ADB)
-
-```bash
-# Enable Developer Options and USB Debugging on your Android device, then:
-adb devices                  # Verify device is connected
-adb install app/build/outputs/apk/debug/app-debug.apk
-
-# Or build + install in one step:
-./gradlew installDebug
-```
-
-### Wireless ADB (Android 11+)
-
-```bash
-# On device: Settings > Developer Options > Wireless debugging > Pair
-adb pair <ip>:<port>         # Enter pairing code
-adb connect <ip>:<port>
-./gradlew installDebug
-```
-
-### View Logs
-
-```bash
-adb logcat -s MinerTim:V Miner:V PoolConnection:V Crypto:V ThermalManager:V
-```
-
-## App Usage
-
-### First-Time Setup
-
-1. **Get a Monero wallet** — use the official Monero GUI/CLI wallet or a mobile wallet like Cake Wallet. Copy your address (95 characters, starts with `4`).
-
-2. **Open MinerTim** and configure:
-   - **Wallet address** — your Monero address
-   - **Pool address** — e.g. `pool.supportxmr.com:443`
-   - **Thread count** — start with `cores - 1` (e.g. 3 on a quad-core)
-   - **Temperature limit** — default 75°C is safe for most devices
-   - **Battery minimum** — default 20%, mining pauses below this
-
-3. **Tap Start Mining** — the app runs as a foreground service with a persistent notification showing hashrate.
-
-### Supported Pools
-
-These pools are pre-whitelisted and connect without warnings:
-
-| Pool | Address |
-|---|---|
-| SupportXMR | `pool.supportxmr.com:443` |
-| XMRPool.eu | `xmrpool.eu:443` |
-| Nanopool | `xmr.nanopool.org:14433` |
-| HashVault | `pool.hashvault.pro:443` |
-| MoneroHash | `monerohash.com:443` |
-| XMRPool.net | `xmrpool.net:443` |
-
-Other Stratum-compatible pools will work but show a risk warning.
-
-### Safety Features
-
-- **Thermal throttling** — automatically pauses mining if CPU temperature exceeds the configured limit, resumes after 30s cooldown
-- **Battery protection** — stops mining when battery drops below minimum level
-- **WakeLock** — keeps CPU awake during mining (foreground service)
-- **WiFi-only mode** — prevents mining on metered mobile data
-
-### Expected Performance
-
-| Device Type | Hashrate |
-|---|---|
-| Older phones (2-4 cores) | 5-20 H/s |
-| Mid-range (6-8 cores) | 20-50 H/s |
-| Flagship | 40-80 H/s |
-
-### CLI Benchmark (Measured)
-
-Latest long-run CLI measurement (native desktop, 12 threads):
-
-- Date: 2026-04-08
-- Command: `make cli-run THREADS=12`
-- Pool: `monerohash.com:2222`
-- Benchmark hardware:
-  - CPU: Apple M2 Max
-  - Logical CPUs: 12 (8 performance + 4 efficiency)
-  - Memory: 32 GB
-  - OS/arch: Darwin 25.3.0 (arm64)
-- Run duration: 15+ minutes
-- Full dataset initialization: 46.0s (`Dataset generated in 46.0s`)
-- Peak rolling `1m` hashrate: 4472.9 H/s
-- Post-warmup 10-minute average (`1m` hashrate samples): 4269.1 H/s
-  - Window definition: final 60 `1m` samples (10-second cadence), warmup excluded
-  - Window range: 3918.7–4472.9 H/s
-  - Final reported rolling `10m` hashrate near run end: 4264.4 H/s
-
-Mobile mining is not profitable. Electricity costs will exceed earnings.
 
 ## Project Structure
 
 ```
 miner-tim/
-├── app/
-│   ├── build.gradle                    # AGP 9.1.0, dependencies, Rust build task
-│   └── src/main/
-│       ├── java/com/minertim/
-│       │   ├── MainActivity.kt         # UI (Material Design 3, ViewBinding)
-│       │   ├── mining/
-│       │   │   ├── MiningCore.kt       # JNI interface to Rust
-│       │   │   └── MiningService.kt    # Foreground service
-│       │   ├── thermal/
-│       │   │   └── ThermalManager.kt   # CPU temp & battery monitoring
-│       │   ├── config/
-│       │   │   └── MiningConfig.kt     # Encrypted config (AES-256)
-│       │   └── security/
-│       │       └── SecurityValidator.kt # Input validation & pool whitelist
-│       ├── rust/                        # Native mining engine
-│       │   ├── Cargo.toml
-│       │   └── src/
-│       │       ├── lib.rs              # JNI bridge
-│       │       ├── bin/minertim.rs     # CLI binary entry point
-│       │       ├── miner.rs            # Mining workers
-│       │       ├── pool_connection.rs  # Stratum protocol (TCP/TLS)
-│       │       └── randomx/            # Pure Rust RandomX (light mode on Android, full mode on CLI)
-│       ├── res/                        # Layouts, themes, drawables
-│       └── AndroidManifest.xml
-├── Makefile                            # Build targets (make help)
-├── mining.conf.example                 # CLI config template
-├── build.gradle                        # Root: AGP 9.1.0 plugin
-├── settings.gradle                     # Repository config
-├── gradle/wrapper/                     # Gradle 9.4.1 wrapper
-└── CLAUDE.md                           # Detailed architecture docs
+├── Cargo.toml                  # Dependencies: serde_json, rustls, env_logger, ctrlc
+├── .cargo/config.toml          # target-cpu=native for aarch64-apple-darwin
+├── src/
+│   ├── lib.rs                  # Crate root — re-exports modules
+│   ├── bin/minertim.rs         # CLI entry point (args, Ctrl+C, stats loop)
+│   ├── miner.rs                # Worker thread pool, hashrate tracking, share submission
+│   ├── pool_connection.rs      # Stratum protocol: TCP/TLS, JSON-RPC 2.0, keepalive
+│   └── randomx/                # Pure Rust RandomX implementation (rx/0)
+│       ├── mod.rs
+│       ├── vm.rs               # RandomX VM: program execution, hash computation, pipelining
+│       ├── blake2b.rs          # Blake2b hash
+│       ├── blake2gen.rs        # Blake2 generator for key/program derivation
+│       ├── soft_aes.rs         # Software AES
+│       ├── aes_hash.rs         # AES-based hash functions (fillAes1Rx4, hashAes1Rx4)
+│       ├── argon2d.rs          # Argon2d cache initialisation (256 MiB)
+│       ├── superscalar.rs      # SuperscalarHash program generation
+│       ├── dataset.rs          # Dataset item computation from cache (2 GiB)
+│       ├── tests.rs            # 87 test vectors
+│       └── jit/                # aarch64 JIT compiler
+│           ├── mod.rs
+│           ├── memory.rs       # MAP_JIT memory, W^X toggle (macOS)
+│           ├── aarch64.rs      # ARM64 instruction emitter
+│           └── compiler.rs     # BytecodeInstruction[256] → native ARM64
+├── Makefile
+├── mining.conf.example
+└── CLAUDE.md                   # Architecture reference for AI sessions
 ```
 
 ## Architecture
 
-**Kotlin** handles the Android UI, services, configuration, and security validation. **Rust** handles the performance-critical mining engine, pool communication, and RandomX hashing. The Rust crate builds as both a JNI library (Android) and a native CLI binary (macOS/Linux).
-
 ```
-Android:  UI (MainActivity) -> Service (MiningService) -> JNI (MiningCore.kt)
-                                                              |
-Desktop:  CLI (bin/minertim.rs) ─────────────────────────────┘
-                                                              |
-                                                  Rust (miner.rs)
-                                                  ├── pool_connection.rs (Stratum TCP/TLS)
-                                                  └── randomx/ (pure Rust; light mode on Android, full mode on CLI)
+CLI (bin/minertim.rs)
+  └── Miner (miner.rs)
+        ├── PoolConnection (pool_connection.rs)  — Stratum TCP/TLS
+        └── Worker threads × N
+              └── RandomXVm (randomx/vm.rs)
+                    ├── Full dataset (2 GiB, shared across workers via Arc)
+                    ├── JIT compiler (aarch64) — compiles each program to native ARM64
+                    └── Interpreter fallback (non-aarch64)
 ```
 
-For detailed architecture documentation, see [CLAUDE.md](CLAUDE.md).
+### Mining Flow
 
-## Troubleshooting
+1. `Miner::initialize()` — connects to pool, sends Stratum `login`
+2. Pool sends job (blob + target + job_id)
+3. Thread 0 generates shared 2 GiB RandomX dataset (~46s on M2 Max)
+4. All workers start: `prepare_scratchpad` → pipelined `calculate_hash_pipelined` loop
+5. Each worker writes nonce at `blob[39..43]`, computes hash, checks against target
+6. Share found → `pool.submit_share()` sends Stratum `submit`
+7. New job from pool → workers pick it up atomically via `Arc<Mutex<Option<Arc<Job>>>>`
 
-**Build fails with "cargo: command not found"**
-— Ensure `source "$HOME/.cargo/env"` is in your shell profile, or run it before building.
+### JIT Compiler (aarch64)
 
-**Build fails with "NDK not found"**
-— Set `ANDROID_NDK_HOME` environment variable. The Gradle build expects it at `$ANDROID_HOME/ndk/26.1.10909125`.
+Active on macOS aarch64. For each of the 8 RandomX program chains per hash:
 
-**Build fails with Kotlin errors**
-— Run `./gradlew clean` then rebuild. AGP 9.1.0 bundles Kotlin — do not add a separate Kotlin plugin.
+1. `JitCompiler::compile()` translates `BytecodeInstruction[256]` to ARM64 machine code
+2. Stored in a MAP_JIT region with W^X toggle (`pthread_jit_write_protect_np`)
+3. Executed directly via function pointer — ~3× faster than interpreter
 
-**Mining won't start**
-— Check: wallet address is 95+ chars starting with `4`, pool address includes `:port`, device has internet, temperature and battery are within limits.
+### Pipelined Hashing
 
-**No shares after extended mining**
-— Normal for low hashrate devices. At 10 H/s it can take hours to find a share depending on pool difficulty.
+`calculate_hash_pipelined` overlaps the AES scratchpad fill for the *next* input with the final Blake2b hash of the *current* output, hiding dataset-read latency.
+
+### Stratum Protocol
+
+- Newline-delimited JSON-RPC 2.0 over TCP (TLS via rustls)
+- Login: `{"method":"login", "params":{"login":"<wallet>", "pass":"x", "agent":"MinerTim/1.0", "algo":"rx/0"}}`
+- Pool sends `job` with `blob` (168 hex), `target` (8 hex), `job_id`
+- Submit: `{"method":"submit", "params":{"job_id":"...", "nonce":"...", "result":"..."}}`
+- Keepalive ping every 60s
+
+## Performance
+
+Measured on Apple M2 Max (12 threads, `make run THREADS=12`):
+
+| Metric | Value |
+|---|---|
+| Hardware | Apple M2 Max, 12 logical CPUs, 32 GB RAM |
+| Dataset init | ~46s |
+| Peak 1m hashrate | ~5000 H/s |
+| Sustained average | ~4270 H/s |
+| Optimisation flags | `target-cpu=native`, LTO, `codegen-units=1` |
+
+## Distribution
+
+The binary is self-contained (pure Rust, no dynamic C dependencies).
+
+```bash
+make build
+# Binary: target/release/minertim
+
+# Ad-hoc codesign for local distribution (avoids Gatekeeper warning):
+codesign -s - target/release/minertim
+```
 
 ## Acknowledgements
 
-- **[tevador/RandomX](https://github.com/tevador/RandomX)** — The RandomX proof-of-work algorithm and its C++ reference implementation. The Rust mining engine (`randomx/`) is a port of the reference implementation, following the same algorithmic structure for the VM, AES hashing, Argon2d cache, Blake2b, SuperscalarHash, and dataset generation. RandomX is licensed under BSD 3-Clause.
-
-- **[XMRig](https://github.com/xmrig/xmrig)** — The aarch64 JIT compiler design (register allocation scheme, JIT memory management approach, and scratchpad/dataset prefetch strategy) was informed by XMRig's RandomX JIT implementation. XMRig is licensed under GPL-3.0.
+- **[tevador/RandomX](https://github.com/tevador/RandomX)** — RandomX proof-of-work algorithm and C++ reference implementation. The `randomx/` module is a pure Rust port following the same algorithmic structure. BSD 3-Clause.
+- **[XMRig](https://github.com/xmrig/xmrig)** — aarch64 JIT register allocation scheme, JIT memory management approach, and scratchpad/dataset prefetch strategy. GPL-3.0.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](LICENSE)

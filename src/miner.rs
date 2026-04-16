@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use crate::hex::hex_encode;
 use crate::pool_connection::PoolConnection;
 use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
 
 /// Shared dataset cache — generated once per seed_hash, shared across all workers.
-/// Only used in full mode (CLI). Android uses light mode (no dataset).
 struct DatasetCache {
     seed_hash: Vec<u8>,
     dataset: Arc<RandomXDataset>,
@@ -98,19 +98,16 @@ pub struct ShareStats {
 }
 
 
-#[allow(dead_code)]
 pub struct Miner {
     pool_connection: Option<Arc<PoolConnection>>,
     workers: Vec<JoinHandle<()>>,
-    thread_count: i32,
+    thread_count: u32,
     hashrate_bits: Arc<AtomicU64>,
     mining_active: Arc<AtomicBool>,
     start_time: Option<Instant>,
     total_hashes: Arc<AtomicU64>,
     stats: Option<Arc<MiningStats>>,
     hashrate_tracker: HashrateTracker,
-    /// True on Android: workers use light mode (256 MiB cache, no 2 GiB dataset).
-    light_mode: bool,
 }
 
 impl Miner {
@@ -125,7 +122,6 @@ impl Miner {
             total_hashes: Arc::new(AtomicU64::new(0)),
             stats: None,
             hashrate_tracker: HashrateTracker::new(),
-            light_mode: false,
         }
     }
 
@@ -133,10 +129,10 @@ impl Miner {
         &mut self,
         pool: &str,
         wallet: &str,
-        threads: i32,
+        threads: u32,
     ) -> Result<(), String> {
         let max_threads = thread::available_parallelism()
-            .map(|n| n.get() as i32)
+            .map(|n| n.get() as u32)
             .unwrap_or(4);
         self.thread_count = threads.clamp(1, max_threads);
 
@@ -167,15 +163,9 @@ impl Miner {
         self.start_time = Some(Instant::now());
         self.total_hashes.store(0, Ordering::SeqCst);
 
-        let thread_count = self.thread_count as u32;
-        // Full mode only: shared dataset cache (2 GiB). Light mode (Android) passes None.
-        let dataset_cache: Option<SharedDatasetCache> = if self.light_mode {
-            log::info!("Starting in light mode (256 MiB cache per worker, no dataset)");
-            None
-        } else {
-            log::info!("Starting in full mode (2 GiB dataset, shared across workers)");
-            Some(Arc::new(Mutex::new(None)))
-        };
+        let thread_count = self.thread_count;
+        let dataset_cache: SharedDatasetCache = Arc::new(Mutex::new(None));
+        log::info!("Starting in full mode (2 GiB dataset, shared across workers)");
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -194,6 +184,7 @@ impl Miner {
             let total_hashes = self.total_hashes.clone();
             let hashrate_bits = self.hashrate_bits.clone();
             let ds_cache = dataset_cache.clone();
+
             let stats = stats.clone();
 
             let handle = thread::Builder::new()
@@ -206,7 +197,7 @@ impl Miner {
                         pool_conn,
                         total_hashes,
                         hashrate_bits,
-                        ds_cache,  // None = light mode, Some = full mode
+                        ds_cache,
                         stats,
                     );
                 })
@@ -303,9 +294,9 @@ impl Miner {
             .unwrap_or(0)
     }
 
-    pub fn set_thread_count(&mut self, count: i32) {
+    pub fn set_thread_count(&mut self, count: u32) {
         let max_threads = thread::available_parallelism()
-            .map(|n| n.get() as i32)
+            .map(|n| n.get() as u32)
             .unwrap_or(4);
         self.thread_count = count.clamp(1, max_threads);
         log::info!("Thread count set to {}", self.thread_count);
@@ -319,7 +310,7 @@ fn worker_loop(
     pool: Arc<PoolConnection>,
     total_hashes: Arc<AtomicU64>,
     hashrate_bits: Arc<AtomicU64>,
-    dataset_cache: Option<SharedDatasetCache>,  // None = light mode, Some = full mode
+    dataset_cache: SharedDatasetCache,
     stats: Arc<MiningStats>,
 ) {
     log::info!("Worker {} started", thread_id);
@@ -358,27 +349,12 @@ fn worker_loop(
 
         // Reinitialize VM if the seed hash changed
         if job.seed_hash != current_key || vm.is_none() {
-            match &dataset_cache {
-                Some(ds_cache) => {
-                    // Full mode: generate/reuse the shared 2 GiB dataset
-                    let dataset = get_or_generate_dataset(ds_cache, &job.seed_hash, thread_id);
-                    log::info!("Worker {} ready with full dataset", thread_id);
-                    if let Some(ref mut existing_vm) = vm {
-                        existing_vm.reinit(&job.seed_hash, Some(dataset));
-                    } else {
-                        vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
-                    }
-                }
-                None => {
-                    // Light mode: 256 MiB Argon2d cache per worker, dataset items on-the-fly
-                    log::info!("Worker {} initializing light-mode cache (256 MiB)...", thread_id);
-                    if let Some(ref mut existing_vm) = vm {
-                        existing_vm.reinit(&job.seed_hash, None);
-                    } else {
-                        vm = Some(RandomXVm::new(&job.seed_hash));
-                    }
-                    log::info!("Worker {} light-mode cache ready", thread_id);
-                }
+            let dataset = get_or_generate_dataset(&dataset_cache, &job.seed_hash, thread_id);
+            log::info!("Worker {} ready with full dataset", thread_id);
+            if let Some(ref mut existing_vm) = vm {
+                existing_vm.reinit(&job.seed_hash, Some(dataset));
+            } else {
+                vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
             }
             current_key = job.seed_hash.clone();
             pipeline_ready = false;
@@ -552,12 +528,4 @@ fn write_nonce_le(blob: &mut [u8], nonce: u32) {
     blob[40] = nonce_bytes[1];
     blob[41] = nonce_bytes[2];
     blob[42] = nonce_bytes[3];
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
 }

@@ -36,6 +36,7 @@ make run POOL=pool.supportxmr.com:443 WALLET=<addr> THREADS=12
 src/
 ├── lib.rs                  # Crate root — pub mod declarations
 ├── bin/minertim.rs         # CLI entry point (args, env_logger, Ctrl+C, stats loop)
+├── hex.rs                  # Shared hex_encode / hex_decode utilities
 ├── miner.rs                # Miner struct, worker thread pool, hashrate tracking
 ├── pool_connection.rs      # Stratum TCP/TLS, JSON-RPC 2.0, keepalive
 └── randomx/
@@ -65,7 +66,7 @@ src/
 ### Mining Flow
 1. `Miner::initialize(pool, wallet, threads)` — creates `PoolConnection`, TCP/TLS connects, sends Stratum `login`
 2. Pool sends `job` (blob + target + job_id)
-3. `Miner::start_mining()` — spawns N workers; `dataset_cache = Some(Arc::new(Mutex::new(None)))`
+3. `Miner::start()` — spawns N workers; `dataset_cache = Arc::new(Mutex::new(None))`
 4. Thread 0 calls `get_or_generate_dataset()` — generates 2 GiB dataset (~46s M2 Max); other threads wait on the same mutex
 5. Each worker: `RandomXVm::new_full(seed, dataset)` → `prepare_scratchpad(blob)` → loop `calculate_hash_pipelined(next_blob)`
 6. On hash ≤ target: `pool.submit_share(job_id, nonce_hex, hash_hex)`

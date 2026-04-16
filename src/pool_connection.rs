@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::hex::{hex_decode, hex_encode};
+
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::ClientConfig;
 use serde::{Deserialize, Serialize};
@@ -216,7 +218,7 @@ impl PoolConnection {
     pub fn login(&self, wallet: &str) -> Result<(), String> {
         let params = serde_json::json!({
             "login": wallet,
-            "pass": "android",
+            "pass": "x",
             "agent": "MinerTim/1.0",
             "algo": "rx/0"
         });
@@ -237,7 +239,7 @@ impl PoolConnection {
                         "Initial job: {} (difficulty: {}, target: {})",
                         job.job_id,
                         diff,
-                        hex_encode_bytes(&job.target),
+                        hex_encode(&job.target),
                     );
                     if let Ok(mut current) = self.current_job.lock() {
                         *current = Some(Arc::new(job));
@@ -381,7 +383,7 @@ impl PoolConnection {
                                         "New job: {} (difficulty: {}, target: {})",
                                         job.job_id,
                                         diff,
-                                        hex_encode_bytes(&job.target),
+                                        hex_encode(&job.target),
                                     );
                                     if let Ok(mut current) = current_job.lock() {
                                         *current = Some(Arc::new(job));
@@ -517,27 +519,6 @@ fn parse_job(data: &Value) -> Option<Job> {
         job_id,
         seed_hash,
     })
-}
-
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
-        return None;
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&hex[i..i + 2], 16).ok()?;
-        bytes.push(byte);
-    }
-    Some(bytes)
-}
-
-fn hex_encode_bytes(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
 }
 
 fn target_to_difficulty(target: &[u8]) -> u64 {

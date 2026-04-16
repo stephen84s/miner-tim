@@ -202,3 +202,30 @@ Default Android app to full mode (2 GiB dataset, same as CLI) and add a UI toggl
 
 ### Notable Constraints
 Full mode on Android requires ~2 GiB of free RAM. Devices with less available memory may OOM during dataset generation. The UI hint text ("~2 GiB RAM · faster hashing") informs users of the requirement.
+
+## 2026-04-11 - CLI-only refactoring: dead code removal, type fixes, code dedup
+
+### Request
+Review codebase for Rust design principle improvements after the Android → CLI-only pivot.
+
+### Goal
+Remove dead Android code paths, fix type mismatches, consolidate duplicated utilities, clean up stale references.
+
+### Files Changed
+- `src/miner.rs` — Removed `light_mode: bool` field and all light/full mode branching (always full mode). Removed `#[allow(dead_code)]` on `Miner`. Changed `dataset_cache` from `Option<SharedDatasetCache>` to `SharedDatasetCache` in `worker_loop`. Changed `thread_count` from `i32` to `u32` in struct, `initialize()`, and `set_thread_count()`. Removed stale Android comments. Removed local `hex_encode` in favour of shared module.
+- `src/pool_connection.rs` — Changed `"pass": "android"` to `"pass": "x"` in Stratum login. Removed local `hex_decode` and `hex_encode_bytes` in favour of shared module. Added `use crate::hex::{hex_decode, hex_encode}`.
+- `src/hex.rs` — New shared module with `hex_encode` and `hex_decode`.
+- `src/lib.rs` — Added `pub mod hex`.
+- `src/bin/minertim.rs` — Changed `threads` parse type from `i32` to `u32`.
+
+### Behavior / API Changes
+- `Miner::initialize()` and `set_thread_count()` now take `u32` instead of `i32` (negative thread counts were never valid).
+- Stratum login pass field changed from `"android"` to `"x"` (standard convention for anonymous pool auth).
+- No functional changes to mining logic, hashrate computation, or pool protocol.
+
+### Verification Performed
+- `make check` — clean (no new warnings or errors; all warnings are pre-existing)
+- `make test` — **87 passed, 0 failed, 2 ignored** (631s)
+
+### Notable Constraints
+- Pre-existing warnings (superscalar variant naming, unused constants, JIT visibility) intentionally left alone to avoid risking the performance-sensitive codegen — see prior sessions where even logically equivalent cfg gate changes caused 36% hashrate regressions.

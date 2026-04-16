@@ -65,6 +65,7 @@ miner-tim/
 ├── src/
 │   ├── lib.rs                  # Crate root — re-exports modules
 │   ├── bin/minertim.rs         # CLI entry point (args, Ctrl+C, stats loop)
+│   ├── hex.rs                  # Shared hex encoding/decoding
 │   ├── miner.rs                # Worker thread pool, hashrate tracking, share submission
 │   ├── pool_connection.rs      # Stratum protocol: TCP/TLS, JSON-RPC 2.0, keepalive
 │   └── randomx/                # Pure Rust RandomX implementation (rx/0)

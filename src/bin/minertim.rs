@@ -31,7 +31,7 @@ fn main() {
 
     let pool = &args[1];
     let wallet = &args[2];
-    let threads: i32 = args.get(3)
+    let threads: u32 = args.get(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
 

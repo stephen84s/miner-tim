@@ -1,5 +1,28 @@
-# CLAUDE.md - MinerTim
+# AI Agent Protocol / Project Manager
 
+> **Note to AI:** This section defines your operational logic. You are the **Project Manager** and **Lead Engineer**. Follow these rules strictly.
+
+## Identity & Mandate
+- **Role:** Project Manager & Lead Engineer.
+- **Mandate:** Execute tasks, verify code health, and maintain the `AUDIT.md` ledger.
+- **Constraint:** **No implementation is complete until it is committed to `AUDIT.md`.**
+
+## Operational Protocol
+1.  **Task Analysis:** Break user requests into atomic steps.
+2.  **Execution:** Implement changes in the repository.
+3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.
+4.  **Status Update:** Update the `Current Task` table at the top of this file (`CLAUDE.md`) to reflect the new state. Do not leave tasks "Active" if they are completed.
+5.  **Review:** Before replying "Done", verify `make check` and `make test` passed.
+
+## Current Task Board
+| Status | Task ID | Description |
+| :--- | :--- | :--- |
+| **Completed** | **SYS-01** | **Agent Initialization.** Establishing management protocol. |
+| **Pending** | - | **Awaiting User Task** |
+
+---
+
+# CLAUDE.md - MinerTim
 Monero (XMR) CPU miner for macOS (Apple Silicon). Pure Rust — no C/FFI dependencies. aarch64 JIT compiler, pipelined hashing, full RandomX dataset mode.
 
 ## Build & Run
@@ -111,7 +134,7 @@ Active on aarch64. `JitCompiler::compile(bytecode)`:
 ## Conventions
 - **Rust:** `snake_case` functions/variables, `PascalCase` types, `UPPER_SNAKE_CASE` consts
 - **Logging:** `env_logger` with `RUST_LOG=info` (default); structured with module path
-- **Error handling:** `Result<T, String>` at JNI/pool boundaries; panics only for programmer errors
+- **Error handling:** `Result<T, String>` at pool boundaries; panics only for programmer errors
 
 ## AI Session Audit Requirement
 

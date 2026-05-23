@@ -176,6 +176,27 @@ Fix only affects aarch64 JIT path (cfg-gated). Interpreter was unaffected; JIT w
 
 ---
 
+## 2026-04-11 - Agent Initialization & Protocol Setup
+
+### Request
+Establish a management framework where the AI agent acts as the project manager, ensuring all tasks are tracked and `AUDIT.md` is updated dynamically.
+
+### Goal
+- Formalize AI behavior in `CLAUDE.md`.
+- Initialize the task board.
+- Confirm the repository is in a valid state (CLI-only, full mode).
+
+### Files Modified
+- `CLAUDE.md` — Added "AI Agent Protocol" and "Current Task Board" sections.
+- `AUDIT.md` — Added initialization entry.
+
+### Verification
+- Code review of `CLAUDE.md` ensures clear separation of "Project Info" and "Agent Instructions".
+- Audit log verified (chronological, no duplicates).
+
+### Notes
+- The AI will now strictly maintain the `AUDIT.md` ledger after every code change.
+
 ## 2026-04-11 - Add full dataset mode to Android + dataset mode toggle in UI
 
 ### Request

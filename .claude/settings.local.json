@@ -3,7 +3,18 @@
     "allow": [
       "Bash(source \"$HOME/.cargo/env\")",
       "Bash(cargo check:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:www.gnu.org)",
+      "WebSearch",
+      "Bash(cargo test:*)",
+      "Bash(make cli:*)",
+      "Bash(gtimeout 45 make cli-run)",
+      "Bash(pkill -f \"minertim.*test_vm\")",
+      "WebFetch(domain:github.com)",
+      "Bash(adb devices:*)",
+      "Bash(make build:*)",
+      "Bash(make rust-check:*)",
+      "Bash(cargo build:*)"
     ]
   }
 }

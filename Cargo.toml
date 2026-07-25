@@ -20,8 +20,23 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 webpki-roots = "1.0"
 ctrlc = "3.4"
 
+[dev-dependencies]
+# default-features off drops plotters/rayon/html-report — we only need timing.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hash"
+harness = false
+
 [profile.release]
 lto = true
 opt-level = 3
 strip = true
+codegen-units = 1
+
+# Benchmarks compile in the `bench` profile; give them release-grade codegen
+# so measurements reflect the real mining binary.
+[profile.bench]
+lto = true
+opt-level = 3
 codegen-units = 1

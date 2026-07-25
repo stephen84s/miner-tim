@@ -136,6 +136,23 @@ impl Miner {
             .unwrap_or(4);
         self.thread_count = threads.clamp(1, max_threads);
 
+        // RandomX is memory-bandwidth bound and macOS offers no CPU affinity,
+        // so threads scheduled onto efficiency cores add little throughput and
+        // can contend with the performance-core threads. Warn if the user asked
+        // for more than the P-core count.
+        if let Some(p_cores) = performance_core_count() {
+            if self.thread_count > p_cores {
+                log::warn!(
+                    "Requested {} threads but this CPU has {} performance cores; \
+                     the extra threads will run on efficiency cores and may not \
+                     improve (or may reduce) hashrate. Consider THREADS={}.",
+                    self.thread_count,
+                    p_cores,
+                    p_cores
+                );
+            }
+        }
+
         let connection = Arc::new(PoolConnection::new());
         connection.connect(pool).map_err(|e| format!("Connection failed: {}", e))?;
         connection.login(wallet).map_err(|e| format!("Login failed: {}", e))?;
@@ -531,4 +548,56 @@ fn write_nonce_le(blob: &mut [u8], nonce: u32) {
     blob[40] = nonce_bytes[1];
     blob[41] = nonce_bytes[2];
     blob[42] = nonce_bytes[3];
+}
+
+/// Number of performance ("P") cores, if the platform can report it.
+/// On Apple Silicon macOS this reads `hw.perflevel0.logicalcpu`; other
+/// platforms return `None` (callers fall back to total parallelism).
+#[cfg(target_os = "macos")]
+pub fn performance_core_count() -> Option<u32> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_void};
+
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+
+    let name = CString::new("hw.perflevel0.logicalcpu").ok()?;
+    let mut value: i32 = 0;
+    let mut len = std::mem::size_of::<i32>();
+    let ret = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            &mut value as *mut i32 as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret == 0 && value > 0 {
+        Some(value as u32)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn performance_core_count() -> Option<u32> {
+    None
+}
+
+/// Recommended default thread count: the number of performance cores if known,
+/// otherwise total available parallelism (capped for sanity).
+pub fn recommended_thread_count() -> u32 {
+    performance_core_count().unwrap_or_else(|| {
+        thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(4)
+    })
 }

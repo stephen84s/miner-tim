@@ -19,6 +19,7 @@
 | :--- | :--- | :--- |
 | **Completed** | **SYS-01** | **Agent Initialization.** Establishing management protocol. |
 | **Completed** | **NET-01** | **Pool robustness.** Fixed TLS double-session receiver bug; added keepalive, auto-reconnect/relogin, 8-byte target support. Clippy backlog cleared (63→0). |
+| **Completed** | **PERF-01** | **Bench harness + P-core threads.** Added criterion benchmark (regression guard); default threads now = performance-core count (macOS `hw.perflevel0.logicalcpu`) instead of 2. Confirmed via xmrig docs that affinity/huge-pages are unavailable on ARM macOS. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

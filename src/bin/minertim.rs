@@ -24,7 +24,8 @@ fn main() {
         eprintln!("Arguments:");
         eprintln!("  pool:port    Mining pool address with port (TLS auto-detected)");
         eprintln!("  wallet       Monero wallet address");
-        eprintln!("  threads      Number of mining threads (default: 2, max: {})",
+        eprintln!("  threads      Number of mining threads (default: {} performance cores, max: {})",
+            minertim::miner::recommended_thread_count(),
             thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
@@ -33,7 +34,7 @@ fn main() {
     let wallet = &args[2];
     let threads: u32 = args.get(3)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
+        .unwrap_or_else(minertim::miner::recommended_thread_count);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 

@@ -318,3 +318,62 @@ performance-sensitive RandomX codegen.
   data is public and many pools use self-signed certs.
 - Left the performance-sensitive RandomX execution paths untouched per the
   prior sessions' 36%-regression warning.
+
+## 2026-07-25 - Benchmark harness + P-core-aware thread defaulting
+
+### Request
+"do it" — implement the two safe optimizations identified in the codebase
+review: a benchmark harness and performance-core-aware thread selection.
+
+### Goal
+Give the project a way to measure hashrate regressions (it has a documented
+~36% regression history but no benchmark), and stop defaulting mining threads
+onto efficiency cores where they add little and can contend.
+
+### Context (verified against xmrig docs)
+xmrig's own documentation confirms that on ARM macOS **CPU affinity is not
+supported** and **huge pages are not supported** — so hard P-core pinning and
+2 MiB superpages (the other candidates from the review) are dead ends on this
+target and were deliberately NOT attempted. The hot path already has JIT +
+hardware AES + dual software prefetch, matching xmrig's approach.
+
+### Files Changed
+- `Cargo.toml` — added `criterion` dev-dependency (default-features off; only
+  `cargo_bench_support`, dropping plotters/rayon/html). Added `[[bench]]
+  name = "hash"` and a `[profile.bench]` with release-grade codegen so
+  measurements reflect the shipping binary.
+- `benches/hash.rs` — new. Benchmarks `calculate_hash_pipelined` in light mode
+  (no 2 GiB dataset needed, self-contained) with flat sampling. Fixed key/blob
+  for run-to-run comparability. ~283 ms/hash single-thread, stable ±2 ms.
+- `src/miner.rs` — added `performance_core_count()` (macOS: reads
+  `hw.perflevel0.logicalcpu` via a small `sysctlbyname` FFI; `None` elsewhere)
+  and `recommended_thread_count()`. `initialize` now logs a warning if the
+  requested thread count exceeds the P-core count.
+- `src/bin/minertim.rs` — default thread count (when the arg is omitted) is now
+  the P-core count instead of a hardcoded 2; help text updated.
+- `Makefile` — `THREADS` now unset by default so the binary auto-detects;
+  added a `bench` target; help/example updated (THREADS=8).
+
+### Behavior / API Changes
+- Running with no thread argument now uses the performance-core count
+  (e.g. 8 on an M2 Max) instead of 2 — a large default-throughput improvement.
+- Requesting more threads than P-cores is still allowed but warns.
+- New public API: `minertim::miner::performance_core_count()` and
+  `recommended_thread_count()`.
+- No change to any RandomX correctness path (no file under `randomx/` touched).
+
+### Verification Performed
+- `cargo check`, `cargo clippy --all-targets` — clean (0 warnings).
+- `cargo bench` — runs, reports stable ~285 ms/hash with change-tracking vs a
+  stored baseline ("No change in performance detected").
+- `./target/release/minertim --help` — shows "default: 8 performance cores,
+  max: 12" on the M2 Max dev machine.
+- Full 631 s vector suite not re-run this round: no `randomx/` file changed and
+  the benchmark computed real hashes successfully, so the correctness path is
+  unaffected.
+
+### Notable Constraints
+- P-core count is only detectable on macOS here; other platforms fall back to
+  total parallelism. Acceptable — this is a macOS/Apple-Silicon miner.
+- The benchmark uses light mode so CI/local runs need no 2 GiB dataset; it
+  still exercises Blake2b, AES fill, and the 8 JIT-compiled program chains.

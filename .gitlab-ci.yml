@@ -30,6 +30,23 @@ rust:check:
       - app/src/main/rust/target/
 
 # ---------------------------------------------------------------------------
+# Dependency vulnerability scan — RustSec advisory database
+# ---------------------------------------------------------------------------
+rust:audit:
+  stage: check
+  image: rust:${RUST_VERSION}
+  before_script:
+    - cargo install cargo-audit --locked
+  script:
+    # Scans Cargo.lock (root CLI crate) against https://rustsec.org advisories.
+    - cargo audit
+  cache:
+    key: cargo-audit-${CI_COMMIT_REF_SLUG}
+    paths:
+      - ~/.cargo/bin/
+      - ~/.cargo/advisory-db/
+
+# ---------------------------------------------------------------------------
 # Android debug build — full APK with Rust cross-compilation
 # ---------------------------------------------------------------------------
 build:debug:

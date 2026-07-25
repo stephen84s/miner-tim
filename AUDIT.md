@@ -377,3 +377,44 @@ hardware AES + dual software prefetch, matching xmrig's approach.
   total parallelism. Acceptable — this is a macOS/Apple-Silicon miner.
 - The benchmark uses light mode so CI/local runs need no 2 GiB dataset; it
   still exercises Blake2b, AES fill, and the 8 JIT-compiled program chains.
+
+## 2026-07-25 - Dependency vulnerability scanning (cargo-audit)
+
+### Request
+"Can add a vulnerability checker for all the libraries we are using."
+
+### Goal
+Add a dependency vulnerability scanner and fix anything it finds.
+
+### Files Changed
+- `Makefile` — new `audit` target: runs `cargo audit` (auto-installs
+  cargo-audit on first use if missing). Added to `.PHONY` and help text.
+- `.gitlab-ci.yml` — new `rust:audit` job in the `check` stage: installs
+  cargo-audit and runs `cargo audit` against the root crate's Cargo.lock,
+  caching the advisory DB and the installed binary.
+- `Cargo.lock` — `rustls-webpki` bumped 0.103.10 -> 0.103.13 (patch, via
+  `cargo update -p rustls-webpki`) to clear the advisories below.
+
+### Findings and Fix
+The first scan flagged 3 vulnerabilities, all in the transitive dep
+`rustls-webpki 0.103.10`:
+- RUSTSEC-2026-0104 — reachable panic in CRL parsing.
+- RUSTSEC-2026-0098 — name constraints for URI names incorrectly accepted.
+- RUSTSEC-2026-0099 — name constraints accepted for wildcard-name certs.
+All fixed by upgrading to >=0.103.13. Note: this miner uses `NoVerifier`
+(certificate validation disabled — pool data is public), so the cert-path
+bugs had limited runtime impact here, but the dep is updated regardless.
+Post-fix scan: **0 vulnerabilities** (exit 0).
+
+### Verification Performed
+- `cargo audit` — clean after the update (was 3 vulnerabilities).
+- `make audit` — target works, exit 0.
+- `cargo build --release` — builds clean after the dependency bump.
+
+### Notable Constraints / Follow-up
+- **The rest of `.gitlab-ci.yml` is stale.** Every other job (`rust:check`,
+  `build:debug`, `build:release`, `test:unit`) still targets the pre-pivot
+  Android layout (`app/src/main/rust`, gradlew, Android SDK/NDK) which no
+  longer exists, so the pipeline is already red independent of this change.
+  The new `rust:audit` job is correct and self-contained. A full CI rewrite
+  for the CLI-only project is a separate task, not done here.

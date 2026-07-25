@@ -1,139 +1,59 @@
+# CI for MinerTim — a CLI-only, pure-Rust Monero miner (root crate at repo root).
+#
+# GitLab shared runners are x86_64 Linux, so CI exercises the interpreter path
+# only. The shipping artifact is an aarch64-apple-darwin binary built locally via
+# `make build`; the aarch64 JIT is compiled by every local build and its
+# correctness is validated on real Apple Silicon by `make test`.
+
 stages:
   - check
-  - build
   - test
 
 variables:
-  ANDROID_COMPILE_SDK: "35"
-  ANDROID_BUILD_TOOLS: "36.0.0"
-  ANDROID_NDK_VERSION: "26.1.10909125"
   RUST_VERSION: "1.94.0"
-  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.caching=true"
+  CARGO_TERM_COLOR: "always"
+  # Keep cargo's state inside the project so it can be cached between jobs.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+
+default:
+  image: rust:${RUST_VERSION}
+  cache:
+    key: cargo-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cargo/bin/
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/advisory-db/
+      - target/
 
 # ---------------------------------------------------------------------------
-# Rust check — fast feedback on native code
+# Lint — formatting, clippy (warnings are errors), and an aarch64 JIT typecheck
 # ---------------------------------------------------------------------------
-rust:check:
+rust:lint:
   stage: check
-  image: rust:${RUST_VERSION}
   before_script:
-    - apt-get update && apt-get install -y -qq build-essential
-    - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    - cargo install cargo-ndk
+    - rustup component add clippy rustfmt
   script:
-    - cd app/src/main/rust
-    - cargo check
-    - cargo test
-  cache:
-    key: rust-${CI_COMMIT_REF_SLUG}
-    paths:
-      - app/src/main/rust/target/
+    - cargo fmt --all -- --check
+    # --all-targets compiles lib, bin, tests and benches; -D warnings gates.
+    - cargo clippy --all-targets -- -D warnings
 
 # ---------------------------------------------------------------------------
 # Dependency vulnerability scan — RustSec advisory database
 # ---------------------------------------------------------------------------
 rust:audit:
   stage: check
-  image: rust:${RUST_VERSION}
   before_script:
     - cargo install cargo-audit --locked
   script:
-    # Scans Cargo.lock (root CLI crate) against https://rustsec.org advisories.
+    # Scans Cargo.lock against https://rustsec.org advisories.
     - cargo audit
-  cache:
-    key: cargo-audit-${CI_COMMIT_REF_SLUG}
-    paths:
-      - ~/.cargo/bin/
-      - ~/.cargo/advisory-db/
 
 # ---------------------------------------------------------------------------
-# Android debug build — full APK with Rust cross-compilation
+# Unit tests — RandomX vectors via the interpreter path (release for speed)
 # ---------------------------------------------------------------------------
-build:debug:
-  stage: build
-  image: thyrlian/android-sdk:latest
-  before_script:
-    - apt-get update && apt-get install -y -qq curl
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
-    - source "$HOME/.cargo/env"
-    - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    - cargo install cargo-ndk
-    # Install Android SDK components
-    - yes | sdkmanager --sdk_root="${ANDROID_SDK_ROOT}"
-        "platforms;android-${ANDROID_COMPILE_SDK}"
-        "build-tools;${ANDROID_BUILD_TOOLS}"
-        "ndk;${ANDROID_NDK_VERSION}" || true
-    - export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}"
-  script:
-    - ./gradlew assembleDebug
-  artifacts:
-    paths:
-      - app/build/outputs/apk/debug/*.apk
-    expire_in: 7 days
-  cache:
-    key: gradle-rust-${CI_COMMIT_REF_SLUG}
-    paths:
-      - .gradle/
-      - app/src/main/rust/target/
-
-# ---------------------------------------------------------------------------
-# Android release build — unsigned release APK
-# ---------------------------------------------------------------------------
-build:release:
-  stage: build
-  image: thyrlian/android-sdk:latest
-  before_script:
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
-    - source "$HOME/.cargo/env"
-    - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    - cargo install cargo-ndk
-    - yes | sdkmanager --sdk_root="${ANDROID_SDK_ROOT}"
-        "platforms;android-${ANDROID_COMPILE_SDK}"
-        "build-tools;${ANDROID_BUILD_TOOLS}"
-        "ndk;${ANDROID_NDK_VERSION}" || true
-    - export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}"
-  script:
-    - ./gradlew assembleRelease
-  artifacts:
-    paths:
-      - app/build/outputs/apk/release/*.apk
-    expire_in: 30 days
-  cache:
-    key: gradle-rust-${CI_COMMIT_REF_SLUG}
-    paths:
-      - .gradle/
-      - app/src/main/rust/target/
-  only:
-    - main
-    - tags
-
-# ---------------------------------------------------------------------------
-# Unit tests
-# ---------------------------------------------------------------------------
-test:unit:
+rust:test:
   stage: test
-  image: thyrlian/android-sdk:latest
-  before_script:
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
-    - source "$HOME/.cargo/env"
-    - rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    - cargo install cargo-ndk
-    - yes | sdkmanager --sdk_root="${ANDROID_SDK_ROOT}"
-        "platforms;android-${ANDROID_COMPILE_SDK}"
-        "build-tools;${ANDROID_BUILD_TOOLS}"
-        "ndk;${ANDROID_NDK_VERSION}" || true
-    - export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}"
   script:
-    - ./gradlew test
-  artifacts:
-    when: always
-    paths:
-      - app/build/reports/tests/
-    reports:
-      junit: app/build/test-results/*/TEST-*.xml
-    expire_in: 7 days
-  cache:
-    key: gradle-rust-${CI_COMMIT_REF_SLUG}
-    paths:
-      - .gradle/
-      - app/src/main/rust/target/
+    - cargo test --release
+  timeout: 1h

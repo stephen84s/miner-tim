@@ -418,3 +418,43 @@ Post-fix scan: **0 vulnerabilities** (exit 0).
   longer exists, so the pipeline is already red independent of this change.
   The new `rust:audit` job is correct and self-contained. A full CI rewrite
   for the CLI-only project is a separate task, not done here.
+
+## 2026-07-25 - Rewrite CI for the CLI-only crate
+
+### Request
+"ok fix it" — replace the stale `.gitlab-ci.yml` (still targeting the
+pre-pivot Android layout) with a pipeline for the current root Rust crate.
+
+### Goal
+A green, relevant CI pipeline: lint, dependency audit, and tests against the
+actual CLI miner instead of the non-existent `app/src/main/rust` / Gradle /
+Android SDK jobs.
+
+### Files Changed
+- `.gitlab-ci.yml` — full rewrite. Removed all Android/Gradle jobs
+  (`rust:check` cd'ing into app/src/main/rust, `build:debug`, `build:release`,
+  `test:unit`). New jobs, all on the `rust:1.94.0` image with a shared cargo
+  cache:
+    - `rust:lint` — `cargo fmt --all -- --check` + `cargo clippy --all-targets
+      -- -D warnings`.
+    - `rust:audit` — `cargo audit` (kept from SEC-01).
+    - `rust:test` — `cargo test --release` (RandomX vectors via the
+      interpreter path on x86_64 runners), 1h timeout.
+
+### Design Notes / Constraints
+- Shared runners are x86_64 Linux → CI covers the interpreter path only. The
+  shipping artifact is an aarch64-apple-darwin binary built locally
+  (`make build`); JIT correctness is validated on Apple Silicon by `make test`.
+- I initially added an `aarch64-unknown-linux-gnu` cross-check for the JIT but
+  dropped it: `ring` (rustls's crypto backend) compiles C during `cargo check`,
+  requiring an `aarch64-linux-gnu-gcc` cross toolchain absent from the stock
+  rust image. Since the sole developer is on Apple Silicon (every local build
+  already compiles the JIT), the check was redundant and not worth the
+  toolchain burden.
+
+### Verification Performed
+- `cargo fmt --all -- --check` — clean (0-line diff).
+- `cargo clippy --all-targets -- -D warnings` — passes (exit 0).
+- YAML parses; jobs: rust:lint, rust:audit, rust:test.
+- Full `cargo test` not re-run (no `randomx/` change this round; clippy
+  --all-targets already compiles the test targets).

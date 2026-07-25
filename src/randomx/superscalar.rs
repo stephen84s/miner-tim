@@ -57,6 +57,8 @@ const PORT_P015: i32 = PORT_P0 | PORT_P1 | PORT_P5;
 // Instruction types
 // ============================================================================
 
+// Variant names mirror the RandomX spec / reference implementation.
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 enum SsType {
@@ -131,6 +133,7 @@ const MOP_MOV_RI64: MacroOp = MacroOp::new1(10, 1, PORT_P015);
 struct InstructionInfo {
     inst_type: SsType,
     ops: &'static [MacroOp],
+    #[allow(dead_code)] // mirrors the reference implementation's table layout
     latency: i32,
     result_op: i32,
     dst_op: i32,
@@ -367,13 +370,12 @@ impl WorkingInstruction {
             }
         }
         // IADD_RS special case: if exactly 2 available and one is r5, force r5 as source
-        if available.len() == 2 && self.info.inst_type == SsType::IADD_RS {
-            if available[0] == REGISTER_NEEDS_DISPLACEMENT || available[1] == REGISTER_NEEDS_DISPLACEMENT {
+        if available.len() == 2 && self.info.inst_type == SsType::IADD_RS
+            && (available[0] == REGISTER_NEEDS_DISPLACEMENT || available[1] == REGISTER_NEEDS_DISPLACEMENT) {
                 self.op_group_par = REGISTER_NEEDS_DISPLACEMENT;
                 self.src = REGISTER_NEEDS_DISPLACEMENT;
                 return true;
             }
-        }
         if let Some(reg) = select_register(&available, gen) {
             self.src = reg;
             if self.group_par_is_source {

@@ -59,7 +59,7 @@ fn store_block(data: &mut [u8], offset: usize, block: &[u8; 16]) {
 // ============================================================================
 
 pub fn fill_aes_1rx4(state: &mut [u8; 64], output: &mut [u8]) {
-    assert!(output.len() % 64 == 0);
+    assert!(output.len().is_multiple_of(64));
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("aes") {
@@ -78,7 +78,7 @@ pub fn fill_aes_1rx4(state: &mut [u8; 64], output: &mut [u8]) {
 }
 
 pub fn fill_aes_4rx4(state: &[u8; 64], output: &mut [u8]) {
-    assert!(output.len() % 64 == 0);
+    assert!(output.len().is_multiple_of(64));
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("aes") {
@@ -97,7 +97,7 @@ pub fn fill_aes_4rx4(state: &[u8; 64], output: &mut [u8]) {
 }
 
 pub fn hash_aes_1rx4(input: &[u8]) -> [u8; 64] {
-    assert!(input.len() % 64 == 0);
+    assert!(input.len().is_multiple_of(64));
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("aes") {
@@ -117,7 +117,7 @@ pub fn hash_aes_1rx4(input: &[u8]) -> [u8; 64] {
 /// simultaneously refilling the scratchpad using fill_state.
 /// Matches the C++ hashAndFillAes1Rx4 function.
 pub fn hash_and_fill_aes_1rx4(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) {
-    assert!(scratchpad.len() % 64 == 0);
+    assert!(scratchpad.len().is_multiple_of(64));
     #[cfg(target_arch = "aarch64")]
     {
         if std::arch::is_aarch64_feature_detected!("aes") {

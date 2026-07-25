@@ -16,7 +16,6 @@ use std::sync::Arc;
 pub(crate) const RANDOMX_PROGRAM_SIZE: usize = 256; // V1
 const RANDOMX_PROGRAM_ITERATIONS: usize = 2048;
 const RANDOMX_PROGRAM_COUNT: usize = 8;
-const RANDOMX_PROGRAM_MAX_SIZE: usize = 384;
 const REGISTERS_COUNT: usize = 8;
 const REGISTER_COUNT_FLT: usize = 4;
 
@@ -83,6 +82,7 @@ const CEIL_FDIV_M: u16 = CEIL_FMUL_R + 4;      // 208
 const CEIL_FSQRT_R: u16 = CEIL_FDIV_M + 6;     // 214
 const CEIL_CBRANCH: u16 = CEIL_FSQRT_R + 25;   // 239
 const CEIL_CFROUND: u16 = CEIL_CBRANCH + 1;     // 240
+#[allow(dead_code)] // last ceiling is the implicit fallback; kept to complete the table
 const CEIL_ISTORE: u16 = CEIL_CFROUND + 16;     // 256
 
 // ============================================================================
@@ -280,11 +280,6 @@ fn store64(scratchpad: &mut [u8], offset: usize, val: u64) {
 }
 
 #[inline(always)]
-fn load32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-}
-
-#[inline(always)]
 fn mulh(a: u64, b: u64) -> u64 {
     ((a as u128 * b as u128) >> 64) as u64
 }
@@ -311,6 +306,7 @@ fn is_zero_or_power_of_2(x: u64) -> bool {
 }
 
 // RandomX MXCSR default: FTZ=1, DAZ=1, all exceptions masked, round-to-nearest
+#[cfg(target_arch = "x86_64")]
 const RX_MXCSR_DEFAULT: u32 = 0x9FC0;
 
 /// Set hardware FP state for RandomX (FTZ, DAZ, exception masks, rounding mode).
@@ -997,6 +993,7 @@ fn execute_bytecode(
 // ============================================================================
 
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
 fn execute_vm(
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
@@ -1023,6 +1020,7 @@ fn execute_vm(
     execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_vm_inner(
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
@@ -1135,7 +1133,7 @@ fn execute_vm_inner(
                 // JIT: call native code. It reads/writes nreg directly.
                 unsafe { f(nreg as *mut NativeRegisterFile, scratchpad.as_mut_ptr(), &config as *const ProgramConfiguration) };
             } else {
-                execute_bytecode(&bytecode, nreg, scratchpad, &config);
+                execute_bytecode(bytecode, nreg, scratchpad, &config);
             }
         }
         #[cfg(not(target_arch = "aarch64"))]
@@ -1233,7 +1231,7 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
 
     // Step 2: Generate 8 SuperscalarHash programs from key
     let mut gen = Blake2Generator::new(key, 0);
-    let mut ss_programs: [SuperscalarProgram; 8] = std::array::from_fn(|_| {
+    let ss_programs: [SuperscalarProgram; 8] = std::array::from_fn(|_| {
         generate_superscalar(&mut gen)
     });
 

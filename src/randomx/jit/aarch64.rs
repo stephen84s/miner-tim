@@ -78,6 +78,12 @@ pub struct Emitter {
     pub code: Vec<u32>,
 }
 
+impl Default for Emitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Emitter {
     pub fn new() -> Self {
         Emitter {
@@ -87,6 +93,10 @@ impl Emitter {
 
     pub fn len(&self) -> usize {
         self.code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty()
     }
 
     #[inline]
@@ -309,7 +319,7 @@ impl Emitter {
 
     /// LDR Xd, [Xn, #imm12*8] (unsigned offset, 64-bit, scaled)
     pub fn ldr_imm(&mut self, rt: u32, rn: u32, imm_byte_offset: u32) {
-        debug_assert!(imm_byte_offset % 8 == 0);
+        debug_assert!(imm_byte_offset.is_multiple_of(8));
         let scaled = imm_byte_offset / 8;
         debug_assert!(scaled < 4096);
         self.emit(0xF9400000 | (scaled << 10) | (rn << 5) | rt);
@@ -323,7 +333,7 @@ impl Emitter {
 
     /// STR Xd, [Xn, #imm12*8] (unsigned offset, 64-bit, scaled)
     pub fn str_imm(&mut self, rt: u32, rn: u32, imm_byte_offset: u32) {
-        debug_assert!(imm_byte_offset % 8 == 0);
+        debug_assert!(imm_byte_offset.is_multiple_of(8));
         let scaled = imm_byte_offset / 8;
         debug_assert!(scaled < 4096);
         self.emit(0xF9000000 | (scaled << 10) | (rn << 5) | rt);
@@ -331,7 +341,7 @@ impl Emitter {
 
     /// LDR Dd, [Xn, #imm12*8] (FP/SIMD 64-bit load, unsigned offset)
     pub fn ldr_fp_imm(&mut self, dt: u32, rn: u32, imm_byte_offset: u32) {
-        debug_assert!(imm_byte_offset % 8 == 0);
+        debug_assert!(imm_byte_offset.is_multiple_of(8));
         let scaled = imm_byte_offset / 8;
         debug_assert!(scaled < 4096);
         self.emit(0xFD400000 | (scaled << 10) | (rn << 5) | dt);
@@ -339,7 +349,7 @@ impl Emitter {
 
     /// STR Dd, [Xn, #imm12*8] (FP/SIMD 64-bit store, unsigned offset)
     pub fn str_fp_imm(&mut self, dt: u32, rn: u32, imm_byte_offset: u32) {
-        debug_assert!(imm_byte_offset % 8 == 0);
+        debug_assert!(imm_byte_offset.is_multiple_of(8));
         let scaled = imm_byte_offset / 8;
         debug_assert!(scaled < 4096);
         self.emit(0xFD000000 | (scaled << 10) | (rn << 5) | dt);

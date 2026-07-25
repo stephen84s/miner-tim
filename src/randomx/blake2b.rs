@@ -80,7 +80,7 @@ fn compress(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 
 /// Compute Blake2b hash with variable output length (1..=64) and optional key (0..=64).
 pub fn blake2b_full(out_len: usize, key: &[u8], input: &[u8]) -> Vec<u8> {
-    assert!(out_len >= 1 && out_len <= 64);
+    assert!((1..=64).contains(&out_len));
     assert!(key.len() <= 64);
 
     let kk = key.len();

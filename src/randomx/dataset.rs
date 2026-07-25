@@ -90,7 +90,7 @@ impl RandomXDataset {
     ) -> Self {
         let mut items = vec![[0u64; 8]; DATASET_ITEM_COUNT];
         let num_threads = num_threads.max(1);
-        let chunk_size = (DATASET_ITEM_COUNT + num_threads - 1) / num_threads;
+        let chunk_size = DATASET_ITEM_COUNT.div_ceil(num_threads);
 
         let progress = Arc::new(AtomicUsize::new(0));
 

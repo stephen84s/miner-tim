@@ -113,9 +113,9 @@ fn main() {
         };
 
         let share_label = if share_stats.total_found > 0 {
-            format!("since last share")
+            "since last share"
         } else {
-            format!("no shares yet")
+            "no shares yet"
         };
 
         log::info!(
@@ -140,11 +140,12 @@ fn main() {
 }
 
 fn format_duration(secs: f64) -> String {
-    if secs < 60.0 {
-        format!("{:.0}s", secs)
-    } else if secs < 3600.0 {
-        format!("{:.0}m{:.0}s", secs / 60.0, secs % 60.0)
+    let secs = secs.max(0.0) as u64;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
     } else {
-        format!("{:.0}h{:.0}m", secs / 3600.0, (secs % 3600.0) / 60.0)
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }

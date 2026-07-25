@@ -18,6 +18,7 @@
 | Status | Task ID | Description |
 | :--- | :--- | :--- |
 | **Completed** | **SYS-01** | **Agent Initialization.** Establishing management protocol. |
+| **Completed** | **NET-01** | **Pool robustness.** Fixed TLS double-session receiver bug; added keepalive, auto-reconnect/relogin, 8-byte target support. Clippy backlog cleared (63→0). |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

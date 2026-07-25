@@ -85,7 +85,10 @@ impl JitMemory {
     }
 
     /// Get a function pointer to the compiled code.
-    /// Safety: caller must ensure the code is valid and the signature matches.
+    ///
+    /// # Safety
+    /// The caller must ensure valid code has been written via `write_code`
+    /// and that `T` is a function pointer type matching its ABI.
     #[inline]
     pub unsafe fn as_fn<T>(&self) -> T
     where

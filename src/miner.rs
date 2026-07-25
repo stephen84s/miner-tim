@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::hex::hex_encode;
-use crate::pool_connection::PoolConnection;
+use crate::pool_connection::{target_to_difficulty, PoolConnection};
 use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
 
@@ -57,7 +57,7 @@ impl HashrateTracker {
         });
         // Keep at most 10 minutes + a little margin of samples
         let cutoff = Instant::now() - std::time::Duration::from_secs(660);
-        while self.samples.front().map_or(false, |s| s.time < cutoff) {
+        while self.samples.front().is_some_and(|s| s.time < cutoff) {
             self.samples.pop_front();
         }
     }
@@ -136,13 +136,13 @@ impl Miner {
             .unwrap_or(4);
         self.thread_count = threads.clamp(1, max_threads);
 
-        let connection = PoolConnection::new();
+        let connection = Arc::new(PoolConnection::new());
         connection.connect(pool).map_err(|e| format!("Connection failed: {}", e))?;
         connection.login(wallet).map_err(|e| format!("Login failed: {}", e))?;
         connection.start_receiver();
 
         connection.reset_share_counters();
-        self.pool_connection = Some(Arc::new(connection));
+        self.pool_connection = Some(connection);
         self.total_hashes.store(0, Ordering::SeqCst);
         self.hashrate_bits.store(0, Ordering::SeqCst);
 
@@ -303,6 +303,7 @@ impl Miner {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     thread_id: u32,
     thread_count: u32,
@@ -395,11 +396,9 @@ fn worker_loop(
         let _ = stats.best_hash_val.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             if hash_val < current { Some(hash_val) } else { None }
         });
-        if job.target.len() >= 4 {
-            let target_val = u32::from_le_bytes([job.target[0], job.target[1], job.target[2], job.target[3]]);
-            if target_val > 0 {
-                stats.current_difficulty.store(0xFFFFFFFF_u64 / target_val as u64, Ordering::Relaxed);
-            }
+        let difficulty = target_to_difficulty(&job.target);
+        if difficulty > 0 {
+            stats.current_difficulty.store(difficulty, Ordering::Relaxed);
         }
 
         // Compare hash to target (little-endian comparison)
@@ -416,12 +415,12 @@ fn worker_loop(
             stats.last_share_time_ms.store(now_ms, Ordering::Relaxed);
 
             log::info!(
-                "Worker {} SHARE FOUND! job_id={}, nonce={}, hash_val={}, target_val={}, hash={}",
+                "Worker {} SHARE FOUND! job_id={}, nonce={}, hash_val={}, difficulty={}, hash={}",
                 thread_id,
                 job.job_id,
                 nonce_hex,
                 hash_val,
-                u32::from_le_bytes([job.target[0], job.target[1], job.target[2], job.target[3]]),
+                difficulty,
                 result_hex
             );
 
@@ -503,22 +502,26 @@ fn get_or_generate_dataset(
 
 /// Compare a 32-byte hash against a target in little-endian order.
 /// The hash meets the target if it is less than or equal to the expanded target.
+/// Pools send either a 4-byte compact target (upper 32 bits of the threshold)
+/// or a full 8-byte target (upper 64 bits).
 fn meets_target(hash: &[u8; 32], target: &[u8]) -> bool {
-    if target.len() < 4 {
-        return false;
+    if target.len() >= 8 {
+        let target_val = u64::from_le_bytes(target[0..8].try_into().unwrap());
+        if target_val == 0 {
+            return false;
+        }
+        let hash_val = u64::from_le_bytes(hash[24..32].try_into().unwrap());
+        return hash_val <= target_val;
     }
-
-    // Target is 4 bytes (little-endian u32). Expand to a 256-bit threshold.
-    // The target represents the upper 32 bits of a 256-bit difficulty threshold.
-    let target_val = u32::from_le_bytes([target[0], target[1], target[2], target[3]]);
-
-    if target_val == 0 {
-        return false;
+    if target.len() >= 4 {
+        let target_val = u32::from_le_bytes(target[0..4].try_into().unwrap());
+        if target_val == 0 {
+            return false;
+        }
+        let hash_val = u32::from_le_bytes(hash[28..32].try_into().unwrap());
+        return hash_val <= target_val;
     }
-
-    // Compare the last 4 bytes of the hash (big-endian most significant)
-    let hash_val = u32::from_le_bytes([hash[28], hash[29], hash[30], hash[31]]);
-    hash_val <= target_val
+    false
 }
 
 #[inline(always)]

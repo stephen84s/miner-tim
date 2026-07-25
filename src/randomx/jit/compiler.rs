@@ -54,7 +54,7 @@ fn a_regs(idx: usize) -> (u32, u32) {
 }
 
 /// JIT function signature: (nreg, scratchpad, config) -> ()
-pub type JitFn = unsafe extern "C" fn(
+pub(crate) type JitFn = unsafe extern "C" fn(
     nreg: *mut NativeRegisterFile,
     scratchpad: *mut u8,
     config: *const ProgramConfiguration,
@@ -72,7 +72,7 @@ impl JitCompiler {
     }
 
     /// Compile a bytecode program to native ARM64 code.
-    pub fn compile(&mut self, bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]) {
+    pub(crate) fn compile(&mut self, bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]) {
         let mut e = Emitter::new();
 
         emit_prologue(&mut e);
@@ -83,7 +83,11 @@ impl JitCompiler {
     }
 
     /// Get the JIT function pointer.
-    pub unsafe fn get_fn(&self) -> JitFn {
+    ///
+    /// # Safety
+    /// `compile` must have been called first; the returned function must be
+    /// invoked with valid nreg/scratchpad/config pointers.
+    pub(crate) unsafe fn get_fn(&self) -> JitFn {
         self.memory.as_fn::<JitFn>()
     }
 }

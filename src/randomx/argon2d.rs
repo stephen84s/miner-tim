@@ -112,13 +112,9 @@ fn fill_block(prev_block: &Block, ref_block: &Block, next_block: &mut Block, wit
     for i in 0..8 {
         let base = 16 * i;
         let mut v = [0u64; 16];
-        for j in 0..16 {
-            v[j] = block_r.v[base + j];
-        }
+        v.copy_from_slice(&block_r.v[base..base + 16]);
         blake2_round_nomsg(&mut v);
-        for j in 0..16 {
-            block_r.v[base + j] = v[j];
-        }
+        block_r.v[base..base + 16].copy_from_slice(&v);
     }
 
     // Apply Blake2 on rows: (0,1,16,17,32,33,...,112,113), (2,3,18,19,...,114,115), ...
@@ -269,7 +265,7 @@ fn fill_segment(
     let mut curr_offset =
         lane * lane_length + (slice as u32) * segment_length + starting_index;
 
-    let mut prev_offset = if curr_offset % lane_length == 0 {
+    let mut prev_offset = if curr_offset.is_multiple_of(lane_length) {
         curr_offset + lane_length - 1
     } else {
         curr_offset - 1

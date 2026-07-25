@@ -251,3 +251,70 @@ Remove dead Android code paths, fix type mismatches, consolidate duplicated util
 
 ### Notable Constraints
 - Pre-existing warnings (superscalar variant naming, unused constants, JIT visibility) intentionally left alone to avoid risking the performance-sensitive codegen — see prior sessions where even logically equivalent cfg gate changes caused 36% hashrate regressions.
+
+## 2026-07-25 - Codebase review: pool robustness, target handling, lint cleanup
+
+### Request
+"Go through the codebase and see what you can improve."
+
+### Goal
+Fix correctness bugs in the pool networking layer, add missing Stratum
+robustness features documented in CLAUDE.md but not implemented, support
+full-width difficulty targets, and clear the clippy backlog without touching
+performance-sensitive RandomX codegen.
+
+### Files Changed
+- `src/pool_connection.rs` — **Rewrote the receiver.** The old `start_receiver`
+  opened a *second* TLS session over a cloned TCP socket, which cannot work
+  (TLS is stateful; a raw clone of the socket shares no cipher state), so on
+  TLS pools no jobs/share-responses were ever read. New design: one shared
+  `PoolStream` behind the existing mutex; the receiver polls it with a short
+  read timeout and reassembles newline-delimited frames, so submits and
+  keepalives interleave on the same session. Added:
+    - `keepalived` every 60s (documented in CLAUDE.md, previously absent),
+    - automatic reconnect + relogin with 5s backoff on EOF/error,
+    - `read_line` helper that reads a single line without a throwaway
+      `BufReader` swallowing buffered bytes,
+    - `wallet` stored on the connection so reconnect can re-login,
+    - `target_to_difficulty` made `pub` and extended to 8-byte targets.
+  `start_receiver` now takes `self: &Arc<Self>`.
+- `src/miner.rs` — `PoolConnection` now constructed as `Arc` up front.
+  `meets_target` handles both 4-byte (compact) and 8-byte (full) targets,
+  comparing `hash[24..32]` as `u64` for the latter. Difficulty display uses
+  the shared `target_to_difficulty`. `#[allow(clippy::too_many_arguments)]`
+  on `worker_loop`.
+- `src/bin/minertim.rs` — `format_duration` now floors instead of rounding
+  (119s no longer prints "2m59s"); removed useless `format!` calls.
+- `src/hex.rs` — `hex_encode` uses a lookup table instead of per-byte
+  `format!`; doc comment made inner (`//!`).
+- `src/randomx/vm.rs`, `superscalar.rs`, `argon2d.rs`, `blake2b.rs`,
+  `aes_hash.rs`, `dataset.rs`, `jit/*` — clippy cleanup only: removed dead
+  `load32_le` / `RANDOMX_PROGRAM_MAX_SIZE`, gated `RX_MXCSR_DEFAULT` to
+  x86_64, `# Safety` docs on JIT unsafe fns, `pub(crate)` on `JitFn`/`compile`/
+  `get_fn` (fixes private-in-public), `is_empty` on `Emitter`, `#[allow]`
+  attributes for spec-mirroring names/index loops. All rewrites
+  (`is_multiple_of`, `div_ceil`, `contains`, `copy_from_slice`) are behaviour-
+  neutral and confined to assert/setup paths — no change to the AES or VM
+  execution codegen.
+- `.gitignore` — added `target/`; untracked ~2500 previously-committed build
+  artifacts from the index (files left on disk).
+
+### Behavior / API Changes
+- TLS mining pools now actually receive jobs and share acknowledgements.
+- Connection survives pool-side disconnects (auto reconnect + relogin).
+- Keepalives prevent idle-timeout drops.
+- 8-byte Stratum targets are honoured (previously only the low 4 bytes).
+- `PoolConnection::start_receiver` signature: now `self: &Arc<Self>`.
+
+### Verification Performed
+- `cargo clippy --all-targets` — **No issues found** (was 63 warnings).
+- `make test` — RandomX vectors pass (JIT + interpreter suites green).
+- `make build` — release binary builds clean.
+
+### Notable Constraints / Assumptions
+- Reconnect loop retries indefinitely; a worker sees stale `get_work()` until
+  a new job arrives, which is acceptable (workers already poll every 100ms).
+- Certificate verification remains disabled (`NoVerifier`) as before — pool
+  data is public and many pools use self-signed certs.
+- Left the performance-sensitive RandomX execution paths untouched per the
+  prior sessions' 36%-regression warning.

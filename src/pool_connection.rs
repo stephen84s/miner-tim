@@ -1,16 +1,23 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::hex::{hex_decode, hex_encode};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::ClientConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
+
+/// How often the receiver polls the socket for new data.
+const RECV_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Stratum keepalive interval.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+/// Delay between reconnection attempts.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 /// Certificate verifier that accepts all certificates.
 /// Mining pool data (wallet address, shares) is public, and many pools
@@ -71,27 +78,19 @@ struct JsonRpcRequest {
     params: Value,
 }
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct JsonRpcResponse {
-    id: Option<u64>,
-    result: Option<Value>,
-    error: Option<Value>,
-    method: Option<String>,
-    params: Option<Value>,
-}
-
 /// Wraps either a plain TCP or TLS stream behind Read + Write.
+/// A single long-lived value, so the variant size difference is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum PoolStream {
     Plain(TcpStream),
     Tls(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
 }
 
 impl PoolStream {
-    fn try_clone_tcp(&self) -> Option<TcpStream> {
+    fn tcp(&self) -> &TcpStream {
         match self {
-            PoolStream::Plain(s) => s.try_clone().ok(),
-            PoolStream::Tls(s) => s.sock.try_clone().ok(),
+            PoolStream::Plain(s) => s,
+            PoolStream::Tls(s) => &s.sock,
         }
     }
 }
@@ -132,16 +131,24 @@ fn is_tls_port(address: &str) -> bool {
 }
 
 pub struct PoolConnection {
+    /// Single shared session: the receiver thread, share submits, and
+    /// keepalives all go through this one stream, guarded by the mutex.
     stream: Mutex<Option<PoolStream>>,
-    current_job: Arc<Mutex<Option<Arc<Job>>>>,
+    current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
     request_id: AtomicU64,
     address: Mutex<String>,
-    use_tls: AtomicBool,
+    wallet: Mutex<String>,
     tls_config: Arc<ClientConfig>,
     session_id: Mutex<String>,
-    accepted_shares: Arc<AtomicU32>,
-    rejected_shares: Arc<AtomicU32>,
+    accepted_shares: AtomicU32,
+    rejected_shares: AtomicU32,
+}
+
+impl Default for PoolConnection {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PoolConnection {
@@ -153,15 +160,15 @@ impl PoolConnection {
 
         Self {
             stream: Mutex::new(None),
-            current_job: Arc::new(Mutex::new(None)),
+            current_job: Mutex::new(None),
             connected: AtomicBool::new(false),
             request_id: AtomicU64::new(1),
             address: Mutex::new(String::new()),
-            use_tls: AtomicBool::new(false),
+            wallet: Mutex::new(String::new()),
             tls_config: Arc::new(tls_config),
             session_id: Mutex::new(String::new()),
-            accepted_shares: Arc::new(AtomicU32::new(0)),
-            rejected_shares: Arc::new(AtomicU32::new(0)),
+            accepted_shares: AtomicU32::new(0),
+            rejected_shares: AtomicU32::new(0),
         }
     }
 
@@ -181,10 +188,7 @@ impl PoolConnection {
             .set_nodelay(true)
             .map_err(|e| format!("Set nodelay failed: {}", e))?;
 
-        let use_tls = is_tls_port(address);
-        self.use_tls.store(use_tls, Ordering::SeqCst);
-
-        let pool_stream = if use_tls {
+        let pool_stream = if is_tls_port(address) {
             let host = address
                 .rsplit_once(':')
                 .map(|(h, _)| h)
@@ -216,6 +220,10 @@ impl PoolConnection {
     }
 
     pub fn login(&self, wallet: &str) -> Result<(), String> {
+        if let Ok(mut w) = self.wallet.lock() {
+            *w = wallet.to_string();
+        }
+
         let params = serde_json::json!({
             "login": wallet,
             "pass": "x",
@@ -291,155 +299,188 @@ impl PoolConnection {
         self.rejected_shares.store(0, Ordering::SeqCst);
     }
 
-    pub fn start_receiver(&self) {
-        let tcp_clone = {
-            let guard = match self.stream.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            match guard.as_ref() {
-                Some(s) => match s.try_clone_tcp() {
-                    Some(c) => c,
-                    None => return,
-                },
-                None => return,
-            }
-        };
-
-        let address = self.address.lock().ok().map(|a| a.clone()).unwrap_or_default();
-        let current_job = self.current_job.clone();
-        let connected = self.connected.load(Ordering::SeqCst);
-        let use_tls = self.use_tls.load(Ordering::SeqCst);
-        let tls_config = self.tls_config.clone();
-        let accepted = self.accepted_shares.clone();
-        let rejected = self.rejected_shares.clone();
-
-        if !connected {
+    /// Spawn the receiver thread. It polls the shared stream with a short
+    /// read timeout so that share submissions can interleave on the same
+    /// session, sends keepalives, and reconnects on connection loss.
+    pub fn start_receiver(self: &Arc<Self>) {
+        if !self.connected.load(Ordering::SeqCst) {
             return;
         }
-
+        let conn = Arc::clone(self);
         thread::Builder::new()
             .name("pool-receiver".into())
-            .spawn(move || {
-                // Build a reader over either plain or TLS stream
-                let boxed_read: Box<dyn Read + Send> = if use_tls {
-                    let host = address
-                        .rsplit_once(':')
-                        .map(|(h, _)| h)
-                        .unwrap_or(&address);
-
-                    let server_name = match rustls::pki_types::ServerName::try_from(host.to_string()) {
-                        Ok(sn) => sn,
-                        Err(e) => {
-                            log::error!("Receiver: invalid server name: {}", e);
-                            return;
-                        }
-                    };
-
-                    let tls_conn = match rustls::ClientConnection::new(tls_config, server_name) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            log::error!("Receiver: TLS setup failed: {}", e);
-                            return;
-                        }
-                    };
-
-                    Box::new(rustls::StreamOwned::new(tls_conn, tcp_clone))
-                } else {
-                    Box::new(tcp_clone)
-                };
-
-                let reader = BufReader::new(boxed_read);
-
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(e) => {
-                            log::error!("Pool read error: {}", e);
-                            break;
-                        }
-                    };
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    log::debug!("Pool recv: {}", line);
-
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(msg) => {
-                            // Handle job notifications
-                            let is_job = msg.get("method").and_then(|m| m.as_str()) == Some("job");
-                            let job_params = if is_job {
-                                msg.get("params")
-                            } else {
-                                msg.get("result").and_then(|r| r.get("job"))
-                            };
-
-                            if let Some(job_data) = job_params {
-                                if let Some(job) = parse_job(job_data) {
-                                    let diff = target_to_difficulty(&job.target);
-                                    log::info!(
-                                        "New job: {} (difficulty: {}, target: {})",
-                                        job.job_id,
-                                        diff,
-                                        hex_encode(&job.target),
-                                    );
-                                    if let Ok(mut current) = current_job.lock() {
-                                        *current = Some(Arc::new(job));
-                                    }
-                                }
-                            }
-
-                            // Handle submit responses (has an "id" but no "method")
-                            if msg.get("id").is_some() && msg.get("method").is_none() {
-                                if let Some(error) = msg.get("error") {
-                                    if !error.is_null() {
-                                        let err_msg = error
-                                            .get("message")
-                                            .and_then(|m| m.as_str())
-                                            .unwrap_or("unknown");
-                                        log::warn!("Share rejected: {}", err_msg);
-                                        rejected.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                } else if let Some(result) = msg.get("result") {
-                                    let status = result
-                                        .get("status")
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("");
-                                    if status == "OK" {
-                                        log::info!("Share accepted by pool");
-                                        accepted.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to parse pool message: {}", e);
-                        }
-                    }
-                }
-                log::info!("Pool receiver thread exiting");
-            })
+            .spawn(move || conn.receiver_loop())
             .ok();
     }
 
-    fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+    fn receiver_loop(&self) {
+        self.set_read_timeout(RECV_POLL_INTERVAL);
 
-        let request = JsonRpcRequest {
-            id,
-            jsonrpc: "2.0",
-            method: method.to_string(),
-            params,
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut last_keepalive = Instant::now();
+
+        loop {
+            // Hold the stream lock only for the duration of one read so
+            // submits/keepalives from other threads can interleave.
+            let read_result = {
+                let mut guard = match self.stream.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                match guard.as_mut() {
+                    Some(s) => s.read(&mut chunk),
+                    None => Err(std::io::Error::new(ErrorKind::NotConnected, "no stream")),
+                }
+            };
+
+            match read_result {
+                Ok(0) => {
+                    log::warn!("Pool closed the connection");
+                    if !self.reconnect() {
+                        return;
+                    }
+                    pending.clear();
+                }
+                Ok(n) => {
+                    pending.extend_from_slice(&chunk[..n]);
+                    while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=pos).collect();
+                        let line = String::from_utf8_lossy(&line);
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            log::debug!("Pool recv: {}", line);
+                            self.handle_pool_message(line);
+                        }
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(e) => {
+                    log::error!("Pool read error: {}", e);
+                    if !self.reconnect() {
+                        return;
+                    }
+                    pending.clear();
+                }
+            }
+
+            if last_keepalive.elapsed() >= KEEPALIVE_INTERVAL {
+                last_keepalive = Instant::now();
+                let sid = self.session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                if let Err(e) = self.send_message("keepalived", serde_json::json!({ "id": sid })) {
+                    log::warn!("Keepalive failed: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Tear down the current stream and retry connect + login until it
+    /// succeeds. Returns false if we don't have enough info to reconnect.
+    fn reconnect(&self) -> bool {
+        self.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut s) = self.stream.lock() {
+            *s = None;
+        }
+
+        let address = self.address.lock().map(|a| a.clone()).unwrap_or_default();
+        let wallet = self.wallet.lock().map(|w| w.clone()).unwrap_or_default();
+        if address.is_empty() || wallet.is_empty() {
+            log::error!("Cannot reconnect: no pool address/wallet recorded");
+            return false;
+        }
+
+        loop {
+            thread::sleep(RECONNECT_DELAY);
+            log::info!("Reconnecting to {}...", address);
+            match self.connect(&address).and_then(|_| self.login(&wallet)) {
+                Ok(()) => {
+                    self.set_read_timeout(RECV_POLL_INTERVAL);
+                    log::info!("Reconnected to pool");
+                    return true;
+                }
+                Err(e) => {
+                    if let Ok(mut s) = self.stream.lock() {
+                        *s = None;
+                    }
+                    log::warn!(
+                        "Reconnect failed: {} (retrying in {}s)",
+                        e,
+                        RECONNECT_DELAY.as_secs()
+                    );
+                }
+            }
+        }
+    }
+
+    fn handle_pool_message(&self, line: &str) {
+        let msg: Value = match serde_json::from_str(line) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("Failed to parse pool message: {}", e);
+                return;
+            }
         };
 
-        let mut msg =
-            serde_json::to_string(&request).map_err(|e| format!("Serialize failed: {}", e))?;
-        msg.push('\n');
+        // Handle job notifications
+        let is_job = msg.get("method").and_then(|m| m.as_str()) == Some("job");
+        let job_params = if is_job {
+            msg.get("params")
+        } else {
+            msg.get("result").and_then(|r| r.get("job"))
+        };
 
-        log::debug!("Pool send: {}", msg.trim());
+        if let Some(job_data) = job_params {
+            if let Some(job) = parse_job(job_data) {
+                let diff = target_to_difficulty(&job.target);
+                log::info!(
+                    "New job: {} (difficulty: {}, target: {})",
+                    job.job_id,
+                    diff,
+                    hex_encode(&job.target),
+                );
+                if let Ok(mut current) = self.current_job.lock() {
+                    *current = Some(Arc::new(job));
+                }
+            }
+        }
 
+        // Handle submit responses (has an "id" but no "method")
+        if msg.get("id").is_some() && msg.get("method").is_none() {
+            if let Some(error) = msg.get("error") {
+                if !error.is_null() {
+                    let err_msg = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown");
+                    log::warn!("Share rejected: {}", err_msg);
+                    self.rejected_shares.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+            if let Some(result) = msg.get("result") {
+                let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                if status == "OK" {
+                    log::info!("Share accepted by pool");
+                    self.accepted_shares.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Duration) {
+        if let Ok(guard) = self.stream.lock() {
+            if let Some(s) = guard.as_ref() {
+                if let Err(e) = s.tcp().set_read_timeout(Some(timeout)) {
+                    log::warn!("Failed to set read timeout: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Send a request and synchronously read the response line. Only used
+    /// for login, before/while the receiver polls; reads byte-by-byte so no
+    /// buffered data is lost to a throwaway reader.
+    fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut stream_guard = self
             .stream
             .lock()
@@ -449,42 +490,19 @@ impl PoolConnection {
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
 
-        stream
-            .write_all(msg.as_bytes())
-            .map_err(|e| format!("Write failed: {}", e))?;
-        stream
-            .flush()
-            .map_err(|e| format!("Flush failed: {}", e))?;
+        write_request(stream, self.next_request_id(), method, params)?;
 
-        // Read response
-        let mut response_line = String::new();
-        let mut buf_reader = BufReader::new(stream);
-        buf_reader
-            .read_line(&mut response_line)
-            .map_err(|e| format!("Read failed: {}", e))?;
-
+        // Login can race with the poll-interval timeout after a reconnect;
+        // allow the pool a full window to respond.
+        let _ = stream.tcp().set_read_timeout(Some(Duration::from_secs(30)));
+        let response_line = read_line(stream)?;
         log::debug!("Pool recv: {}", response_line.trim());
 
         serde_json::from_str(&response_line).map_err(|e| format!("Parse failed: {}", e))
     }
 
-    /// Write-only send — used for submit after the receiver thread is running.
+    /// Write-only send — responses are handled by the receiver thread.
     fn send_message(&self, method: &str, params: Value) -> Result<(), String> {
-        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
-
-        let request = JsonRpcRequest {
-            id,
-            jsonrpc: "2.0",
-            method: method.to_string(),
-            params,
-        };
-
-        let mut msg =
-            serde_json::to_string(&request).map_err(|e| format!("Serialize failed: {}", e))?;
-        msg.push('\n');
-
-        log::debug!("Pool send: {}", msg.trim());
-
         let mut stream_guard = self
             .stream
             .lock()
@@ -494,13 +512,59 @@ impl PoolConnection {
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
 
-        stream
-            .write_all(msg.as_bytes())
-            .map_err(|e| format!("Write failed: {}", e))?;
-        stream
-            .flush()
-            .map_err(|e| format!("Flush failed: {}", e))
+        write_request(stream, self.next_request_id(), method, params)
     }
+
+    fn next_request_id(&self) -> u64 {
+        self.request_id.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
+fn write_request(
+    stream: &mut PoolStream,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    let request = JsonRpcRequest {
+        id,
+        jsonrpc: "2.0",
+        method: method.to_string(),
+        params,
+    };
+
+    let mut msg =
+        serde_json::to_string(&request).map_err(|e| format!("Serialize failed: {}", e))?;
+    msg.push('\n');
+
+    log::debug!("Pool send: {}", msg.trim());
+
+    stream
+        .write_all(msg.as_bytes())
+        .map_err(|e| format!("Write failed: {}", e))?;
+    stream.flush().map_err(|e| format!("Flush failed: {}", e))
+}
+
+/// Read a single newline-terminated line without buffering past it.
+fn read_line(stream: &mut PoolStream) -> Result<String, String> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+                if line.len() > 1 << 20 {
+                    return Err("Pool response line too long".into());
+                }
+            }
+            Err(e) => return Err(format!("Read failed: {}", e)),
+        }
+    }
+    String::from_utf8(line).map_err(|e| format!("Invalid UTF-8 from pool: {}", e))
 }
 
 fn parse_job(data: &Value) -> Option<Job> {
@@ -521,13 +585,22 @@ fn parse_job(data: &Value) -> Option<Job> {
     })
 }
 
-fn target_to_difficulty(target: &[u8]) -> u64 {
-    if target.len() < 4 {
-        return 0;
+/// Convert a Stratum target (4-byte compact or 8-byte full, little-endian)
+/// to a pool difficulty.
+pub fn target_to_difficulty(target: &[u8]) -> u64 {
+    if target.len() >= 8 {
+        let t = u64::from_le_bytes(target[0..8].try_into().unwrap());
+        if t == 0 {
+            return 0;
+        }
+        return u64::MAX / t;
     }
-    let target_val = u32::from_le_bytes([target[0], target[1], target[2], target[3]]);
-    if target_val == 0 {
-        return u64::MAX;
+    if target.len() >= 4 {
+        let t = u32::from_le_bytes(target[0..4].try_into().unwrap());
+        if t == 0 {
+            return u64::MAX;
+        }
+        return 0xFFFFFFFF_u64 / t as u64;
     }
-    0xFFFFFFFF_u64 / target_val as u64
+    0
 }

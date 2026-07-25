@@ -8,6 +8,7 @@ app/build/
 app/src/main/jniLibs/
 
 # Rust
+target/
 app/src/main/rust/target/
 
 # IDE

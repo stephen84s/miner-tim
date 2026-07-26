@@ -305,7 +305,7 @@ fn hash_and_fill_aes_1rx4_soft(scratchpad: &mut [u8], hash_out: &mut [u8; 64], f
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes,neon")]
-unsafe fn fill_aes_1rx4_neon(state: &mut [u8; 64], output: &mut [u8]) {
+unsafe fn fill_aes_1rx4_neon(state: &mut [u8; 64], output: &mut [u8]) { unsafe {
     use std::arch::aarch64::*;
     let zero = vmovq_n_u8(0);
 
@@ -338,11 +338,11 @@ unsafe fn fill_aes_1rx4_neon(state: &mut [u8; 64], output: &mut [u8]) {
     vst1q_u8(state.as_mut_ptr().add(16), s1);
     vst1q_u8(state.as_mut_ptr().add(32), s2);
     vst1q_u8(state.as_mut_ptr().add(48), s3);
-}
+}}
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes,neon")]
-unsafe fn fill_aes_4rx4_neon(state: &[u8; 64], output: &mut [u8]) {
+unsafe fn fill_aes_4rx4_neon(state: &[u8; 64], output: &mut [u8]) { unsafe {
     use std::arch::aarch64::*;
     let zero = vmovq_n_u8(0);
 
@@ -389,11 +389,11 @@ unsafe fn fill_aes_4rx4_neon(state: &[u8; 64], output: &mut [u8]) {
         vst1q_u8(out.add(offset + 48), s3);
         offset += 64;
     }
-}
+}}
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes,neon")]
-unsafe fn hash_aes_1rx4_neon(input: &[u8]) -> [u8; 64] {
+unsafe fn hash_aes_1rx4_neon(input: &[u8]) -> [u8; 64] { unsafe {
     use std::arch::aarch64::*;
     let zero = vmovq_n_u8(0);
 
@@ -437,11 +437,11 @@ unsafe fn hash_aes_1rx4_neon(input: &[u8]) -> [u8; 64] {
     vst1q_u8(out.as_mut_ptr().add(32), s2);
     vst1q_u8(out.as_mut_ptr().add(48), s3);
     out
-}
+}}
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "aes,neon")]
-unsafe fn hash_and_fill_aes_1rx4_neon(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) {
+unsafe fn hash_and_fill_aes_1rx4_neon(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) { unsafe {
     use std::arch::aarch64::*;
     let zero = vmovq_n_u8(0);
 
@@ -515,7 +515,7 @@ unsafe fn hash_and_fill_aes_1rx4_neon(scratchpad: &mut [u8], hash_out: &mut [u8;
     vst1q_u8(hash_out.as_mut_ptr().add(16), hs1);
     vst1q_u8(hash_out.as_mut_ptr().add(32), hs2);
     vst1q_u8(hash_out.as_mut_ptr().add(48), hs3);
-}
+}}
 
 // ============================================================================
 // x86_64 AES-NI intrinsics — all state kept in __m128i registers

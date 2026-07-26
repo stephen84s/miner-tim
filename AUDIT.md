@@ -504,3 +504,48 @@ failed regardless of the version bump, so it has been removed. clippy
 - No `rust-toolchain.toml` added; the CI image pin plus this note are the only
   version anchors. Edition remains 2021 (edition 2024 is a separate, larger
   migration and out of scope).
+
+## 2026-07-27 - Migrate to Rust edition 2024 (worktree + A/B perf test)
+
+### Request
+"do it in a new worktree, test any performance impact and then decide if the
+merge back into main" — migrate the crate from edition 2021 to 2024.
+
+### Method
+Isolated in a git worktree (`edition-2024` branch off main) so main stayed
+untouched during evaluation. Captured a criterion baseline, migrated, then
+compared.
+
+### Files Changed
+- `Cargo.toml` — `edition = "2021"` -> `"2024"`.
+- `src/randomx/jit/memory.rs` — `extern "C"` -> `unsafe extern "C"` (2 blocks);
+  explicit `unsafe {}` in an `unsafe fn` body (unsafe_op_in_unsafe_fn).
+- `src/randomx/aes_hash.rs`, `jit/compiler.rs` — explicit `unsafe {}` blocks.
+- `src/miner.rs` — `extern "C"` (sysctlbyname) -> `unsafe extern "C"`; two
+  `collapsible_if` -> let-chains.
+- `src/randomx/vm.rs`, `superscalar.rs`, `tests.rs` — `gen` identifier (reserved
+  in 2024) renamed to `generator` (51 sites; cargo fix produced `r#gen`, cleaned
+  up to a real name).
+- `src/pool_connection.rs` — four `collapsible_if` -> let-chains.
+- `src/randomx/tests.rs` — cargo fix migrations (unsafe blocks).
+
+### Performance Impact — none
+Interleaved A/B on 1.97.1, release, light-mode `calculate_hash_pipelined`:
+- A naive stored-baseline comparison showed "+8% regressed", but that was a
+  cold-baseline vs warm-comparison thermal confound.
+- Running main (2021) and the worktree (2024) back-to-back, both orders:
+  2021 = 178.5 / 177.0 ms; 2024 = 181.5 / 176.5 ms. The same 2024 binary
+  measured both 176.5 and 181.5 ms across runs, so the spread is thermal noise,
+  not an edition effect. This matches first principles: none of the 2024 changes
+  (unsafe markers, identifier rename, let-chains) alter the hot-loop codegen, and
+  there are **zero** `tail_expr_drop_order` sites in our own code (verified).
+
+### Verification Performed
+- `cargo build` / `cargo clippy --all-targets -- -D warnings` — clean on 2024.
+- `cargo test --release` — 87 passed, 2 ignored (identical RandomX vectors).
+- 4-run interleaved benchmark (above).
+
+### Decision
+**Merge.** Perf-neutral (the stated gate), correctness preserved, clippy clean,
+and `unsafe extern` is a small safety-hygiene improvement. Merged edition-2024
+into main; worktree removed afterwards.

@@ -216,33 +216,33 @@ impl NativeRegisterFile {
 
     /// Unchecked register access — indices are always < 8 (masked during compilation).
     #[inline(always)]
-    unsafe fn r(&self, i: usize) -> u64 {
+    unsafe fn r(&self, i: usize) -> u64 { unsafe {
         *self.r.get_unchecked(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn r_mut(&mut self, i: usize) -> &mut u64 {
+    unsafe fn r_mut(&mut self, i: usize) -> &mut u64 { unsafe {
         self.r.get_unchecked_mut(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn f(&self, i: usize) -> (f64, f64) {
+    unsafe fn f(&self, i: usize) -> (f64, f64) { unsafe {
         *self.f.get_unchecked(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn f_mut(&mut self, i: usize) -> &mut (f64, f64) {
+    unsafe fn f_mut(&mut self, i: usize) -> &mut (f64, f64) { unsafe {
         self.f.get_unchecked_mut(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn e(&self, i: usize) -> (f64, f64) {
+    unsafe fn e(&self, i: usize) -> (f64, f64) { unsafe {
         *self.e.get_unchecked(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn e_mut(&mut self, i: usize) -> &mut (f64, f64) {
+    unsafe fn e_mut(&mut self, i: usize) -> &mut (f64, f64) { unsafe {
         self.e.get_unchecked_mut(i)
-    }
+    }}
     #[inline(always)]
-    unsafe fn a(&self, i: usize) -> (f64, f64) {
+    unsafe fn a(&self, i: usize) -> (f64, f64) { unsafe {
         *self.a.get_unchecked(i)
-    }
+    }}
 }
 
 #[repr(C)]
@@ -1230,9 +1230,9 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
     let cache_memory = argon2d_cache(key);
 
     // Step 2: Generate 8 SuperscalarHash programs from key
-    let mut gen = Blake2Generator::new(key, 0);
+    let mut generator = Blake2Generator::new(key, 0);
     let ss_programs: [SuperscalarProgram; 8] = std::array::from_fn(|_| {
-        generate_superscalar(&mut gen)
+        generate_superscalar(&mut generator)
     });
 
     // Step 3: Blake2b-512(input) -> tempHash (64 bytes)
@@ -1334,8 +1334,8 @@ impl RandomXVm {
     /// Create a new VM in light mode (256 MiB cache, computes dataset items on-the-fly).
     pub fn new(key: &[u8]) -> Self {
         let cache_memory = argon2d_cache(key);
-        let mut gen = Blake2Generator::new(key, 0);
-        let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut gen));
+        let mut generator = Blake2Generator::new(key, 0);
+        let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         RandomXVm {
             cache_memory,
             ss_programs,
@@ -1353,8 +1353,8 @@ impl RandomXVm {
     /// Create a new VM in full mode with a precomputed dataset.
     pub fn new_full(key: &[u8], dataset: Arc<RandomXDataset>) -> Self {
         let cache_memory = argon2d_cache(key);
-        let mut gen = Blake2Generator::new(key, 0);
-        let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut gen));
+        let mut generator = Blake2Generator::new(key, 0);
+        let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         RandomXVm {
             cache_memory,
             ss_programs,
@@ -1372,8 +1372,8 @@ impl RandomXVm {
     /// Reinitialize for a new key. Pass `Some(dataset)` for full mode, `None` for light mode.
     pub fn reinit(&mut self, key: &[u8], dataset: Option<Arc<RandomXDataset>>) {
         self.cache_memory = argon2d_cache(key);
-        let mut gen = Blake2Generator::new(key, 0);
-        self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut gen));
+        let mut generator = Blake2Generator::new(key, 0);
+        self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         self.dataset = dataset;
     }
 

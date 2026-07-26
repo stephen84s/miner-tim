@@ -144,10 +144,10 @@ mod blake2gen_tests {
     /// but here we test the basic mechanics.
     #[test]
     fn test_blake2gen_basic() {
-        let mut gen = blake2gen::Blake2Generator::new(b"test key 000", 0);
+        let mut generator = blake2gen::Blake2Generator::new(b"test key 000", 0);
         // After construction, data_index=64 so first call triggers a blake2b hash
-        let b1 = gen.get_byte();
-        let b2 = gen.get_byte();
+        let b1 = generator.get_byte();
+        let b2 = generator.get_byte();
         // These values depend on blake2b_512 of the initial data
         // We can't hardcode expected values without blake2b, but we can
         // verify the generator produces consistent output
@@ -218,10 +218,10 @@ mod superscalar_tests {
         ];
 
         let key = b"test key 000";
-        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut generator = blake2gen::Blake2Generator::new(key, 0);
 
         for (i, expected_hex) in expected_hashes.iter().enumerate() {
-            let prog = superscalar::generate_superscalar(&mut gen);
+            let prog = superscalar::generate_superscalar(&mut generator);
 
             // Serialize program to raw bytes (same layout as C++ Instruction struct)
             let mut prog_bytes = Vec::new();
@@ -278,10 +278,10 @@ mod dataset_tests {
     fn test_dataset_item_0() {
         let cache_memory = argon2d::argon2d_cache(b"test key 000");
         let key = b"test key 000";
-        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut generator = blake2gen::Blake2Generator::new(key, 0);
         let mut programs = Vec::new();
         for _ in 0..8 {
-            programs.push(superscalar::generate_superscalar(&mut gen));
+            programs.push(superscalar::generate_superscalar(&mut generator));
         }
         let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
 
@@ -293,10 +293,10 @@ mod dataset_tests {
         fn test_dataset_item_10m() {
         let cache_memory = argon2d::argon2d_cache(b"test key 000");
         let key = b"test key 000";
-        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut generator = blake2gen::Blake2Generator::new(key, 0);
         let mut programs = Vec::new();
         for _ in 0..8 {
-            programs.push(superscalar::generate_superscalar(&mut gen));
+            programs.push(superscalar::generate_superscalar(&mut generator));
         }
         let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
 
@@ -308,10 +308,10 @@ mod dataset_tests {
         fn test_dataset_item_20m() {
         let cache_memory = argon2d::argon2d_cache(b"test key 000");
         let key = b"test key 000";
-        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut generator = blake2gen::Blake2Generator::new(key, 0);
         let mut programs = Vec::new();
         for _ in 0..8 {
-            programs.push(superscalar::generate_superscalar(&mut gen));
+            programs.push(superscalar::generate_superscalar(&mut generator));
         }
         let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
 
@@ -323,10 +323,10 @@ mod dataset_tests {
         fn test_dataset_item_30m() {
         let cache_memory = argon2d::argon2d_cache(b"test key 000");
         let key = b"test key 000";
-        let mut gen = blake2gen::Blake2Generator::new(key, 0);
+        let mut generator = blake2gen::Blake2Generator::new(key, 0);
         let mut programs = Vec::new();
         for _ in 0..8 {
-            programs.push(superscalar::generate_superscalar(&mut gen));
+            programs.push(superscalar::generate_superscalar(&mut generator));
         }
         let programs: [superscalar::SuperscalarProgram; 8] = programs.try_into().unwrap();
 

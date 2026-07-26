@@ -240,18 +240,18 @@ impl PoolConnection {
                 }
                 log::info!("Login successful, session id: {}", id);
             }
-            if let Some(job_data) = result.get("job") {
-                if let Some(job) = parse_job(job_data) {
-                    let diff = target_to_difficulty(&job.target);
-                    log::info!(
-                        "Initial job: {} (difficulty: {}, target: {})",
-                        job.job_id,
-                        diff,
-                        hex_encode(&job.target),
-                    );
-                    if let Ok(mut current) = self.current_job.lock() {
-                        *current = Some(Arc::new(job));
-                    }
+            if let Some(job_data) = result.get("job")
+                && let Some(job) = parse_job(job_data)
+            {
+                let diff = target_to_difficulty(&job.target);
+                log::info!(
+                    "Initial job: {} (difficulty: {}, target: {})",
+                    job.job_id,
+                    diff,
+                    hex_encode(&job.target),
+                );
+                if let Ok(mut current) = self.current_job.lock() {
+                    *current = Some(Arc::new(job));
                 }
             }
             Ok(())
@@ -429,33 +429,33 @@ impl PoolConnection {
             msg.get("result").and_then(|r| r.get("job"))
         };
 
-        if let Some(job_data) = job_params {
-            if let Some(job) = parse_job(job_data) {
-                let diff = target_to_difficulty(&job.target);
-                log::info!(
-                    "New job: {} (difficulty: {}, target: {})",
-                    job.job_id,
-                    diff,
-                    hex_encode(&job.target),
-                );
-                if let Ok(mut current) = self.current_job.lock() {
-                    *current = Some(Arc::new(job));
-                }
+        if let Some(job_data) = job_params
+            && let Some(job) = parse_job(job_data)
+        {
+            let diff = target_to_difficulty(&job.target);
+            log::info!(
+                "New job: {} (difficulty: {}, target: {})",
+                job.job_id,
+                diff,
+                hex_encode(&job.target),
+            );
+            if let Ok(mut current) = self.current_job.lock() {
+                *current = Some(Arc::new(job));
             }
         }
 
         // Handle submit responses (has an "id" but no "method")
         if msg.get("id").is_some() && msg.get("method").is_none() {
-            if let Some(error) = msg.get("error") {
-                if !error.is_null() {
-                    let err_msg = error
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown");
-                    log::warn!("Share rejected: {}", err_msg);
-                    self.rejected_shares.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+            if let Some(error) = msg.get("error")
+                && !error.is_null()
+            {
+                let err_msg = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown");
+                log::warn!("Share rejected: {}", err_msg);
+                self.rejected_shares.fetch_add(1, Ordering::Relaxed);
+                return;
             }
             if let Some(result) = msg.get("result") {
                 let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
@@ -468,12 +468,11 @@ impl PoolConnection {
     }
 
     fn set_read_timeout(&self, timeout: Duration) {
-        if let Ok(guard) = self.stream.lock() {
-            if let Some(s) = guard.as_ref() {
-                if let Err(e) = s.tcp().set_read_timeout(Some(timeout)) {
-                    log::warn!("Failed to set read timeout: {}", e);
-                }
-            }
+        if let Ok(guard) = self.stream.lock()
+            && let Some(s) = guard.as_ref()
+            && let Err(e) = s.tcp().set_read_timeout(Some(timeout))
+        {
+            log::warn!("Failed to set read timeout: {}", e);
         }
     }
 

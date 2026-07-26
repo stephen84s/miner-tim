@@ -23,6 +23,7 @@
 | **Completed** | **SEC-01** | **Dependency vuln scanning.** Added `make audit` + `rust:audit` CI job (cargo-audit / RustSec). Fixed 3 rustls-webpki advisories via 0.103.10→0.103.13. Rest of `.gitlab-ci.yml` noted stale (Android paths). |
 | **Completed** | **CI-01** | **CI rewrite.** Replaced stale Android/Gradle pipeline with lint (clippy -D warnings), audit, and test jobs for the root CLI crate. |
 | **Completed** | **RUST-01** | **Toolchain upgrade 1.94→1.97.1.** Fixed 2 new clippy lints; dropped the (incorrectly-added, never-clean) fmt gate; 87 vectors pass on new compiler. |
+| **Completed** | **EDITION-01** | **Edition 2021→2024.** Migrated in a worktree; A/B benchmark showed no perf impact (the "8%" was thermal noise); 87 vectors pass. Merged. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---
@@ -53,7 +54,7 @@ make run POOL=pool.supportxmr.com:443 WALLET=<addr> THREADS=12
 
 | Component | Version |
 |---|---|
-| Rust edition | 2021 |
+| Rust edition | 2024 |
 | serde_json | 1.0 |
 | rustls | 0.23 |
 | env_logger | 0.11 |

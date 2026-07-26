@@ -87,9 +87,9 @@ impl JitCompiler {
     /// # Safety
     /// `compile` must have been called first; the returned function must be
     /// invoked with valid nreg/scratchpad/config pointers.
-    pub(crate) unsafe fn get_fn(&self) -> JitFn {
+    pub(crate) unsafe fn get_fn(&self) -> JitFn { unsafe {
         self.memory.as_fn::<JitFn>()
-    }
+    }}
 }
 
 // ============================================================================

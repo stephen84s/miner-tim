@@ -140,17 +140,17 @@ impl Miner {
         // so threads scheduled onto efficiency cores add little throughput and
         // can contend with the performance-core threads. Warn if the user asked
         // for more than the P-core count.
-        if let Some(p_cores) = performance_core_count() {
-            if self.thread_count > p_cores {
-                log::warn!(
-                    "Requested {} threads but this CPU has {} performance cores; \
-                     the extra threads will run on efficiency cores and may not \
-                     improve (or may reduce) hashrate. Consider THREADS={}.",
-                    self.thread_count,
-                    p_cores,
-                    p_cores
-                );
-            }
+        if let Some(p_cores) = performance_core_count()
+            && self.thread_count > p_cores
+        {
+            log::warn!(
+                "Requested {} threads but this CPU has {} performance cores; \
+                 the extra threads will run on efficiency cores and may not \
+                 improve (or may reduce) hashrate. Consider THREADS={}.",
+                self.thread_count,
+                p_cores,
+                p_cores
+            );
         }
 
         let connection = Arc::new(PoolConnection::new());
@@ -481,10 +481,10 @@ fn get_or_generate_dataset(
     let mut guard = cache.lock().unwrap();
 
     // Already generated for this seed_hash?
-    if let Some(ref cached) = *guard {
-        if cached.seed_hash == seed_hash {
-            return cached.dataset.clone();
-        }
+    if let Some(ref cached) = *guard
+        && cached.seed_hash == seed_hash
+    {
+        return cached.dataset.clone();
     }
 
     // We're the first thread — generate the dataset
@@ -558,7 +558,7 @@ pub fn performance_core_count() -> Option<u32> {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_void};
 
-    extern "C" {
+    unsafe extern "C" {
         fn sysctlbyname(
             name: *const c_char,
             oldp: *mut c_void,

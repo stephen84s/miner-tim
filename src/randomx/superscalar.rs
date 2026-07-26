@@ -211,7 +211,7 @@ const BUF_3310: DecodeBuffer = DecodeBuffer { slots: &[3, 3, 10], index: 5 };
 
 const DEFAULT_BUFFERS: [&DecodeBuffer; 4] = [&BUF_484, &BUF_7333, &BUF_3733, &BUF_493];
 
-fn fetch_next(prev_type: SsType, decode_cycle: i32, mul_count: i32, gen: &mut Blake2Generator) -> &'static DecodeBuffer {
+fn fetch_next(prev_type: SsType, decode_cycle: i32, mul_count: i32, generator: &mut Blake2Generator) -> &'static DecodeBuffer {
     if prev_type == SsType::IMULH_R || prev_type == SsType::ISMULH_R {
         return &BUF_3310;
     }
@@ -219,20 +219,20 @@ fn fetch_next(prev_type: SsType, decode_cycle: i32, mul_count: i32, gen: &mut Bl
         return &BUF_4444;
     }
     if prev_type == SsType::IMUL_RCP {
-        return if (gen.get_byte() & 1) != 0 { &BUF_484 } else { &BUF_493 };
+        return if (generator.get_byte() & 1) != 0 { &BUF_484 } else { &BUF_493 };
     }
-    DEFAULT_BUFFERS[(gen.get_byte() & 3) as usize]
+    DEFAULT_BUFFERS[(generator.get_byte() & 3) as usize]
 }
 
 // ============================================================================
 // Slot selection
 // ============================================================================
 
-fn select_for_slot(gen: &mut Blake2Generator, slot_size: i32, fetch_type: i32, is_last: bool) -> &'static InstructionInfo {
+fn select_for_slot(generator: &mut Blake2Generator, slot_size: i32, fetch_type: i32, is_last: bool) -> &'static InstructionInfo {
     match slot_size {
         3 => {
             if is_last {
-                match gen.get_byte() & 3 {
+                match generator.get_byte() & 3 {
                     0 => &INFO_ISUB_R,
                     1 => &INFO_IXOR_R,
                     2 => &INFO_IMULH_R,
@@ -240,19 +240,19 @@ fn select_for_slot(gen: &mut Blake2Generator, slot_size: i32, fetch_type: i32, i
                     _ => unreachable!(),
                 }
             } else {
-                if (gen.get_byte() & 1) == 0 { &INFO_ISUB_R } else { &INFO_IXOR_R }
+                if (generator.get_byte() & 1) == 0 { &INFO_ISUB_R } else { &INFO_IXOR_R }
             }
         }
         4 => {
             if fetch_type == 4 && !is_last {
                 &INFO_IMUL_R
             } else {
-                if (gen.get_byte() & 1) == 0 { &INFO_IROR_C } else { &INFO_IADD_RS }
+                if (generator.get_byte() & 1) == 0 { &INFO_IROR_C } else { &INFO_IADD_RS }
             }
         }
-        7 => if (gen.get_byte() & 1) == 0 { &INFO_IXOR_C7 } else { &INFO_IADD_C7 },
-        8 => if (gen.get_byte() & 1) == 0 { &INFO_IXOR_C8 } else { &INFO_IADD_C8 },
-        9 => if (gen.get_byte() & 1) == 0 { &INFO_IXOR_C9 } else { &INFO_IADD_C9 },
+        7 => if (generator.get_byte() & 1) == 0 { &INFO_IXOR_C7 } else { &INFO_IADD_C7 },
+        8 => if (generator.get_byte() & 1) == 0 { &INFO_IXOR_C8 } else { &INFO_IADD_C8 },
+        9 => if (generator.get_byte() & 1) == 0 { &INFO_IXOR_C9 } else { &INFO_IADD_C9 },
         10 => &INFO_IMUL_RCP,
         _ => unreachable!(),
     }
@@ -289,7 +289,7 @@ impl WorkingInstruction {
         }
     }
 
-    fn create(info: &'static InstructionInfo, gen: &mut Blake2Generator) -> Self {
+    fn create(info: &'static InstructionInfo, generator: &mut Blake2Generator) -> Self {
         let mut inst = WorkingInstruction {
             info,
             src: -1,
@@ -312,7 +312,7 @@ impl WorkingInstruction {
                 inst.group_par_is_source = true;
             }
             SsType::IADD_RS => {
-                inst.mod_ = gen.get_byte();
+                inst.mod_ = generator.get_byte();
                 inst.op_group = SsType::IADD_RS;
                 inst.group_par_is_source = true;
             }
@@ -322,35 +322,35 @@ impl WorkingInstruction {
             }
             SsType::IROR_C => {
                 loop {
-                    inst.imm32 = (gen.get_byte() & 63) as u32;
+                    inst.imm32 = (generator.get_byte() & 63) as u32;
                     if inst.imm32 != 0 { break; }
                 }
                 inst.op_group = SsType::IROR_C;
                 inst.op_group_par = -1;
             }
             SsType::IADD_C7 | SsType::IADD_C8 | SsType::IADD_C9 => {
-                inst.imm32 = gen.get_u32();
+                inst.imm32 = generator.get_u32();
                 inst.op_group = SsType::IADD_C7;
                 inst.op_group_par = -1;
             }
             SsType::IXOR_C7 | SsType::IXOR_C8 | SsType::IXOR_C9 => {
-                inst.imm32 = gen.get_u32();
+                inst.imm32 = generator.get_u32();
                 inst.op_group = SsType::IXOR_C7;
                 inst.op_group_par = -1;
             }
             SsType::IMULH_R => {
                 inst.can_reuse = true;
                 inst.op_group = SsType::IMULH_R;
-                inst.op_group_par = gen.get_u32() as i32;
+                inst.op_group_par = generator.get_u32() as i32;
             }
             SsType::ISMULH_R => {
                 inst.can_reuse = true;
                 inst.op_group = SsType::ISMULH_R;
-                inst.op_group_par = gen.get_u32() as i32;
+                inst.op_group_par = generator.get_u32() as i32;
             }
             SsType::IMUL_RCP => {
                 loop {
-                    inst.imm32 = gen.get_u32();
+                    inst.imm32 = generator.get_u32();
                     if !is_zero_or_power_of_2(inst.imm32) { break; }
                 }
                 inst.op_group = SsType::IMUL_RCP;
@@ -362,7 +362,7 @@ impl WorkingInstruction {
         inst
     }
 
-    fn select_source(&mut self, cycle: i32, registers: &[RegisterInfo; 8], gen: &mut Blake2Generator) -> bool {
+    fn select_source(&mut self, cycle: i32, registers: &[RegisterInfo; 8], generator: &mut Blake2Generator) -> bool {
         let mut available: Vec<i32> = Vec::new();
         for i in 0..8 {
             if registers[i].latency <= cycle {
@@ -376,7 +376,7 @@ impl WorkingInstruction {
                 self.src = REGISTER_NEEDS_DISPLACEMENT;
                 return true;
             }
-        if let Some(reg) = select_register(&available, gen) {
+        if let Some(reg) = select_register(&available, generator) {
             self.src = reg;
             if self.group_par_is_source {
                 self.op_group_par = self.src;
@@ -387,7 +387,7 @@ impl WorkingInstruction {
         }
     }
 
-    fn select_destination(&mut self, cycle: i32, allow_chained_mul: bool, registers: &[RegisterInfo; 8], gen: &mut Blake2Generator) -> bool {
+    fn select_destination(&mut self, cycle: i32, allow_chained_mul: bool, registers: &[RegisterInfo; 8], generator: &mut Blake2Generator) -> bool {
         let mut available: Vec<i32> = Vec::new();
         for i in 0..8u32 {
             let ii = i as i32;
@@ -400,7 +400,7 @@ impl WorkingInstruction {
                 available.push(ii);
             }
         }
-        if let Some(reg) = select_register(&available, gen) {
+        if let Some(reg) = select_register(&available, generator) {
             self.dst = reg;
             true
         } else {
@@ -419,12 +419,12 @@ impl WorkingInstruction {
     }
 }
 
-fn select_register(available: &[i32], gen: &mut Blake2Generator) -> Option<i32> {
+fn select_register(available: &[i32], generator: &mut Blake2Generator) -> Option<i32> {
     if available.is_empty() {
         return None;
     }
     let index = if available.len() > 1 {
-        (gen.get_u32() % available.len() as u32) as usize
+        (generator.get_u32() % available.len() as u32) as usize
     } else {
         0
     };
@@ -512,7 +512,7 @@ fn schedule_mop(mop: &MacroOp, port_busy: &mut [[i32; 3]; CYCLE_MAP_SIZE], cycle
 // ============================================================================
 
 /// Generate a SuperscalarHash program using the Blake2Generator.
-pub fn generate_superscalar(gen: &mut Blake2Generator) -> SuperscalarProgram {
+pub fn generate_superscalar(generator: &mut Blake2Generator) -> SuperscalarProgram {
     let mut port_busy = [[0i32; 3]; CYCLE_MAP_SIZE];
     let mut registers = [
         RegisterInfo::new(), RegisterInfo::new(), RegisterInfo::new(), RegisterInfo::new(),
@@ -538,7 +538,7 @@ pub fn generate_superscalar(gen: &mut Blake2Generator) -> SuperscalarProgram {
             break;
         }
 
-        let buffer = fetch_next(current.info.inst_type, decode_cycle, mul_count, gen);
+        let buffer = fetch_next(current.info.inst_type, decode_cycle, mul_count, generator);
         let mut buffer_index: usize = 0;
 
         while buffer_index < buffer.slots.len() {
@@ -551,8 +551,8 @@ pub fn generate_superscalar(gen: &mut Blake2Generator) -> SuperscalarProgram {
                 }
                 let slot_size = buffer.slots[buffer_index];
                 let is_last = buffer_index + 1 == buffer.slots.len();
-                let info = select_for_slot(gen, slot_size, buffer.index, is_last);
-                current = WorkingInstruction::create(info, gen);
+                let info = select_for_slot(generator, slot_size, buffer.index, is_last);
+                current = WorkingInstruction::create(info, generator);
                 macro_op_index = 0;
             }
 
@@ -569,7 +569,7 @@ pub fn generate_superscalar(gen: &mut Blake2Generator) -> SuperscalarProgram {
             if macro_op_index == current.info.src_op {
                 let mut forward = 0;
                 while forward < LOOK_FORWARD_CYCLES {
-                    if current.select_source(schedule_cycle, &registers, gen) {
+                    if current.select_source(schedule_cycle, &registers, generator) {
                         break;
                     }
                     schedule_cycle += 1;
@@ -591,7 +591,7 @@ pub fn generate_superscalar(gen: &mut Blake2Generator) -> SuperscalarProgram {
             if macro_op_index == current.info.dst_op {
                 let mut forward = 0;
                 while forward < LOOK_FORWARD_CYCLES {
-                    if current.select_destination(schedule_cycle, throw_away_count > 0, &registers, gen) {
+                    if current.select_destination(schedule_cycle, throw_away_count > 0, &registers, generator) {
                         break;
                     }
                     schedule_cycle += 1;

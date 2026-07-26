@@ -4,7 +4,7 @@
 
 use std::ptr;
 
-extern "C" {
+unsafe extern "C" {
     fn pthread_jit_write_protect_np(enabled: i32);
     fn sys_icache_invalidate(start: *mut u8, size: usize);
 }
@@ -17,7 +17,7 @@ const PROT_WRITE: i32 = 0x02;
 const PROT_EXEC: i32 = 0x04;
 const MAP_FAILED: *mut u8 = !0 as *mut u8;
 
-extern "C" {
+unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
 }
@@ -93,10 +93,10 @@ impl JitMemory {
     pub unsafe fn as_fn<T>(&self) -> T
     where
         T: Copy,
-    {
+    { unsafe {
         debug_assert!(std::mem::size_of::<T>() == std::mem::size_of::<usize>());
         std::mem::transmute_copy(&self.ptr)
-    }
+    }}
 
     pub fn ptr(&self) -> *const u8 {
         self.ptr

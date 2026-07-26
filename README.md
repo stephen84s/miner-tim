@@ -2,10 +2,14 @@
 
 CPU-based Monero (XMR) miner optimised for macOS (Apple Silicon). Pure Rust mining engine — no C/FFI dependencies. Stratum TCP/TLS pool support. aarch64 JIT compiler for maximum hashrate on M-series Macs.
 
+> **MinerTim is a direct translation of [XMRig](https://github.com/xmrig/xmrig)'s
+> RandomX miner into Rust, produced with AI assistance.** It is not an independent
+> design — see [Acknowledgements](#acknowledgements).
+
 ## Requirements
 
 - **macOS** on Apple Silicon (M1/M2/M3)
-- **Rust 1.94+** via [rustup](https://rustup.rs)
+- **Rust 1.97+** via [rustup](https://rustup.rs)
 
 Linux/x86_64 also supported (interpreter fallback, no JIT).
 
@@ -158,8 +162,23 @@ codesign -s - target/release/minertim
 
 ## Acknowledgements
 
-- **[tevador/RandomX](https://github.com/tevador/RandomX)** — RandomX proof-of-work algorithm and C++ reference implementation. The `randomx/` module is a pure Rust port following the same algorithmic structure. BSD 3-Clause.
-- **[XMRig](https://github.com/xmrig/xmrig)** — aarch64 JIT register allocation scheme, JIT memory management approach, and scratchpad/dataset prefetch strategy. GPL-3.0.
+**MinerTim is a direct, AI-assisted translation of [XMRig](https://github.com/xmrig/xmrig)
+into Rust.** Its RandomX engine — the Argon2d cache, SuperscalarHash generation,
+dataset/scratchpad construction, AES and Blake2 routines, the VM execution model,
+and the aarch64 JIT (register allocation, MAP_JIT memory handling, prefetch
+strategy) — all follow XMRig's C++ line by line. The Rust in this repository is a
+re-expression of that prior work, generated with AI assistance; it is not an
+independent implementation.
+
+- **[XMRig](https://github.com/xmrig/xmrig)** — the miner this project is
+  translated from. Mature, battle-tested, and multi-platform; if you mine
+  seriously, use XMRig. GPL-3.0. All the hard design work is theirs.
+- **[tevador/RandomX](https://github.com/tevador/RandomX)** — the RandomX
+  proof-of-work algorithm and C++ reference implementation that XMRig itself is
+  built on. BSD 3-Clause.
+
+Because MinerTim is a translation of GPL-3.0 XMRig code, it is a derivative work
+and is distributed under the same [GPL-3.0](LICENSE) license.
 
 ## License
 

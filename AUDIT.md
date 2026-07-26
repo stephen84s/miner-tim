@@ -549,3 +549,26 @@ Interleaved A/B on 1.97.1, release, light-mode `calculate_hash_pipelined`:
 **Merge.** Perf-neutral (the stated gate), correctness preserved, clippy clean,
 and `unsafe extern` is a small safety-hygiene improvement. Merged edition-2024
 into main; worktree removed afterwards.
+
+## 2026-07-27 - README: reframe as AI-assisted translation of XMRig
+
+### Request
+Acknowledge XMRig's work and state that MinerTim is a direct translation of it
+into Rust using AI. (Part of a larger release/donate-level request; the
+donate-level feature is pending wallet addresses from the user.)
+
+### Files Changed
+- `README.md` — added a prominent note under the title and rewrote the
+  Acknowledgements section to state MinerTim is a direct, AI-assisted translation
+  of XMRig (previously it framed the port as tevador-reference-based with XMRig
+  credited only for JIT techniques). Kept tevador/RandomX credit. Made the
+  GPL-3.0 derivative-work relationship explicit. Fixed stale "Rust 1.94+" ->
+  "1.97+".
+
+### Verification
+- Documentation only; no code change. Existing LICENSE (GPL-3.0) already present.
+
+### Pending (not done this entry)
+- donate-level feature (xmrig-style, default 1% = 0.5% author + 0.5% XMRig):
+  blocked on the two exact XMR addresses from the user.
+- Version decision (recommended 0.1.0) and GitLab Release CI: pending user input.

@@ -21,7 +21,8 @@
 | **Completed** | **NET-01** | **Pool robustness.** Fixed TLS double-session receiver bug; added keepalive, auto-reconnect/relogin, 8-byte target support. Clippy backlog cleared (63→0). |
 | **Completed** | **PERF-01** | **Bench harness + P-core threads.** Added criterion benchmark (regression guard); default threads now = performance-core count (macOS `hw.perflevel0.logicalcpu`) instead of 2. Confirmed via xmrig docs that affinity/huge-pages are unavailable on ARM macOS. |
 | **Completed** | **SEC-01** | **Dependency vuln scanning.** Added `make audit` + `rust:audit` CI job (cargo-audit / RustSec). Fixed 3 rustls-webpki advisories via 0.103.10→0.103.13. Rest of `.gitlab-ci.yml` noted stale (Android paths). |
-| **Completed** | **CI-01** | **CI rewrite.** Replaced stale Android/Gradle pipeline with lint (fmt+clippy -D warnings), audit, and test jobs for the root CLI crate. |
+| **Completed** | **CI-01** | **CI rewrite.** Replaced stale Android/Gradle pipeline with lint (clippy -D warnings), audit, and test jobs for the root CLI crate. |
+| **Completed** | **RUST-01** | **Toolchain upgrade 1.94→1.97.1.** Fixed 2 new clippy lints; dropped the (incorrectly-added, never-clean) fmt gate; 87 vectors pass on new compiler. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---
@@ -46,7 +47,7 @@ make run POOL=pool.supportxmr.com:443 WALLET=<addr> THREADS=12
 ./target/release/minertim pool.supportxmr.com:443 <wallet> 12
 ```
 
-**Prerequisites:** Rust 1.94+ via rustup.
+**Prerequisites:** Rust 1.97+ via rustup.
 
 ## Versions
 

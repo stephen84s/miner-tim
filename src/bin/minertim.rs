@@ -105,7 +105,7 @@ fn main() {
             None => "?".to_string(),
         };
 
-        let target_val = if difficulty > 0 { 0xFFFFFFFF_u64 / difficulty } else { 0 };
+        let target_val = 0xFFFFFFFF_u64.checked_div(difficulty).unwrap_or(0);
         let progress = if target_val > 0 && best < u32::MAX {
             let pct = (target_val as f64 / best as f64 * 100.0).min(999.0);
             format!("best={} target={} ({:.0}%)", best, target_val, pct)

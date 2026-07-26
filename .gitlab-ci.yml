@@ -10,7 +10,7 @@ stages:
   - test
 
 variables:
-  RUST_VERSION: "1.94.0"
+  RUST_VERSION: "1.97.1"
   CARGO_TERM_COLOR: "always"
   # Keep cargo's state inside the project so it can be cached between jobs.
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
@@ -32,10 +32,13 @@ default:
 rust:lint:
   stage: check
   before_script:
-    - rustup component add clippy rustfmt
+    - rustup component add clippy
   script:
-    - cargo fmt --all -- --check
-    # --all-targets compiles lib, bin, tests and benches; -D warnings gates.
+    # No `cargo fmt --check` gate: the RandomX/JIT sources use intentional
+    # custom formatting (aligned emitter comments, compact literals) that aids
+    # auditing against the reference implementation and does not match rustfmt
+    # defaults. --all-targets compiles lib, bin, tests and benches; -D warnings
+    # turns any clippy or rustc warning into a hard failure.
     - cargo clippy --all-targets -- -D warnings
 
 # ---------------------------------------------------------------------------

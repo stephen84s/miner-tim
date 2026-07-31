@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use minertim::donate;
 use minertim::miner::Miner;
 
 fn main() {
@@ -15,11 +16,11 @@ fn main() {
     if args.len() < 3 || args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
-        eprintln!("Usage: {} <pool:port> <wallet> [threads]", args[0]);
+        eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N]", args[0]);
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} pool.supportxmr.com:443 4...address 4", args[0]);
-        eprintln!("  {} pool.hashvault.pro:443 4...address", args[0]);
+        eprintln!("  {} pool.hashvault.pro:443 4...address --donate-level 1", args[0]);
         eprintln!();
         eprintln!("Arguments:");
         eprintln!("  pool:port    Mining pool address with port (TLS auto-detected)");
@@ -27,14 +28,19 @@ fn main() {
         eprintln!("  threads      Number of mining threads (default: {} performance cores, max: {})",
             minertim::miner::recommended_thread_count(),
             thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+        eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
+            donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
+        eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
     let pool = &args[1];
     let wallet = &args[2];
     let threads: u32 = args.get(3)
+        .filter(|s| !s.starts_with('-'))
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(minertim::miner::recommended_thread_count);
+    let donate_level = parse_donate_level(&args);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 
@@ -52,8 +58,16 @@ fn main() {
 
     let mut miner = Miner::new(mining_active.clone());
 
+    log::info!(
+        "Donation: donate-level {}% of mining time, split 50/50 between the MinerTim \
+         author and XMRig. MinerTim is an AI-assisted Rust translation of XMRig. \
+         Adjust with --donate-level (minimum {}); see README.",
+        donate_level,
+        donate::MIN_DONATE_LEVEL,
+    );
+
     log::info!("Connecting to {}...", pool);
-    if let Err(e) = miner.initialize(pool, wallet, threads) {
+    if let Err(e) = miner.initialize(pool, wallet, threads, donate_level) {
         eprintln!("Failed to initialize: {}", e);
         std::process::exit(1);
     }
@@ -138,6 +152,28 @@ fn main() {
     miner.stop();
     log::info!("Miner stopped. Final stats: {} accepted, {} rejected",
         miner.get_accepted_shares(), miner.get_rejected_shares());
+}
+
+/// Parse `--donate-level N` or `--donate-level=N` from the args, defaulting to
+/// `donate::DEFAULT_DONATE_LEVEL`. The value is clamped to the permitted range;
+/// going below the minimum requires recompiling.
+fn parse_donate_level(args: &[String]) -> u8 {
+    let mut level = donate::DEFAULT_DONATE_LEVEL;
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix("--donate-level=") {
+            if let Ok(n) = v.parse() {
+                level = n;
+            }
+        } else if args[i] == "--donate-level" {
+            if let Some(n) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                level = n;
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    donate::clamp_level(level)
 }
 
 fn format_duration(secs: f64) -> String {

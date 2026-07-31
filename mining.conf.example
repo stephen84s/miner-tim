@@ -4,4 +4,8 @@
 
 POOL=pool.supportxmr.com:443
 WALLET=YOUR_WALLET_ADDRESS_HERE
-THREADS=2
+# THREADS: leave unset to auto-detect performance cores.
+THREADS=
+# DONATE_LEVEL: percent of mining time donated (default 5, minimum 1), split
+# 50/50 between the MinerTim author and XMRig. See README.
+DONATE_LEVEL=5

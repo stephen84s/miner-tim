@@ -130,6 +130,7 @@ impl Miner {
         pool: &str,
         wallet: &str,
         threads: u32,
+        donate_level: u8,
     ) -> Result<(), String> {
         let max_threads = thread::available_parallelism()
             .map(|n| n.get() as u32)
@@ -153,7 +154,7 @@ impl Miner {
             );
         }
 
-        let connection = Arc::new(PoolConnection::new());
+        let connection = Arc::new(PoolConnection::new(donate_level));
         connection.connect(pool).map_err(|e| format!("Connection failed: {}", e))?;
         connection.login(wallet).map_err(|e| format!("Login failed: {}", e))?;
         connection.start_receiver();

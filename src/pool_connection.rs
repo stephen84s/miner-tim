@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::donate::{Beneficiary, DonationSchedule};
 use crate::hex::{hex_decode, hex_encode};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -138,7 +139,13 @@ pub struct PoolConnection {
     connected: AtomicBool,
     request_id: AtomicU64,
     address: Mutex<String>,
+    /// The wallet currently logged in with — may be the user's or, during a
+    /// donation slice, the author's or XMRig's address.
     wallet: Mutex<String>,
+    /// The user's own wallet, captured on the first login. Donation slices
+    /// rotate away from and back to this.
+    user_wallet: Mutex<String>,
+    donation: DonationSchedule,
     tls_config: Arc<ClientConfig>,
     session_id: Mutex<String>,
     accepted_shares: AtomicU32,
@@ -147,12 +154,12 @@ pub struct PoolConnection {
 
 impl Default for PoolConnection {
     fn default() -> Self {
-        Self::new()
+        Self::new(crate::donate::DEFAULT_DONATE_LEVEL)
     }
 }
 
 impl PoolConnection {
-    pub fn new() -> Self {
+    pub fn new(donate_level: u8) -> Self {
         let tls_config = ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
@@ -165,6 +172,8 @@ impl PoolConnection {
             request_id: AtomicU64::new(1),
             address: Mutex::new(String::new()),
             wallet: Mutex::new(String::new()),
+            user_wallet: Mutex::new(String::new()),
+            donation: DonationSchedule::new(donate_level),
             tls_config: Arc::new(tls_config),
             session_id: Mutex::new(String::new()),
             accepted_shares: AtomicU32::new(0),
@@ -223,11 +232,18 @@ impl PoolConnection {
         if let Ok(mut w) = self.wallet.lock() {
             *w = wallet.to_string();
         }
+        // The very first login establishes the user's own wallet; donation
+        // relogins (author/XMRig) must not overwrite it.
+        if let Ok(mut uw) = self.user_wallet.lock()
+            && uw.is_empty()
+        {
+            *uw = wallet.to_string();
+        }
 
         let params = serde_json::json!({
             "login": wallet,
             "pass": "x",
-            "agent": "MinerTim/1.0",
+            "agent": "MinerTim/0.1.0",
             "algo": "rx/0"
         });
 
@@ -320,7 +336,40 @@ impl PoolConnection {
         let mut chunk = [0u8; 4096];
         let mut last_keepalive = Instant::now();
 
+        // Donation schedule reference point; the initial login is the user, so
+        // we start in the User slice.
+        let donation_start = Instant::now();
+        let mut active = Beneficiary::User;
+
         loop {
+            // Rotate the login wallet between user/author/XMRig per the donation
+            // schedule (see `crate::donate`). Switching re-logs-in on the same
+            // pool with the target wallet.
+            let want = self.donation.beneficiary_at(donation_start.elapsed().as_secs());
+            if want != active {
+                active = want;
+                let addr = self.beneficiary_address(want);
+                log::info!(
+                    "Donation: mining to {:?} (donate-level {}%)",
+                    want,
+                    self.donation.level()
+                );
+                if let Ok(mut w) = self.wallet.lock() {
+                    *w = addr.clone();
+                }
+                match self.relogin_as(&addr) {
+                    Ok(()) => {
+                        pending.clear();
+                        continue;
+                    }
+                    Err(e) => {
+                        // Stream is torn down; the read below yields NotConnected
+                        // and reconnect() re-establishes using self.wallet (= addr).
+                        log::warn!("Donation switch failed: {} (reconnecting)", e);
+                    }
+                }
+            }
+
             // Hold the stream lock only for the duration of one read so
             // submits/keepalives from other threads can interleave.
             let read_result = {
@@ -410,6 +459,33 @@ impl PoolConnection {
                 }
             }
         }
+    }
+
+    /// The address for a donation beneficiary. `User` resolves to the wallet
+    /// captured on first login; the others are the fixed donation addresses.
+    fn beneficiary_address(&self, who: Beneficiary) -> String {
+        match who {
+            Beneficiary::User => self.user_wallet.lock().map(|w| w.clone()).unwrap_or_default(),
+            Beneficiary::Author => crate::donate::AUTHOR_ADDRESS.to_string(),
+            Beneficiary::Xmrig => crate::donate::XMRIG_ADDRESS.to_string(),
+        }
+    }
+
+    /// Tear down the current session and log in again on the same pool with a
+    /// different wallet. One attempt; on failure the caller falls through to
+    /// the reconnect path.
+    fn relogin_as(&self, wallet: &str) -> Result<(), String> {
+        let address = self.address.lock().map(|a| a.clone()).unwrap_or_default();
+        if address.is_empty() {
+            return Err("no pool address recorded".into());
+        }
+        if let Ok(mut s) = self.stream.lock() {
+            *s = None;
+        }
+        self.connect(&address)?;
+        self.login(wallet)?;
+        self.set_read_timeout(RECV_POLL_INTERVAL);
+        Ok(())
     }
 
     fn handle_pool_message(&self, line: &str) {

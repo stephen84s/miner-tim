@@ -60,6 +60,29 @@ WALLET=4...your_monero_address
 THREADS=12
 ```
 
+## Donation (donate-level)
+
+Like [XMRig](https://xmrig.com/docs/miner/donate), MinerTim donates a small,
+configurable fraction of mining time. This is **on by default and disclosed** —
+it is logged at startup every run.
+
+- **Default: 5%** of mining time, split **50/50**: 2.5% to the MinerTim author and
+  2.5% to **XMRig** (since MinerTim is an AI-assisted Rust translation of XMRig,
+  a share goes upstream).
+- **Configurable** down to a **minimum of 1%**:
+
+  ```bash
+  ./target/release/minertim <pool> <wallet> --donate-level 1
+  # or in mining.conf:  DONATE_LEVEL=1
+  ```
+
+- Going **below 1% (or to zero) is intentionally not possible at runtime** — it
+  requires editing `MIN_DONATE_LEVEL` in `src/donate.rs` and recompiling.
+
+Mechanically, the miner briefly switches the pool login to each donation address
+on a rolling 100-minute cycle (the same model XMRig uses). The donation
+addresses live in [`src/donate.rs`](src/donate.rs).
+
 ## Project Structure
 
 ```

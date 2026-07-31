@@ -572,3 +572,47 @@ donate-level feature is pending wallet addresses from the user.)
 - donate-level feature (xmrig-style, default 1% = 0.5% author + 0.5% XMRig):
   blocked on the two exact XMR addresses from the user.
 - Version decision (recommended 0.1.0) and GitLab Release CI: pending user input.
+
+## 2026-07-31 - Donate-level (XMRig-style donation) + version 0.1.0
+
+### Request
+Add an XMRig-style donate-level: default 5% of mining time, configurable down to
+a hard minimum of 1% (below that requires recompiling), split 50/50 between the
+MinerTim author and XMRig. Version the project honestly.
+
+### Files Changed
+- `src/donate.rs` (new) — hardcoded author + XMRig XMR donation addresses (both
+  user-confirmed), DEFAULT=5 / MIN=1 / MAX=100 levels, `clamp_level`,
+  `Beneficiary` enum, and `DonationSchedule` (100-minute cycle; the level% donated
+  portion sits at the cycle end, split 50/50). Unit tests for phase boundaries,
+  clamping, and the donated fraction.
+- `src/lib.rs` — `pub mod donate;`.
+- `src/pool_connection.rs` — `PoolConnection::new(donate_level)`; new `user_wallet`
+  (captured on first login) and `donation` fields; receiver loop now rotates the
+  pool login between user/author/XMRig via `relogin_as` on the schedule; reuses
+  the existing reconnect path (which re-logs-in with `self.wallet`, so donation
+  slices survive disconnects). Agent string -> MinerTim/0.1.0.
+- `src/miner.rs` — `initialize(..., donate_level)` threads the level to the pool.
+- `src/bin/minertim.rs` — `--donate-level N` / `--donate-level=N` parsing
+  (clamped), help text, and a startup disclosure log line.
+- `Makefile`, `mining.conf.example` — `DONATE_LEVEL` passthrough / documented.
+- `README.md` — a prominent "Donation (donate-level)" section.
+- `Cargo.toml` — version 1.0.0 -> 0.1.0 (honest for unproven software).
+
+### Behaviour
+- On by default at 5%, disclosed at startup every run and in the README.
+- `--donate-level` (or `DONATE_LEVEL`) adjusts it; runtime-clamped to [1, 100].
+- Sub-1% requires editing `MIN_DONATE_LEVEL` in `src/donate.rs` and recompiling.
+
+### Verification Performed
+- `cargo build --all-targets`, `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo test --release --lib donate` — 3 passed.
+- Ran the binary: `--help` shows the option; startup logs the disclosure;
+  `--donate-level 0` correctly reports and enforces the 1% floor.
+- Live-pool rotation not exercised (needs a real pool); the schedule is unit-
+  tested and the switch reuses the already-verified reconnect path.
+
+### Notable Constraints
+- The two donation addresses are public in `src/donate.rs` by design (Monero
+  receive addresses are safe to publish; XMRig's is public too).
+- RandomX correctness path untouched; full vector suite not re-run this batch.

@@ -14,7 +14,14 @@
       "Bash(adb devices:*)",
       "Bash(make build:*)",
       "Bash(make rust-check:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(rtk grep *)",
+      "Bash(rtk read *)",
+      "Bash(rtk ls *)",
+      "Bash(rtk cargo check *)",
+      "Read(//Users/stephen/code/gitlab/miner-tim-ed2024/**)",
+      "Bash(rtk git *)",
+      "Bash(rtk cargo build --all-targets *)"
     ]
   }
 }

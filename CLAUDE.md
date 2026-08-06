@@ -25,6 +25,7 @@
 | **Completed** | **RUST-01** | **Toolchain upgrade 1.94→1.97.1.** Fixed 2 new clippy lints; dropped the (incorrectly-added, never-clean) fmt gate; 87 vectors pass on new compiler. |
 | **Completed** | **EDITION-01** | **Edition 2021→2024.** Migrated in a worktree; A/B benchmark showed no perf impact (the "8%" was thermal noise); 87 vectors pass. Merged. |
 | **Completed** | **DONATE-01** | **Donate-level.** XMRig-style donation: default 5% (min 1%, sub-1% needs recompile), split 50/50 author/XMRig via rolling login rotation. Disclosed at startup + README. Version → 0.1.0. |
+| **Completed** | **RELEASE-01** | **Release flow.** `make dist` (portable apple-m1 tarball + SHA256SUMS), `make release` (tag+push), CI release job on `v*` tags, RELEASING.md. Agent string tracks CARGO_PKG_VERSION. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

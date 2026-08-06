@@ -8,6 +8,7 @@
 stages:
   - check
   - test
+  - release
 
 variables:
   RUST_VERSION: "1.97.1"
@@ -60,3 +61,21 @@ rust:test:
   script:
     - cargo test --release
   timeout: 1h
+
+# ---------------------------------------------------------------------------
+# Release — on a `v*` tag, create a GitLab Release entry. The macOS arm64
+# binary cannot be built on the shared Linux runners; it is built locally with
+# `make dist` and attached to the release per RELEASING.md.
+# ---------------------------------------------------------------------------
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  cache: []
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]/'
+  script:
+    - echo "Creating GitLab Release for $CI_COMMIT_TAG"
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    name: 'MinerTim $CI_COMMIT_TAG'
+    description: 'The macOS arm64 binary (minertim-<ver>-macos-arm64.tar.gz + SHA256SUMS) is built with `make dist` and attached manually — see RELEASING.md.'

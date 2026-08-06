@@ -243,7 +243,7 @@ impl PoolConnection {
         let params = serde_json::json!({
             "login": wallet,
             "pass": "x",
-            "agent": "MinerTim/0.1.0",
+            "agent": concat!("MinerTim/", env!("CARGO_PKG_VERSION")),
             "algo": "rx/0"
         });
 

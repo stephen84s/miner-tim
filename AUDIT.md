@@ -616,3 +616,42 @@ MinerTim author and XMRig. Version the project honestly.
 - The two donation addresses are public in `src/donate.rs` by design (Monero
   receive addresses are safe to publish; XMRig's is public too).
 - RandomX correctness path untouched; full vector suite not re-run this batch.
+
+## 2026-08-07 - Portable release build + release flow
+
+### Request
+"continue" — implement the two release-readiness items previously flagged: a
+distributable (portable) binary build and a release/publish flow.
+
+### Files Changed
+- `.cargo/config.toml` — documented that `target-cpu=native` is for local builds
+  only (can SIGILL on other Apple Silicon); distributables use `make dist`.
+- `Makefile` — `dist` target builds a portable binary
+  (`RUSTFLAGS="-C target-cpu=apple-m1"`, the M1 baseline that runs on all
+  Apple Silicon), packages `minertim` + README + LICENSE + mining.conf.example
+  into `dist/minertim-<ver>-macos-arm64.tar.gz`, and writes `dist/SHA256SUMS`.
+  `release` target tags `v<ver>` and pushes (clean-tree guarded). `VERSION` is
+  parsed from Cargo.toml; help + `.PHONY` updated. `clean` also removes `dist/`.
+- `.gitlab-ci.yml` — new `release` stage/job: on a `v[0-9]*` tag, creates a
+  GitLab Release via `release-cli`. (Shared Linux runners can't build the macOS
+  binary; it is attached from `make dist` per RELEASING.md.)
+- `.gitignore` — ignore `dist/`.
+- `RELEASING.md` (new) — end-to-end release process: bump version, verify,
+  `make dist`, `make release`, attach the binary (web UI or GitLab API), verify
+  checksums; plus a note on fully-automating with a self-hosted Mac runner.
+- `src/pool_connection.rs` — Stratum agent string now derives from
+  `CARGO_PKG_VERSION` (`concat!("MinerTim/", env!(...))`) so version bumps
+  propagate automatically.
+
+### Verification Performed
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `make dist` — builds the portable artifact; tarball contains the binary +
+  LICENSE + README + config example; `SHA256SUMS` generated. `dist/` is
+  gitignored.
+- `.gitlab-ci.yml` parses; stages check/test/release; the release job is gated
+  to `v[0-9]*` tags.
+
+### Notable Constraints
+- Publishing the binary still requires a Mac (local `make dist`) because CI has
+  no macOS runner; CI creates the Release entry and the asset is attached
+  manually or via the API (documented in RELEASING.md).

@@ -1,2 +1,6 @@
+# target-cpu=native tunes the binary to THIS machine's exact instruction set —
+# best for local mining (make build / make run), but such a binary can crash
+# with SIGILL on other Apple Silicon Macs. Distributable builds use `make dist`,
+# which overrides this with target-cpu=apple-m1 (portable across all M-series).
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "target-cpu=native"]

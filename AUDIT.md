@@ -655,3 +655,34 @@ distributable (portable) binary build and a release/publish flow.
 - Publishing the binary still requires a Mac (local `make dist`) because CI has
   no macOS runner; CI creates the Release entry and the asset is attached
   manually or via the API (documented in RELEASING.md).
+
+## 2026-08-07 - Live validation + README performance refresh
+
+### Request
+Run the miner live locally; test plain TCP and TLS; explain a perceived hashrate
+drop; refresh the README performance figures.
+
+### Live validation (monerohash.com, wallet from mining.conf)
+- Plain TCP (:2222) and TLS (:9999) both connect, stream jobs continuously, and
+  submit shares that the pool ACCEPTS (external proof the RandomX PoW is correct
+  and the TLS receiver fix works — the old double-session bug received 0 jobs).
+- P-core auto-detect (8) and explicit 12-thread runs both work; donation
+  disclosure logs at startup.
+
+### Hashrate findings
+- The apparent slowdown was **Low Power Mode + battery** (`lowpowermode 1`, on
+  battery): ~3,800 H/s. Plugged in with LPM off: ~4,560 (warm) to ~4,743 (cooler
+  peak) H/s at 12 threads. The Rust 1.94→1.97 upgrade and native-vs-apple-m1 build
+  are both exonerated (native ≈ apple-m1, because the hot loop is JIT'd ARM64).
+- `1m/5m/10m` are rolling averages that include the ~50s dataset-init dead time,
+  so they read low at startup then flatten — not the CPU ramping.
+- On M2 Max, 12 threads (~4,600) beat 8 P-cores (~3,300): efficiency cores help
+  here, contrary to the (kept-but-softened) startup warning.
+
+### Files Changed
+- `README.md` — Performance section rewritten: power-state-dependent figures
+  (plugged-in/LPM-off vs battery), peak-vs-sustained, the 12-vs-8-thread result,
+  a note that target-cpu barely matters (JIT), and the rolling-average artifact.
+
+### Verification
+- Documentation only. Live runs above; no code changed this entry.

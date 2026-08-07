@@ -161,15 +161,34 @@ Active on macOS aarch64. For each of the 8 RandomX program chains per hash:
 
 ## Performance
 
-Measured on Apple M2 Max (12 threads, `make run THREADS=12`):
+Measured on **Apple M2 Max** (12 threads, `make run THREADS=12`), **plugged in
+with macOS Low Power Mode OFF** — the power state matters a lot (see notes):
 
 | Metric | Value |
 |---|---|
-| Hardware | Apple M2 Max, 12 logical CPUs, 32 GB RAM |
-| Dataset init | ~46s |
-| Peak 1m hashrate | ~5000 H/s |
-| Sustained average | ~4270 H/s |
+| Hardware | Apple M2 Max (8 performance + 4 efficiency cores), 32 GB RAM |
+| Dataset init | ~50s (one-time, ~2 GiB, before hashing begins) |
+| Peak 1m hashrate (cold) | ~4,750–5,000 H/s |
+| Sustained (warm) | ~4,560–4,700 H/s |
+| On battery / Low Power Mode | ~3,800 H/s (≈20% lower) |
 | Optimisation flags | `target-cpu=native`, LTO, `codegen-units=1` |
+
+**Notes**
+
+- **Power state dominates.** On battery with Low Power Mode enabled, macOS caps
+  CPU clocks and hashrate drops ~20%. For peak hashrate, plug in and turn Low
+  Power Mode off. Sustained figures also sit a few percent under the cold-start
+  peak once the chip heat-soaks under continuous load.
+- **All 12 threads beat 8 P-cores here** (~4,600 vs ~3,300), so on the M2 Max the
+  efficiency cores do contribute — the memory controller isn't saturated at 8
+  threads. The default thread count is the performance-core count (a safe general
+  choice), but `THREADS=12` is usually faster on this chip.
+- **`target-cpu` barely affects hashrate.** The RandomX inner loop is JIT-compiled
+  to ARM64 at runtime, so `native` and the portable `apple-m1` build (used by
+  `make dist`) measure the same; `native` only helps the non-JIT support code.
+- Hashrate is a rolling average that includes the ~50s dataset-init dead time at
+  startup, so the `1m`/`5m`/`10m` figures read low for the first minute or two
+  and then flatten — that is the average catching up, not the CPU ramping.
 
 ## Distribution
 

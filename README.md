@@ -167,11 +167,14 @@ with macOS Low Power Mode OFF** — the power state matters a lot (see notes):
 | Metric | Value |
 |---|---|
 | Hardware | Apple M2 Max (8 performance + 4 efficiency cores), 32 GB RAM |
-| Dataset init | ~50s (one-time, ~2 GiB, before hashing begins) |
-| Peak 1m hashrate (cold) | ~4,750–5,000 H/s |
-| Sustained (warm) | ~4,560–4,700 H/s |
+| Dataset init | ~45s (one-time, ~2 GiB, before hashing begins) |
+| Peak 1m hashrate | ~5,180 H/s |
+| Sustained (1-hour average) | ~4,980 H/s |
 | On battery / Low Power Mode | ~3,800 H/s (≈20% lower) |
 | Optimisation flags | `target-cpu=native`, LTO, `codegen-units=1` |
+
+Measured over a continuous 1-hour run (12 threads): ~4,980 H/s average, 5,182
+peak.
 
 **Notes**
 
@@ -186,9 +189,14 @@ with macOS Low Power Mode OFF** — the power state matters a lot (see notes):
 - **`target-cpu` barely affects hashrate.** The RandomX inner loop is JIT-compiled
   to ARM64 at runtime, so `native` and the portable `apple-m1` build (used by
   `make dist`) measure the same; `native` only helps the non-JIT support code.
-- Hashrate is a rolling average that includes the ~50s dataset-init dead time at
+- Hashrate is a rolling average that includes the ~45s dataset-init dead time at
   startup, so the `1m`/`5m`/`10m` figures read low for the first minute or two
   and then flatten — that is the average catching up, not the CPU ramping.
+- **Share acceptance.** At 12 threads all cores mine, so the pool receiver thread
+  is run at raised scheduling priority to avoid being starved — otherwise the
+  current job goes stale and shares are rejected as "Invalid job id". This keeps
+  the reject rate low (measured ~4% vs ~17% without it) so accepted-share
+  throughput stays close to the raw hashrate.
 
 ## Distribution
 

@@ -686,3 +686,38 @@ drop; refresh the README performance figures.
 
 ### Verification
 - Documentation only. Live runs above; no code changed this entry.
+
+## 2026-08-08 - Fix stale-share rejects at full-core mining + accurate perf
+
+### Request
+"Do both": update the README with real performance numbers, and investigate the
+~17.5% share reject rate seen in the 1-hour run.
+
+### Investigation
+A clean 1-hour run (12 threads, plugged in, LPM off) measured ~4,978 H/s
+sustained / 5,182 peak — but 18 of 103 shares were rejected, all "Invalid job id"
+(stale). The pool churned 264 jobs (~17s median spacing, only 8% within 2s), so
+bursty jobs were not the cause. The tell: every 8-thread run had 0 rejects while
+every 12-thread run had rejects → at 12 threads all cores mine and the pool
+receiver thread is CPU-starved, so `current_job` goes stale and shares submit
+against superseded jobs. It also held the stream lock during its 200ms blocking
+read, delaying share submits.
+
+### Files Changed
+- `src/pool_connection.rs` — `boost_current_thread_priority()` sets the receiver
+  thread to USER_INTERACTIVE QoS on macOS (`pthread_set_qos_class_self_np`) so the
+  scheduler preempts a mining worker to run it. `RECV_POLL_INTERVAL` 200ms → 50ms
+  to cut the lock-hold / submit latency.
+- `README.md` — Performance table refreshed to the measured 1-hour figures
+  (~4,980 sustained / 5,182 peak); added a note on the receiver-priority fix and
+  share acceptance.
+
+### Verification (post-fix, 14 min, 12 threads)
+- 25 shares found, 24 accepted, **1 rejected (~4%)** — down from ~17.5%.
+- Hashrate ~4,740 H/s (unchanged within variance; the priority boost costs
+  negligible CPU). Effective (accepted) hashrate up ~11% (~4,100 → ~4,550).
+- `cargo clippy --all-targets -- -D warnings` clean; release build clean.
+
+### Notes
+- Residual ~4% is the inherent job-boundary window (share found just before a new
+  job lands); near the practical floor, not chased further.

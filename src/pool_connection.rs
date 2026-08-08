@@ -13,8 +13,11 @@ use rustls::ClientConfig;
 use serde::Serialize;
 use serde_json::Value;
 
-/// How often the receiver polls the socket for new data.
-const RECV_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long the receiver blocks on a socket read (also the max time it holds the
+/// stream lock, i.e. the worst-case share-submit latency). Kept short so that
+/// under full-core mining, new jobs are picked up and shares submitted promptly —
+/// large values here cause stale "Invalid job id" rejects.
+const RECV_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Stratum keepalive interval.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// Delay between reconnection attempts.
@@ -330,6 +333,9 @@ impl PoolConnection {
     }
 
     fn receiver_loop(&self) {
+        // Raise this thread's priority so it keeps processing job updates and
+        // share submissions promptly even when every core is busy mining.
+        boost_current_thread_priority();
         self.set_read_timeout(RECV_POLL_INTERVAL);
 
         let mut pending: Vec<u8> = Vec::new();
@@ -641,6 +647,24 @@ fn read_line(stream: &mut PoolStream) -> Result<String, String> {
     }
     String::from_utf8(line).map_err(|e| format!("Invalid UTF-8 from pool: {}", e))
 }
+
+/// Raise the calling thread's scheduling priority. On macOS the pool receiver
+/// runs at USER_INTERACTIVE QoS so the scheduler preempts a mining worker to run
+/// it — without this, 12 mining threads saturate all cores, the receiver is
+/// starved, `current_job` goes stale, and shares are rejected as "Invalid job id".
+#[cfg(target_os = "macos")]
+fn boost_current_thread_priority() {
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    unsafe {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn boost_current_thread_priority() {}
 
 fn parse_job(data: &Value) -> Option<Job> {
     let blob_hex = data.get("blob")?.as_str()?;

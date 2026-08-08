@@ -25,9 +25,11 @@ fn main() {
         eprintln!("Arguments:");
         eprintln!("  pool:port    Mining pool address with port (TLS auto-detected)");
         eprintln!("  wallet       Monero wallet address");
-        eprintln!("  threads      Number of mining threads (default: {} performance cores, max: {})",
-            minertim::miner::recommended_thread_count(),
+        eprintln!("  threads      Number of mining threads (default: {} = cores minus one,",
+            minertim::miner::recommended_thread_count());
+        eprintln!("               leaving a core for the pool receiver; max: {}). Using all",
             thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+        eprintln!("               cores raises hashrate marginally but causes stale-share rejects.");
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");

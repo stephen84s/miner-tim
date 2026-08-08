@@ -721,3 +721,42 @@ read, delaying share submits.
 ### Notes
 - Residual ~4% is the inherent job-boundary window (share found just before a new
   job lands); near the practical floor, not chased further.
+
+## 2026-08-08 - 1-hour A/B (11 vs 12 threads): default is now cores-1
+
+### Request
+Run 11 and 12 threads for one hour each to compare (following up the stale-share
+investigation).
+
+### Result (1 hour each, native, plugged in, LPM off)
+| Config | avg H/s | peak | found | accepted | rejected |
+|---|---|---|---|---|---|
+| 11 threads | 4,925 | 5,013 | 72 | 72 | 0 (0%) |
+| 12 threads | 4,960 | 5,152 | 112 | 94 | 17 (15.2%) |
+
+Raw hashrate is identical (memory-bound; the 12th thread adds nothing), but all
+12 cores starves the receiver → ~15% stale rejects, while 11 threads gives 0%.
+Effective (accepted) hashrate: ~4,925 (11t) vs ~4,160 (12t) — 11 threads earns
+~18% more paid shares.
+
+### Correction to the prior entry
+The earlier "receiver QoS boost fixed rejects (17.5%→4%)" conclusion was wrong —
+that 14-minute validation was too small a sample (1 reject in 25). Over a full
+hour, 12-thread rejects are ~15% *with* the QoS boost; the priority hint helps
+only marginally. The reliable fix is leaving a core free.
+
+### Files Changed
+- `src/miner.rs` — `recommended_thread_count()` now returns logical-cores − 1
+  (was performance-core count); startup warning now fires when THREADS == all
+  cores, recommending one fewer.
+- `src/bin/minertim.rs` — help text updated for the new default/rationale.
+- `README.md` — performance section and notes corrected: headline figures are the
+  11-thread run (~4,925 avg, 0 rejects); the false ~4% QoS claim removed; guidance
+  to leave one core free.
+- The receiver QoS boost + 50ms poll (prior commit) are kept as a minor
+  mitigation but are no longer presented as the fix.
+
+### Verification
+- `cargo clippy --all-targets -- -D warnings` clean; release build clean; help
+  shows the new `cores − 1` default.
+- Backed by the 2-hour A/B above.

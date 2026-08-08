@@ -137,20 +137,18 @@ impl Miner {
             .unwrap_or(4);
         self.thread_count = threads.clamp(1, max_threads);
 
-        // RandomX is memory-bandwidth bound and macOS offers no CPU affinity,
-        // so threads scheduled onto efficiency cores add little throughput and
-        // can contend with the performance-core threads. Warn if the user asked
-        // for more than the P-core count.
-        if let Some(p_cores) = performance_core_count()
-            && self.thread_count > p_cores
-        {
+        // Using every core for mining starves the pool receiver thread: it can't
+        // update the current job promptly, so shares are submitted against
+        // superseded jobs and rejected as "Invalid job id". Measured on M2 Max,
+        // all 12 cores gives ~15% rejects while 11 gives ~0% at the same hashrate.
+        // Leave one core free.
+        if self.thread_count >= max_threads && max_threads > 1 {
             log::warn!(
-                "Requested {} threads but this CPU has {} performance cores; \
-                 the extra threads will run on efficiency cores and may not \
-                 improve (or may reduce) hashrate. Consider THREADS={}.",
-                self.thread_count,
-                p_cores,
-                p_cores
+                "Using all {} cores leaves none for the pool receiver, which causes \
+                 stale-share (\"Invalid job id\") rejects under load. Consider \
+                 THREADS={} — near-zero rejects at essentially the same hashrate.",
+                max_threads,
+                max_threads - 1,
             );
         }
 
@@ -593,12 +591,13 @@ pub fn performance_core_count() -> Option<u32> {
     None
 }
 
-/// Recommended default thread count: the number of performance cores if known,
-/// otherwise total available parallelism (capped for sanity).
+/// Recommended default thread count: one fewer than the number of logical cores,
+/// leaving a core free for the pool receiver thread (which otherwise starves under
+/// full-core mining and causes stale-share rejects). Measured on M2 Max, this
+/// matches all-core hashrate with ~0% rejects instead of ~15%.
 pub fn recommended_thread_count() -> u32 {
-    performance_core_count().unwrap_or_else(|| {
-        thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(4)
-    })
+    let total = thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
+    total.saturating_sub(1).max(1)
 }

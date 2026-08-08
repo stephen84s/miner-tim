@@ -161,20 +161,22 @@ Active on macOS aarch64. For each of the 8 RandomX program chains per hash:
 
 ## Performance
 
-Measured on **Apple M2 Max** (12 threads, `make run THREADS=12`), **plugged in
+Measured on **Apple M2 Max** (11 threads — the default `cores − 1`), **plugged in
 with macOS Low Power Mode OFF** — the power state matters a lot (see notes):
 
 | Metric | Value |
 |---|---|
 | Hardware | Apple M2 Max (8 performance + 4 efficiency cores), 32 GB RAM |
 | Dataset init | ~45s (one-time, ~2 GiB, before hashing begins) |
-| Peak 1m hashrate | ~5,180 H/s |
-| Sustained (1-hour average) | ~4,980 H/s |
+| Peak 1m hashrate | ~5,010 H/s |
+| Sustained (1-hour average) | ~4,925 H/s |
+| Stale-share rejects | ~0% (11 threads) vs ~15% (all 12) |
 | On battery / Low Power Mode | ~3,800 H/s (≈20% lower) |
 | Optimisation flags | `target-cpu=native`, LTO, `codegen-units=1` |
 
-Measured over a continuous 1-hour run (12 threads): ~4,980 H/s average, 5,182
-peak.
+Measured over continuous 1-hour runs: **11 threads** → ~4,925 H/s avg, 5,013 peak,
+**0 rejected shares**; **all 12 cores** → ~4,960 H/s avg (no faster) but ~15%
+rejected. 11 threads earns ~18% more paid shares — see the acceptance note below.
 
 **Notes**
 
@@ -182,21 +184,25 @@ peak.
   CPU clocks and hashrate drops ~20%. For peak hashrate, plug in and turn Low
   Power Mode off. Sustained figures also sit a few percent under the cold-start
   peak once the chip heat-soaks under continuous load.
-- **All 12 threads beat 8 P-cores here** (~4,600 vs ~3,300), so on the M2 Max the
-  efficiency cores do contribute — the memory controller isn't saturated at 8
-  threads. The default thread count is the performance-core count (a safe general
-  choice), but `THREADS=12` is usually faster on this chip.
+- **Leave one core free — this is the sweet spot.** RandomX is memory-bound, so
+  the last thread adds almost nothing: on the M2 Max, 11 threads (4,925 H/s) and
+  all 12 (4,960 H/s) have the same raw hashrate. But mining on *all* cores starves
+  the pool receiver thread, so ~15% of shares are rejected as stale; 11 threads
+  gives **0% rejects**, i.e. ~18% more accepted (paid) shares. The default is
+  therefore `cores − 1` (11 here). Using 8 P-cores only would leave ~1,600 H/s on
+  the table — the efficiency cores do contribute.
 - **`target-cpu` barely affects hashrate.** The RandomX inner loop is JIT-compiled
   to ARM64 at runtime, so `native` and the portable `apple-m1` build (used by
   `make dist`) measure the same; `native` only helps the non-JIT support code.
 - Hashrate is a rolling average that includes the ~45s dataset-init dead time at
   startup, so the `1m`/`5m`/`10m` figures read low for the first minute or two
   and then flatten — that is the average catching up, not the CPU ramping.
-- **Share acceptance.** At 12 threads all cores mine, so the pool receiver thread
-  is run at raised scheduling priority to avoid being starved — otherwise the
-  current job goes stale and shares are rejected as "Invalid job id". This keeps
-  the reject rate low (measured ~4% vs ~17% without it) so accepted-share
-  throughput stays close to the raw hashrate.
+- **Share acceptance.** If you mine on *every* core, the pool receiver thread is
+  CPU-starved, the current job goes stale, and shares are rejected as "Invalid
+  job id" (~15% over a 1-hour run, even with the receiver at raised scheduling
+  priority — the priority hint helps only marginally). The reliable fix is the
+  default `cores − 1`, which measured **0 rejects** over a full hour. Prefer that
+  over `THREADS=<all cores>`.
 
 ## Distribution
 

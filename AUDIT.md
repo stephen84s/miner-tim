@@ -760,3 +760,17 @@ only marginally. The reliable fix is leaving a core free.
 - `cargo clippy --all-targets -- -D warnings` clean; release build clean; help
   shows the new `cores − 1` default.
 - Backed by the 2-hour A/B above.
+
+## 2026-08-08 - RELEASING.md: switch to glab flow
+
+### Request
+Simplify the release docs to use the (now installed + authenticated) GitLab CLI.
+
+### Files Changed
+- `RELEASING.md` — replaced the manual curl/API upload with a single
+  `glab release create v<ver> <tarball> SHA256SUMS --name ... --notes-file ...`
+  step; added glab install/auth one-time setup; noted the CI `release` job does
+  not actually create releases (no macOS runner). This is how v0.1.1 was published.
+
+### Verification
+- Documentation only.

@@ -804,3 +804,12 @@ donation client + a settle step; the pragmatic equivalent here is to drain.
   change was reverted; only the fix remains.
 - `cargo clippy --all-targets -- -D warnings` clean; release build clean.
 - 8-hour run + v0.1.2 release pending (this entry's release gate).
+
+## 2026-08-09 - v0.1.2 8-hour validation PASSED, released
+
+8-hour continuous run (11 threads, donation-fix active, 12 donation switches):
+- switch-related rejects 29 -> 6 (4.3% -> 0.9%); "Not connected" submit failures
+  eliminated (0); min 1m hashrate 3,303 -> 4,109 (smoother switches).
+- avg 4,857 H/s, 627/640 accepted, 0 disconnects/errors.
+Residual 6 rejects = irreducible in-flight-at-switch window (only xmrig's second
+connection would remove it; diminishing returns). Test passed -> released v0.1.2.

@@ -774,3 +774,33 @@ Simplify the release docs to use the (now installed + authenticated) GitLab CLI.
 
 ### Verification
 - Documentation only.
+
+## 2026-08-09 - Fix donation-switch stale rejects (drain before switch), v0.1.2
+
+### Request
+Implement the simple fix for stale-share rejects around donation wallet switches
+(informed by xmrig's DonateStrategy "drain before switch"); validate; then an
+8-hour run and, if it passes, a release.
+
+### Background
+The 8-hour run (v0.1.1) at 11 threads was clean except around the 12 donation
+switches: 29 "Invalid job id" rejects plus clusters of "Failed to submit share:
+Not connected" — workers kept mining/submitting the old job during the ~1-2s
+relogin to the donation wallet. xmrig avoids this with a separate pre-connected
+donation client + a settle step; the pragmatic equivalent here is to drain.
+
+### Files Changed
+- `src/pool_connection.rs` — `relogin_as` (donation switch) and `reconnect`
+  (disconnect) now clear `current_job` to `None` before tearing down the stream.
+  Workers then get `None` from `get_work()` and idle (their existing 100ms sleep)
+  instead of submitting against the connection being torn down; `login()` installs
+  the fresh job and they resume.
+- `Cargo.toml` — version 0.1.1 -> 0.1.2.
+
+### Verification
+- Shortened-cycle validation (CYCLE_SECS temporarily 120s, --donate-level 20,
+  ~9 min, 12 switches): **0 "Invalid job id", 0 "Not connected", 0 rejected**
+  (was ~2-3 rejects + a "Not connected" cluster per switch before). The temp cycle
+  change was reverted; only the fix remains.
+- `cargo clippy --all-targets -- -D warnings` clean; release build clean.
+- 8-hour run + v0.1.2 release pending (this entry's release gate).

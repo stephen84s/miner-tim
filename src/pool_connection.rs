@@ -433,6 +433,11 @@ impl PoolConnection {
     /// succeeds. Returns false if we don't have enough info to reconnect.
     fn reconnect(&self) -> bool {
         self.connected.store(false, Ordering::SeqCst);
+        // Clear the job so workers idle (get_work() -> None) instead of mining and
+        // submitting against the connection being torn down.
+        if let Ok(mut job) = self.current_job.lock() {
+            *job = None;
+        }
         if let Ok(mut s) = self.stream.lock() {
             *s = None;
         }
@@ -484,6 +489,14 @@ impl PoolConnection {
         let address = self.address.lock().map(|a| a.clone()).unwrap_or_default();
         if address.is_empty() {
             return Err("no pool address recorded".into());
+        }
+        // Drain before switching (xmrig's DonateStrategy uses a similar settle
+        // step): clear the current job so workers stop mining and submitting
+        // across the reconnect, otherwise in-flight shares are rejected as stale
+        // "Invalid job id" or fail to send ("Not connected"). login() installs the
+        // fresh job for the new wallet, and workers resume.
+        if let Ok(mut job) = self.current_job.lock() {
+            *job = None;
         }
         if let Ok(mut s) = self.stream.lock() {
             *s = None;

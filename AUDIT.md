@@ -813,3 +813,265 @@ donation client + a settle step; the pragmatic equivalent here is to drain.
 - avg 4,857 H/s, 627/640 accepted, 0 disconnects/errors.
 Residual 6 rejects = irreducible in-flight-at-switch window (only xmrig's second
 connection would remove it; diminishing returns). Test passed -> released v0.1.2.
+
+## 2026-08-15 - Survey xmrig for portable changes; JIT mem-addr opt tried and rejected
+
+### Request
+"Any new updates in xmrig which we should port over" — then implement the two
+outcomes of that survey: refresh the RandomX v2 plan, and do the `emit_mem_addr`
+JIT optimisation.
+
+### Survey result (xmrig v6.24.0 - v6.26.0)
+Checked each changelog item against this codebase:
+
+| xmrig change | Verdict |
+|---|---|
+| #3769 etc. — RandomX v2 (v6.26.0) | **Blocked on Monero**, not on us — see below |
+| #3708 — aarch64 JIT instruction selection | Tried; **rejected**, see below |
+| #3708 — FSWAP via single `EXT` | **Not applicable.** xmrig keeps each f/e register in one 128-bit V register; we use split scalar `d`-register pairs (`f_regs()` -> `(d0,d1)`), so there are no lanes to extract. Our 3x FMOV is correct for our layout |
+| #3762 — keepalive timer logic | **No counterpart.** xmrig's bug was a response-deadline timer being postponed by inbound traffic; ours is a plain 60s send-side interval with no response timeout |
+| #3785 — don't reset nonce during donation rounds | **Already satisfied.** Our worker nonce is monotonic across job changes (`miner.rs:341`); we never reset it |
+| #3778 — "RandomX: ARM64 fixes" | **Likely v2-coupled** (touches `RxConfig.cpp` + AES-table pointer setup), not a v1 correctness fix. Not confirmed either way |
+| RISC-V, Zen4/Zen5, VAES-512, Windows ARM64, THP, IPv6, Haiku | Not applicable to an Apple-Silicon-only pure-Rust miner |
+
+### RandomX v2 — still blocked
+Verified 2026-08-15 that Monero mainnet is **still on hard-fork version 16**:
+`xmrchain.net/api/networkinfo` reports `current_hf_version: 16` at height
+3,739,507, and `monero-project/monero` master's `mainnet_hard_forks` table ends at
+`{ 16, 2689608, 0, 1656629118 }` — no v17 entry, no scheduled height. (Several web
+articles claim FCMP++/RandomX v2 already activated in Q1 2026; the consensus code
+contradicts them.) `PLAN_RANDOMX_V2.md` updated with this plus answers to two of
+its open questions from tevador/RandomX#274 — CFROUND becomes conditional (1/16
+chance of writing `fprc`), and F/E registers are mixed with AES instead of XOR.
+
+### JIT `emit_mem_addr` optimisation — implemented, measured, reverted
+Implemented, verified correct, benchmarked, then **reverted deliberately**.
+
+The idea: `addr = (r[src] + imm) as u32 & mem_mask`, and `mem_mask` is at most
+`SCRATCHPAD_L3_MASK` (0x1FFFF8, 21 bits). Addition carries propagate upward only,
+so the high bits of the sign-extended `imm` can never affect a surviving bit —
+only `imm mod 2^24` matters, which always fits an `ADD imm12` (+ optional
+`ADD imm12, LSL #12`) pair. Also, when `src >= 8` the address is a compile-time
+constant and folds away entirely.
+
+**Why it was rejected — two findings:**
+
+1. **Fewer instructions is not automatically faster here — dependency depth is
+   what to watch.** The first attempt replaced `mov_imm64` + `add_reg` with two
+   chained `add_imm`s: shorter code, but a *deeper* dependency chain. `mov_imm64`
+   does not depend on `r[src]`, so the original form puts exactly one op
+   (`add_reg`) on the chain from the register to the load, whereas the chained
+   pair puts two — on every memory instruction. The second attempt was therefore
+   restructured to take the shortcut only where it keeps chain depth at 1 (or
+   removes the op entirely).
+
+   This is an *a priori* argument, not a measured one. Sequential benching did
+   show that variant ~4-5% slower (178.6 -> 186.4 ms), but that comparison is a
+   sequential-run artifact invalidated by the methodology note below, and the
+   thermally-controlled interleaved A/B was only ever run on the restructured
+   variant. **The runtime cost of the chained form was never resolved** — the
+   bench cannot see an effect this small. Treat "latency matters more than
+   instruction count in this JIT" as a design principle to respect (it is also
+   the principle behind RandomX v2's own scratchpad-stall hiding), not as a
+   number this repo has demonstrated.
+
+2. **Restructured to keep chain depth at 1, the win is 0.35% — unmeasurable.**
+   Static count of emitted instruction words over 64 realistic programs:
+   **953.48 (baseline) -> 950.11 (optimised)**. The remaining savings come only
+   from the `src >= 8` constant fold and the rare single-`ADD` cases (each ~1/4096),
+   plus the IROR/IROL rotate-by-zero skips (~1/64). That is an order of magnitude
+   below the benchmark's noise floor.
+
+**Benchmark methodology note (for future work):** sequential `cargo bench` runs on
+this machine are worthless for changes under ~3%. Successive runs drifted 178 ->
+186 -> 190 ms, the last of which was code *identical to baseline* in the hot path;
+interleaved A/B/A/B runs with 20s cooldowns gave paired diffs of +1.91, +4.47,
++6.55, **-4.22** ms — sign flips, i.e. pure thermal noise. Within that run the
+baseline binary alone spanned 179.97-187.88 ms, a 7.9 ms spread with *zero* code
+difference. Any single-run delta smaller than that is unreadable. This confirms
+the EDITION-01 finding that an apparent "8% regression" was thermal. **Prefer the
+static emitted-instruction-word count** (deterministic, zero noise) for JIT
+code-size changes.
+
+Conclusion: not worth added complexity and risk in the correctness-critical JIT
+path for 0.35% fewer instructions and no measurable hashrate change. Reverted;
+recorded here so it is not attempted again.
+
+### Files Changed
+- `PLAN_RANDOMX_V2.md` — status review, resolved open questions, mainnet HF-16 finding.
+- `AUDIT.md` — this entry.
+- (`src/randomx/jit/compiler.rs`, `src/randomx/jit/aarch64.rs` — modified during
+  the experiment, then reverted to HEAD. No net change.)
+
+### Verification
+- Full suite during the experiment: **91 passed, 0 failed** (includes the 87
+  vectors and `test_vm_calculate_hash_jit`, which exercises the modified emitter).
+- `cargo clippy --all-targets -- -D warnings` clean.
+- `add_imm_lsl12` encoding cross-checked against the system assembler
+  (`as -arch arm64`): emitted `0x91448D00` matches `add x0, x8, #0x123, lsl #12`.
+- Working tree returned to HEAD for both JIT files (`git status` clean).
+
+## 2026-08-15 - COMPLETE: xmrig side-by-side benchmark + parallel research agents
+
+> Originally written as a live IN-PROGRESS/takeover entry; all three work items
+> finished the same day. Results below.
+
+### RESULT (benchmark finished 16:47)
+| Position | xmrig 6.26.0 | MinerTim 0.1.2 | Delta |
+|---|---|---|---|
+| Run 1 (X1/M1) | 4,340 H/s | 4,531 H/s | +4.4% |
+| Run 2 (X2/M2) | 4,347 H/s | 4,916 H/s | +13.1% |
+
+(xmrig = mean of its 60s-speed samples, MinerTim = mean of 1m-rolling samples,
+first 5 min of each 30-min run excluded. xmrig's two runs nearly identical ->
+thermal environment stable; MinerTim's M2 matches its historical 8h average
+(4,857), M1 was the low outlier.)
+
+**VERDICT: MinerTim >= stock xmrig on this machine in both interleaved
+positions. There is NO hashrate gap to close on rx/0.**
+- NEON FP port (#1): **CLOSED for v1** — xmrig has vector FP and still doesn't
+  beat us, so the machine is memory-latency-bound as suspected. Re-test ONLY
+  under v2 (offline: `xmrig --bench` rx/2 vs our criterion bench) since v2
+  shifts the compute/memory ratio (+50% program instrs + per-iteration AES).
+  NEON_FP_PORT_NOTES.md stays on disk for that eventuality.
+- JIT compile overhead (#2): deprioritised — with no gap vs xmrig there is no
+  evidence the 8-compiles-per-hash cost matters; measure only if idle curiosity.
+- Next work item: **RandomX v2 gated port** (semantics + vectors ready in
+  RANDOMX_V2_SEMANTICS.md; awaiting user go-ahead).
+
+### Goal
+Decide whether further JIT optimisation of MinerTim is worthwhile, by measuring
+the real hashrate gap vs stock xmrig 6.26.0 on this machine (M2 Max, 12 cores).
+Decision rule agreed with user:
+- gap < ~5%  -> we are at the machine's memory ceiling; skip NEON FP work (#1),
+  focus on the gated RandomX v2 port only.
+- gap > ~10% -> headroom is real; NEON-vectorised FP in the JIT (#1) is the
+  likely location and worth implementing.
+
+### Benchmark (running since 2026-08-15 14:41 local)
+- Interleaved ABAB: xmrig 30min -> minertim 30min -> xmrig 30min -> minertim
+  30min, 2min cooldowns, ~2h8m total. Both: monerohash.com:2222, 11 threads,
+  wallet from mining.conf. xmrig at --donate-level 1.
+- Driver + logs: `/private/tmp/claude-501/-Users-stephen-code-gitlab-miner-tim/1e07e554-3085-4f1f-845d-bbe4f419fee3/scratchpad/ab2/`
+  (`driver.sh`, `driver.log`, `xmrig_{1,2}.log`, `minertim_{1,2}.log`).
+  NOTE: scratchpad is session-scoped — if taking over from a NEW session, copy
+  surviving logs somewhere durable first; if the dir is gone, re-run driver.sh
+  (script is self-contained; xmrig tarball SHA256 6ae4eb42... verified against
+  the v6.26.0 release page).
+- Background task ID in the launching session: bc7spwe57.
+- Analysis when done: mean of xmrig "speed ... 60s" column vs minertim's stats
+  hashrate lines, skipping the first 5 min of each run (dataset init + ramp).
+  Compare within-position (X1 vs M1, X2 vs M2) to cancel thermal drift, per the
+  2026-08-15 methodology note above.
+- Early observation: xmrig dataset init = **3.6s** vs MinerTim ~46s
+  (xmrig JITs the superscalar programs and uses 12 init threads. Sizes backlog
+  item "#4 dataset-build speedup" — a ~13x startup/epoch-change win, no
+  steady-state hashrate effect.)
+
+### Parallel research agents — BOTH DELIVERED 2026-08-15 (see their own AUDIT
+### entries below for content summaries)
+1. **RANDOMX_V2_SEMANTICS.md** — DONE (634 lines). Headline findings:
+   - v2 is FIVE consensus changes, not three — the plan had missed the dataset
+     prefetch change (mp aliases ma, prefetch 2 iterations ahead) and had
+     CFROUND only as an open question.
+   - ⚠ The plan's Stratum mapping was BACKWARDS: commitment is submitted as
+     `result` (and compared to target); raw hash goes in the `commitment` field.
+   - AES F/E mix keys are the live e-registers bitcast — no key derivation.
+   - Program size 384 is the ONLY constant change; Blake2b/Argon2d/dataset/
+     superscalar/entropy all byte-diff-verified unchanged (no dataset rebuild
+     for rx/2).
+   - Light-mode-runnable test vectors extracted (<1 min each).
+   PLAN_RANDOMX_V2.md corrected in place (marked ⚠ CORRECTED) — the doc is
+   authoritative where they disagree. V2 implementation is now UNBLOCKED on
+   semantics; still blocked on nothing except user go-ahead (activation height
+   remains unannounced, which gates only the dispatch/Stratum phases anyway).
+2. **NEON_FP_PORT_NOTES.md** — DONE (440 lines). ~300-400 LOC port, 2 files,
+   no ABI/struct changes, callee-saved risk eliminated by adopting xmrig's
+   v16-v31 map; FP group −42% emitted words. Act ONLY on benchmark verdict.
+
+### State of agreed work items (from this session's survey; see previous entry)
+- #5 xmrig ground truth: RUNNING (above).
+- #1 NEON FP JIT: blocked on #5 result; sizing doc in flight (agent 2).
+- #2 JIT compile overhead measurement: NOT STARTED (needs quiet machine — do
+  not run while benchmark is live).
+- #3 thread topology: CLOSED — already answered by 2026-08-08 A/B (11 threads
+  optimal; 12 starves receiver, 15% rejects; do not retry).
+- #4 dataset-build speedup (JIT superscalar): sized by the 3.6s observation
+  above; QoL item, not hashrate.
+- RandomX v2 gated port: agreed to implement the offline-verifiable half
+  (vectors -> commitment -> VM v2 -> JIT v2 -> v1 regression gate) once
+  RANDOMX_V2_SEMANTICS.md lands; dispatch + Stratum changes stay deferred until
+  Monero schedules HF v17 (mainnet still HF 16 as of 2026-08-15).
+
+### Files Changed
+- `AUDIT.md` — this entry (update in place with results).
+- `CLAUDE.md` — task board rows BENCH-01 / RESEARCH-01 set Active.
+
+---
+
+## 2026-08-15 — NEON_FP_PORT_NOTES.md delivered (research batch, agent 2)
+
+**Goal:** Size the vector-FP JIT port (work item #1) either way, ahead of the
+xmrig-vs-us benchmark result. Web research + file reading only; no builds run.
+
+**Files changed:** `NEON_FP_PORT_NOTES.md` (new, repo root); this AUDIT entry.
+
+**Content:** xmrig master (post-PR #3708) ARM64 register map (f→v16-19,
+e→v20-23, a→v24-27, masks v29-v31), per-instruction emission quotes vs our
+scalar-pair counts, the ldr+sxtl+scvtf memory-operand path, prologue/epilogue
+mapping (our NativeRegisterFile layout needs NO changes), required new NEON
+encodings with 32-bit templates, and risks.
+
+**Bottom line:** ~361 → ~211 emitted words in the FP group per program (−42%);
+biggest single win FDIV_M 19→10 (drops two fmov GPR round-trips). Est. 300-400
+LOC across aarch64.rs + compiler.rs only; interpreter, vm.rs, ABI untouched.
+Implement only if the live benchmark shows a real gap.
+
+**Verification:** none required (docs only; make check/test deliberately not
+run — benchmark in progress on this machine).
+
+---
+
+## 2026-08-15 — RANDOMX_V2_SEMANTICS.md delivered (research batch)
+
+**Goal:** Pin the exact, implementable semantics of every RandomX v1→v2 change
+(tevador/RandomX#317 merged code + xmrig v6.26.0) with verbatim C++ quotes and
+URLs, so the rx/2 port needs no re-research. Web research + file reads only; no
+builds/tests run (benchmark in progress on this machine).
+
+**Files changed:** `RANDOMX_V2_SEMANTICS.md` (new, repo root); this AUDIT entry.
+
+**Method:** byte-diffed tevador v1.2.1 vs master for every core source file;
+pulled xmrig PR diffs #3769/#3775/#3778 and v6.26.0 sources for the miner-side
+integration; extracted test vectors from both test suites.
+
+**Key findings:** (1) five consensus changes, not three — the plan missed the
+prefetch/`mp` change (spMix2 XORs into `ma` not `mx`; prefetch runs 2 iterations
+ahead) — and the flags plumbing; (2) CFROUND rule pinned: rotate first, write
+fprc only if `(rotated & 60) == 0`; (3) AES mix keys are the live e-registers,
+4 rounds, enc/dec by register parity; (4) **stratum field semantics are the
+opposite of PLAN_RANDOMX_V2.md §5**: xmrig submits the blake2b commitment as
+`result` (target-compared) and the raw RandomX hash in the new `commitment`
+field; commitment is computed over the previous pipelined blob; (5) v2 test
+vectors (a–e), both commitment vectors with exact input bytes, and proof that
+dataset/cache are version-independent (no rebuild for rx/2). Blake2b, Argon2d,
+AES generators/hash, superscalar, dataset item computation verified unchanged.
+
+**Verification:** none required (docs only).
+
+## 2026-08-15 - RandomX v2 gated port, Phase A: commitment function
+
+### Request
+User approved starting the gated rx/2 port (offline-verifiable half only).
+Semantics source: RANDOMX_V2_SEMANTICS.md; phases per PLAN_RANDOMX_V2.md.
+
+### Files Changed
+- `src/randomx/vm.rs` — `pub fn calculate_commitment(input, hash)` =
+  `blake2b_256(input ‖ hash)`; doc comment records the corrected wire semantics
+  (commitment is target-compared and submitted as `result`).
+- `src/randomx/tests.rs` — `commitment_tests`: both reference vectors
+  (v1-based d53ccf34…, v2-based 133be717…), pure Blake2b, no VM.
+
+### Verification
+- Both vectors pass (also cross-validates our Blake2b against tevador's
+  v2-era outputs). Nothing else touched; full gate runs at Phase E.

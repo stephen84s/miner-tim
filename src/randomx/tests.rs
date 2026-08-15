@@ -589,3 +589,40 @@ mod profile_tests {
         println!("  Result: {}", hex_encode(&hash2));
     }
 }
+
+// ============================================================================
+// RandomX v2 (rx/2): commitment (RANDOMX_V2_SEMANTICS.md §7.2)
+// ============================================================================
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+
+    /// Pure-Blake2b vector, no VM needed: input "This is a test" ‖ v1 hash of it.
+    /// From tevador/RandomX v1.2.1 tests.cpp (calcStringCommitment).
+    #[test]
+    fn test_commitment_v1_based() {
+        let hash: [u8; 32] =
+            hex_decode("639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f")
+                .try_into()
+                .unwrap();
+        let commitment = vm::calculate_commitment(b"This is a test", &hash);
+        assert_eq!(
+            hex_encode(&commitment),
+            "d53ccf348b75291b7be76f0a7ac8208bbced734b912f6fca60539ab6f86be919"
+        );
+    }
+
+    /// Same input, v2 hash of it (master tests.cpp "Commitment test").
+    #[test]
+    fn test_commitment_v2_based() {
+        let hash: [u8; 32] =
+            hex_decode("22ec6b861b3eb23686b2efbad69513c967ecfce80983df66c9c5b4fbfb4cdb6f")
+                .try_into()
+                .unwrap();
+        let commitment = vm::calculate_commitment(b"This is a test", &hash);
+        assert_eq!(
+            hex_encode(&commitment),
+            "133be717399046b03ae82ce8ddd9d1ee4d3ea7fca03a50dec09b6848cbb98e18"
+        );
+    }
+}

@@ -3,7 +3,7 @@
 
 use super::aes_hash::{fill_aes_1rx4, fill_aes_4rx4, hash_aes_1rx4, hash_and_fill_aes_1rx4};
 use super::argon2d::argon2d_cache;
-use super::blake2b::{blake2b, blake2b_512};
+use super::blake2b::{blake2b, blake2b_256, blake2b_512};
 use super::blake2gen::Blake2Generator;
 use super::dataset::{init_dataset_item, RandomXDataset};
 use super::superscalar::{generate_superscalar, randomx_reciprocal, SuperscalarProgram};
@@ -1217,6 +1217,20 @@ fn execute_vm_inner(
 // ============================================================================
 // Public API
 // ============================================================================
+
+/// RandomX commitment: `blake2b_256(input ‖ hash)` (tevador/RandomX#265).
+///
+/// For rx/2 (Monero HF v17) the commitment — not the raw RandomX hash — is the
+/// value compared against the mining target and submitted as the Stratum
+/// `result`; the raw hash travels in the new `commitment` field. `input` must
+/// be the exact nonced hashing blob that produced `hash`, byte-for-byte.
+/// See RANDOMX_V2_SEMANTICS.md §5.
+pub fn calculate_commitment(input: &[u8], hash: &[u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(input.len() + 32);
+    buf.extend_from_slice(input);
+    buf.extend_from_slice(hash);
+    blake2b_256(&buf)
+}
 
 /// Calculate a RandomX hash (light mode, V1).
 /// `key` is the cache key (seed_hash from pool).

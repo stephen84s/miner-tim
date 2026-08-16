@@ -731,3 +731,83 @@ unsafe fn hash_and_fill_aes_1rx4_aesni(scratchpad: &mut [u8], hash_out: &mut [u8
     _mm_storeu_si128(hash_out.as_mut_ptr().add(32) as *mut __m128i, hs2);
     _mm_storeu_si128(hash_out.as_mut_ptr().add(48) as *mut __m128i, hs3);
 }
+
+// ============================================================================
+// RandomX v2: F/E-register AES mix (RANDOMX_V2_SEMANTICS.md §3)
+// ============================================================================
+
+/// RandomX v2 F/E mix: 4 single AES rounds per f-register, with the live
+/// e-registers as round keys (round i uses e[i] on all four f's; f0/f2 get
+/// encryption rounds, f1/f3 decryption rounds). Replaces v1's `f[i] ^= e[i]`.
+pub fn aes_mix_fe(f: &mut [[u8; 16]; 4], e: &[[u8; 16]; 4]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("aes") {
+            unsafe { aes_mix_fe_neon(f, e) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("aes") {
+            unsafe { aes_mix_fe_aesni(f, e) };
+            return;
+        }
+    }
+    aes_mix_fe_soft(f, e);
+}
+
+fn aes_mix_fe_soft(f: &mut [[u8; 16]; 4], e: &[[u8; 16]; 4]) {
+    for key in e {
+        f[0] = soft_aesenc(&f[0], key);
+        f[1] = soft_aesdec(&f[1], key);
+        f[2] = soft_aesenc(&f[2], key);
+        f[3] = soft_aesdec(&f[3], key);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "aes")]
+unsafe fn aes_mix_fe_neon(f: &mut [[u8; 16]; 4], e: &[[u8; 16]; 4]) { unsafe {
+    use std::arch::aarch64::*;
+    let zero = vdupq_n_u8(0);
+    let mut f0 = vld1q_u8(f[0].as_ptr());
+    let mut f1 = vld1q_u8(f[1].as_ptr());
+    let mut f2 = vld1q_u8(f[2].as_ptr());
+    let mut f3 = vld1q_u8(f[3].as_ptr());
+    for key_bytes in e {
+        let k = vld1q_u8(key_bytes.as_ptr());
+        // x86 aesenc(s, k) == AESE(s, 0); AESMC; EOR k (ARMv8 folds AddRoundKey
+        // before SubBytes/ShiftRows, hence the zero register). Same pattern as
+        // fill_aes_1rx4_neon above.
+        f0 = veorq_u8(vaesmcq_u8(vaeseq_u8(f0, zero)), k);
+        f1 = veorq_u8(vaesimcq_u8(vaesdq_u8(f1, zero)), k);
+        f2 = veorq_u8(vaesmcq_u8(vaeseq_u8(f2, zero)), k);
+        f3 = veorq_u8(vaesimcq_u8(vaesdq_u8(f3, zero)), k);
+    }
+    vst1q_u8(f[0].as_mut_ptr(), f0);
+    vst1q_u8(f[1].as_mut_ptr(), f1);
+    vst1q_u8(f[2].as_mut_ptr(), f2);
+    vst1q_u8(f[3].as_mut_ptr(), f3);
+}}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "aes")]
+unsafe fn aes_mix_fe_aesni(f: &mut [[u8; 16]; 4], e: &[[u8; 16]; 4]) { unsafe {
+    use std::arch::x86_64::*;
+    let mut f0 = _mm_loadu_si128(f[0].as_ptr() as *const __m128i);
+    let mut f1 = _mm_loadu_si128(f[1].as_ptr() as *const __m128i);
+    let mut f2 = _mm_loadu_si128(f[2].as_ptr() as *const __m128i);
+    let mut f3 = _mm_loadu_si128(f[3].as_ptr() as *const __m128i);
+    for key_bytes in e {
+        let k = _mm_loadu_si128(key_bytes.as_ptr() as *const __m128i);
+        f0 = _mm_aesenc_si128(f0, k);
+        f1 = _mm_aesdec_si128(f1, k);
+        f2 = _mm_aesenc_si128(f2, k);
+        f3 = _mm_aesdec_si128(f3, k);
+    }
+    _mm_storeu_si128(f[0].as_mut_ptr() as *mut __m128i, f0);
+    _mm_storeu_si128(f[1].as_mut_ptr() as *mut __m128i, f1);
+    _mm_storeu_si128(f[2].as_mut_ptr() as *mut __m128i, f2);
+    _mm_storeu_si128(f[3].as_mut_ptr() as *mut __m128i, f3);
+}}

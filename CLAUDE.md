@@ -26,6 +26,10 @@
 | **Completed** | **EDITION-01** | **Edition 2021→2024.** Migrated in a worktree; A/B benchmark showed no perf impact (the "8%" was thermal noise); 87 vectors pass. Merged. |
 | **Completed** | **DONATE-01** | **Donate-level.** XMRig-style donation: default 5% (min 1%, sub-1% needs recompile), split 50/50 author/XMRig via rolling login rotation. Disclosed at startup + README. Version → 0.1.0. |
 | **Completed** | **RELEASE-01** | **Release flow.** `make dist` (portable apple-m1 tarball + SHA256SUMS), `make release` (tag+push), CI release job on `v*` tags, RELEASING.md. Agent string tracks CARGO_PKG_VERSION. |
+| **Completed** | **PORT-01** | **xmrig upstream survey (v6.24–v6.26).** Most items N/A (RISC-V, Zen4/5, VAES, Windows ARM64). RandomX v2 still blocked — Monero mainnet is on HF 16, no v17 entry in `mainnet_hard_forks`; `PLAN_RANDOMX_V2.md` refreshed. JIT `emit_mem_addr` opt (#3708) implemented, measured at 0.35% fewer emitted instructions, **reverted** — codebase is latency-bound, not instruction-count-bound. |
+| **Completed** | **BENCH-01** | **xmrig 6.26.0 vs MinerTim ABAB benchmark.** MinerTim won both positions (+4.4%, +13.1%); no rx/0 hashrate gap exists. NEON FP closed for v1 (re-gate under v2 only). Next: RandomX v2 gated port. |
+| **Completed** | **RESEARCH-01** | **Research delivered**: RANDOMX_V2_SEMANTICS.md (v2 = 5 changes; plan's Stratum mapping was backwards — corrected in place) and NEON_FP_PORT_NOTES.md (~300-400 LOC port, ABI risk eliminated). V2 implementation unblocked on semantics. |
+| **Completed** | **RX2-01** | **RandomX v2 gated port (offline half).** RxVersion plumbing, 384-instr programs, conditional CFROUND (interpreter + JIT), AES F/E mix (NEON/AES-NI/soft), mp-aliasing prefetch, commitment fn. All reference vectors pass on interpreter AND JIT paths; 87 v1 vectors bit-identical. Nothing selects V2 at runtime yet. Fork-day remainder (dispatch + Stratum) documented in AUDIT.md 2026-08-16. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

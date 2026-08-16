@@ -626,3 +626,83 @@ mod commitment_tests {
         );
     }
 }
+
+// ============================================================================
+// RandomX v2 (rx/2): full-hash vectors (RANDOMX_V2_SEMANTICS.md §7.1)
+// ============================================================================
+#[cfg(test)]
+mod full_hash_v2_tests {
+    use super::*;
+
+    /// Vector (a): key "test key 000", input "This is a test", V2 mode.
+    /// From tevador/RandomX master tests.cpp (RANDOMX_FLAG_V2 branch).
+    #[test]
+    fn test_full_hash_v2_a() {
+        let hash = vm::calculate_hash_v2(b"test key 000", b"This is a test");
+        assert_eq!(
+            hex_encode(&hash),
+            "22ec6b861b3eb23686b2efbad69513c967ecfce80983df66c9c5b4fbfb4cdb6f"
+        );
+    }
+
+    /// Vector (e): key "test key 001", 76-byte Monero-shaped blob — the most
+    /// representative single vector for the miner path.
+    #[test]
+    fn test_full_hash_v2_e() {
+        let blob = hex_decode(
+            "0b0b98bea7e805e0010a2126d287a2a0cc833d312cb786385a7c2f9de69d2553\
+             7f584a9bc9977b00000000666fd8753bf61a8631f12984e3fd44f4014eca6292\
+             76817b56f32e9b68bd82f416",
+        );
+        assert_eq!(blob.len(), 76);
+        let hash = vm::calculate_hash_v2(b"test key 001", &blob);
+        assert_eq!(
+            hex_encode(&hash),
+            "c8e92c5f7c1946fecf06bc382b92e3111da38ee3e6a5ad90704e1a9d8aaf6e76"
+        );
+    }
+}
+
+// ============================================================================
+// RandomX v2: JIT path (RandomXVm light mode uses the JIT on aarch64)
+// ============================================================================
+#[cfg(test)]
+mod v2_jit_tests {
+    use super::*;
+    use super::vm::{RandomXVm, RxVersion};
+
+    /// RandomXVm (JIT on aarch64, interpreter elsewhere) must match the
+    /// v2 reference vectors — proves the conditional-CFROUND emission.
+    #[test]
+    fn test_vm_v2_vectors() {
+        let mut vm = RandomXVm::new_versioned(b"test key 000", RxVersion::V2);
+        let hash = vm.calculate_hash(b"This is a test");
+        assert_eq!(
+            hex_encode(&hash),
+            "22ec6b861b3eb23686b2efbad69513c967ecfce80983df66c9c5b4fbfb4cdb6f"
+        );
+
+        let mut vm = RandomXVm::new_versioned(b"test key 001", RxVersion::V2);
+        let blob = hex_decode(
+            "0b0b98bea7e805e0010a2126d287a2a0cc833d312cb786385a7c2f9de69d2553\
+             7f584a9bc9977b00000000666fd8753bf61a8631f12984e3fd44f4014eca6292\
+             76817b56f32e9b68bd82f416",
+        );
+        let hash = vm.calculate_hash(&blob);
+        assert_eq!(
+            hex_encode(&hash),
+            "c8e92c5f7c1946fecf06bc382b92e3111da38ee3e6a5ad90704e1a9d8aaf6e76"
+        );
+    }
+
+    /// Same VM must flip between versions per the reference `test_switch`:
+    /// dataset/cache contents are version-independent.
+    #[test]
+    fn test_v1_v2_share_cache_key() {
+        let mut vm1 = RandomXVm::new_versioned(b"test key 000", RxVersion::V1);
+        assert_eq!(
+            hex_encode(&vm1.calculate_hash(b"This is a test")),
+            "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f"
+        );
+    }
+}

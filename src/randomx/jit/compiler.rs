@@ -16,7 +16,7 @@ use super::aarch64::{reg, Emitter};
 use super::memory::{JitMemory, JIT_CODE_SIZE};
 use crate::randomx::vm::{
     BytecodeInstruction, InstructionType, NativeRegisterFile, ProgramConfiguration,
-    RANDOMX_PROGRAM_SIZE,
+    RxVersion, RANDOMX_PROGRAM_SIZE_MAX,
 };
 
 /// DYNAMIC_MANTISSA_MASK from vm.rs
@@ -72,11 +72,14 @@ impl JitCompiler {
     }
 
     /// Compile a bytecode program to native ARM64 code.
-    pub(crate) fn compile(&mut self, bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]) {
+    /// `bytecode` holds exactly the program's instructions (256 for rx/0,
+    /// 384 for rx/2) — callers slice their max-size buffer to the program size.
+    /// `version` selects version-dependent emission (v2: conditional CFROUND).
+    pub(crate) fn compile(&mut self, bytecode: &[BytecodeInstruction], version: RxVersion) {
         let mut e = Emitter::new();
 
         emit_prologue(&mut e);
-        emit_body(&mut e, bytecode);
+        emit_body(&mut e, bytecode, version);
         emit_epilogue(&mut e);
 
         self.memory.write_code(&e.code);
@@ -204,21 +207,24 @@ fn emit_epilogue(e: &mut Emitter) {
 // Body: compile each bytecode instruction
 // ============================================================================
 
-fn emit_body(e: &mut Emitter, bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]) {
+fn emit_body(e: &mut Emitter, bytecode: &[BytecodeInstruction], version: RxVersion) {
+    debug_assert!(bytecode.len() <= RANDOMX_PROGRAM_SIZE_MAX);
     // Record instruction offsets for CBRANCH backward jumps
-    let mut offsets = [0usize; RANDOMX_PROGRAM_SIZE];
+    let mut offsets = [0usize; RANDOMX_PROGRAM_SIZE_MAX];
 
-    for i in 0..RANDOMX_PROGRAM_SIZE {
+    for i in 0..bytecode.len() {
         offsets[i] = e.len();
-        emit_instruction(e, &bytecode[i], &offsets, i);
+        emit_instruction(e, &bytecode[i], &offsets, i, bytecode.len(), version);
     }
 }
 
 fn emit_instruction(
     e: &mut Emitter,
     ibc: &BytecodeInstruction,
-    offsets: &[usize; RANDOMX_PROGRAM_SIZE],
+    offsets: &[usize; RANDOMX_PROGRAM_SIZE_MAX],
     pc: usize,
+    program_size: usize,
+    version: RxVersion,
 ) {
     match ibc.itype {
         InstructionType::IaddRs => emit_iadd_rs(e, ibc),
@@ -246,8 +252,8 @@ fn emit_instruction(
         InstructionType::FmulR => emit_fmul_r(e, ibc),
         InstructionType::FdivM => emit_fdiv_m(e, ibc),
         InstructionType::FsqrtR => emit_fsqrt_r(e, ibc),
-        InstructionType::Cbranch => emit_cbranch(e, ibc, offsets, pc),
-        InstructionType::Cfround => emit_cfround(e, ibc),
+        InstructionType::Cbranch => emit_cbranch(e, ibc, offsets, pc, program_size),
+        InstructionType::Cfround => emit_cfround(e, ibc, version),
         InstructionType::Istore => emit_istore(e, ibc),
         InstructionType::Nop => {}
     }
@@ -531,8 +537,9 @@ fn emit_fsqrt_r(e: &mut Emitter, ibc: &BytecodeInstruction) {
 fn emit_cbranch(
     e: &mut Emitter,
     ibc: &BytecodeInstruction,
-    offsets: &[usize; RANDOMX_PROGRAM_SIZE],
+    offsets: &[usize; RANDOMX_PROGRAM_SIZE_MAX],
     _pc: usize,
+    program_size: usize,
 ) {
     let dst = r_reg(ibc.dst);
 
@@ -547,7 +554,7 @@ fn emit_cbranch(
     // instruction executed is target + 1. In the JIT, branch to offsets[target + 1].
     // ibc.target is i16 — cast to i32 first to avoid overflow on negative values.
     let target_signed = (ibc.target as i32) + 1;
-    let target_offset = if target_signed >= 0 && (target_signed as usize) < RANDOMX_PROGRAM_SIZE {
+    let target_offset = if target_signed >= 0 && (target_signed as usize) < program_size {
         offsets[target_signed as usize]
     } else {
         // Target is out of bounds — fall through (no branch needed)
@@ -558,7 +565,7 @@ fn emit_cbranch(
     e.b_cond(0, rel); // B.EQ (cond=0)
 }
 
-fn emit_cfround(e: &mut Emitter, ibc: &BytecodeInstruction) {
+fn emit_cfround(e: &mut Emitter, ibc: &BytecodeInstruction, version: RxVersion) {
     // rm = (r[src] >> imm) & 3, then map RandomX→ARM rounding mode
     // RandomX: 0→0, 1→2, 2→1, 3→3  (swap bits)
     let src = r_reg(ibc.src);
@@ -570,6 +577,19 @@ fn emit_cfround(e: &mut Emitter, ibc: &BytecodeInstruction) {
     } else {
         e.mov_reg(reg::X0, src);
     }
+
+    // V2: conditional write — skip the FPCR update unless bits 2-5 of the
+    // rotated value are all zero (spec §5.4.1; xmrig h_CFROUND emits the same
+    // TST #0x3C + B.NE guard). The branch offset is patched after emitting the
+    // guarded block so the skip distance never needs hand-counting.
+    let patch = if version == RxVersion::V2 {
+        e.tst_bitmask(reg::X0, 0x3C, reg::X1);
+        let idx = e.len();
+        e.b_cond(1, 0); // B.NE placeholder — patched below
+        Some(idx)
+    } else {
+        None
+    };
 
     // x0 = x0 & 3
     e.and_bitmask(reg::X0, reg::X0, 3, reg::X1);
@@ -589,6 +609,11 @@ fn emit_cfround(e: &mut Emitter, ibc: &BytecodeInstruction) {
     e.mov_imm64(reg::X1, 1u64 << 24); // FZ bit
     e.orr_reg(reg::X0, reg::X0, reg::X1);
     e.msr_fpcr(reg::X0);
+
+    if let Some(idx) = patch {
+        let rel = (e.len() - idx) as u32; // words from the B.NE to past the block
+        e.code[idx] = 0x54000000 | ((rel & 0x7FFFF) << 5) | 1; // B.NE +rel
+    }
 }
 
 fn emit_istore(e: &mut Emitter, ibc: &BytecodeInstruction) {
@@ -632,11 +657,11 @@ mod tests {
     #[test]
     fn test_jit_nop_program() {
         // All NOP program — JIT should load regs, do nothing, store back
-        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
 
         let mut nreg = NativeRegisterFile::new();
         nreg.r = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -668,11 +693,11 @@ mod tests {
     #[test]
     fn test_jit_nop_program_with_fp() {
         // NOP program with non-zero FP values to test FP load/store in prologue/epilogue
-        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
 
         let mut nreg = NativeRegisterFile::new();
         nreg.r = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888];
@@ -704,8 +729,8 @@ mod tests {
         assert_eq!(nreg.a, orig_a, "a registers mismatch");
     }
 
-    fn make_single_instruction(itype: InstructionType, dst: usize, src: usize, imm: u64, mem_mask: u32, shift: u32) -> [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+    fn make_single_instruction(itype: InstructionType, dst: usize, src: usize, imm: u64, mem_mask: u32, shift: u32) -> [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] {
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = itype;
         bytecode[0].dst = dst;
@@ -716,9 +741,9 @@ mod tests {
         bytecode
     }
 
-    fn run_jit(bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE], nreg: &mut NativeRegisterFile) {
+    fn run_jit(bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX], nreg: &mut NativeRegisterFile) {
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(bytecode);
+        jit.compile(bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         let config = ProgramConfiguration {
             e_mask: [0x3FF0000000000000, 0x3FF0000000000000],
@@ -813,7 +838,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fadd_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FaddR;
         bytecode[0].dst = 0; // f[0]
@@ -826,7 +851,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fsub_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FsubR;
         bytecode[0].dst = 0;
@@ -839,7 +864,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fmul_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FmulR;
         bytecode[0].dst = 0;
@@ -852,7 +877,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fsqrt_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FsqrtR;
         bytecode[0].dst = 0;
@@ -863,7 +888,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fscal_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FscalR;
         bytecode[0].dst = 0;
@@ -878,7 +903,7 @@ mod tests {
     }
 
     #[test] fn test_jit_fswap_r() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::FswapR;
         bytecode[0].dst = 0;
@@ -947,7 +972,7 @@ mod tests {
 
     #[test] fn test_jit_istore() {
         // ISTORE: store r[src] to scratchpad at addr = (r[dst] + imm) & mem_mask
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::Istore;
         bytecode[0].dst = 0;
@@ -956,7 +981,7 @@ mod tests {
         bytecode[0].mem_mask = 0x1FFFF8; // L3 mask
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         let config = ProgramConfiguration {
             e_mask: [0x3FF0000000000000, 0x3FF0000000000000],
@@ -974,7 +999,7 @@ mod tests {
     }
 
     #[test] fn test_jit_cfround() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::Cfround;
         bytecode[0].src = 0;
@@ -986,7 +1011,7 @@ mod tests {
     }
 
     #[test] fn test_jit_iadd_m() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::IaddM;
         bytecode[0].dst = 0;
@@ -995,7 +1020,7 @@ mod tests {
         bytecode[0].mem_mask = 0x3FF8; // L1 mask
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         // Write value at scratchpad[0x100]
         scratchpad[0x100..0x108].copy_from_slice(&42u64.to_le_bytes());
@@ -1014,7 +1039,7 @@ mod tests {
     }
 
     #[test] fn test_jit_isub_m() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::IsubM;
         bytecode[0].dst = 0;
@@ -1023,7 +1048,7 @@ mod tests {
         bytecode[0].mem_mask = 0x3FF8;
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         scratchpad[0x100..0x108].copy_from_slice(&7u64.to_le_bytes());
         let config = ProgramConfiguration {
@@ -1041,7 +1066,7 @@ mod tests {
     }
 
     #[test] fn test_jit_imul_m() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::ImulM;
         bytecode[0].dst = 0;
@@ -1050,7 +1075,7 @@ mod tests {
         bytecode[0].mem_mask = 0x3FF8;
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         scratchpad[0x100..0x108].copy_from_slice(&6u64.to_le_bytes());
         let config = ProgramConfiguration {
@@ -1068,7 +1093,7 @@ mod tests {
     }
 
     #[test] fn test_jit_ixor_m() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
         bytecode[0].itype = InstructionType::IxorM;
         bytecode[0].dst = 0;
@@ -1077,7 +1102,7 @@ mod tests {
         bytecode[0].mem_mask = 0x3FF8;
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
         let mut scratchpad = vec![0u8; 2097152];
         scratchpad[0x100..0x108].copy_from_slice(&0xFF00u64.to_le_bytes());
         let config = ProgramConfiguration {
@@ -1121,7 +1146,7 @@ mod tests {
 
     #[test]
     fn test_jit_iadd_rs() {
-        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE] =
+        let mut bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
             std::array::from_fn(|_| BytecodeInstruction::new());
 
         // r[0] += r[1] << 2
@@ -1132,7 +1157,7 @@ mod tests {
         bytecode[0].imm = 0;
 
         let mut jit = JitCompiler::new().expect("JIT alloc failed");
-        jit.compile(&bytecode);
+        jit.compile(&bytecode, RxVersion::V1);
 
         let mut nreg = NativeRegisterFile::new();
         nreg.r[0] = 100;

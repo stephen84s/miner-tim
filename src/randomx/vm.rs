@@ -14,6 +14,10 @@ use std::sync::Arc;
 // ============================================================================
 
 pub(crate) const RANDOMX_PROGRAM_SIZE: usize = 256; // V1
+pub(crate) const RANDOMX_PROGRAM_SIZE_V2: usize = 384;
+/// Max program size across versions — sizes all bytecode buffers (upstream does
+/// the same: `Instruction programBuffer[RANDOMX_PROGRAM_MAX_SIZE]`).
+pub(crate) const RANDOMX_PROGRAM_SIZE_MAX: usize = 384;
 const RANDOMX_PROGRAM_ITERATIONS: usize = 2048;
 const RANDOMX_PROGRAM_COUNT: usize = 8;
 const REGISTERS_COUNT: usize = 8;
@@ -47,11 +51,33 @@ const STATIC_EXPONENT_BITS: u32 = 4;
 const CONST_EXPONENT_BITS: u64 = 0x300;
 const DYNAMIC_MANTISSA_MASK: u64 = (1u64 << (MANTISSA_SIZE + DYNAMIC_EXPONENT_BITS)) - 1;
 
-// Program structure: entropy[16] (128 bytes) + instructions[256] (2048 bytes) = 2176
-// C++ layout: entropyBuffer[16] first, then programBuffer[]
-const PROGRAM_BYTES_SIZE: usize = 16 * 8 + RANDOMX_PROGRAM_SIZE * 8;
+// Program structure: entropy[16] (128 bytes) + instructions[program_size] (8 bytes each).
+// V1: 2176 bytes, V2: 3200 bytes. C++ layout: entropyBuffer[16] first, then programBuffer[].
 const ENTROPY_OFFSET: usize = 0; // entropy at the start
 const INSTRUCTIONS_OFFSET: usize = 16 * 8; // 128 bytes after entropy
+
+/// RandomX algorithm version. `V1` = rx/0 (current mainnet), `V2` = rx/2
+/// (Monero HF v17, tevador/RandomX#317). See RANDOMX_V2_SEMANTICS.md.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RxVersion {
+    V1,
+    V2,
+}
+
+impl RxVersion {
+    #[inline]
+    pub(crate) fn program_size(self) -> usize {
+        match self {
+            RxVersion::V1 => RANDOMX_PROGRAM_SIZE,
+            RxVersion::V2 => RANDOMX_PROGRAM_SIZE_V2,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn program_bytes_size(self) -> usize {
+        INSTRUCTIONS_OFFSET + self.program_size() * 8
+    }
+}
 
 // Opcode frequency ceiling values (cumulative). Use u16 since CEIL_ISTORE = 256.
 const CEIL_IADD_RS: u16 = 16;
@@ -416,6 +442,41 @@ fn xor_f128(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     )
 }
 
+/// (f64, f64) pair -> 16 raw little-endian bytes (lo lane first), bit-exact.
+#[inline(always)]
+fn f128_to_bytes(v: (f64, f64)) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&v.0.to_bits().to_le_bytes());
+    b[8..].copy_from_slice(&v.1.to_bits().to_le_bytes());
+    b
+}
+
+/// 16 raw bytes -> (f64, f64) pair, bit-exact (values may be NaN/Inf patterns).
+#[inline(always)]
+fn bytes_to_f128(b: [u8; 16]) -> (f64, f64) {
+    (
+        f64::from_bits(u64::from_le_bytes(b[..8].try_into().unwrap())),
+        f64::from_bits(u64::from_le_bytes(b[8..].try_into().unwrap())),
+    )
+}
+
+/// RandomX v2 F/E mix on the register file (RANDOMX_V2_SEMANTICS.md §3):
+/// 4 single AES rounds per f-register keyed by the live e-registers, which are
+/// themselves unchanged. Round-trips through raw bytes so NaN/Inf bit patterns
+/// survive exactly (the mixed f's are arbitrary 128-bit values).
+fn aes_mix_f_e(nreg: &mut NativeRegisterFile) {
+    let mut f = [[0u8; 16]; REGISTER_COUNT_FLT];
+    let mut e = [[0u8; 16]; REGISTER_COUNT_FLT];
+    for i in 0..REGISTER_COUNT_FLT {
+        f[i] = f128_to_bytes(nreg.f[i]);
+        e[i] = f128_to_bytes(nreg.e[i]);
+    }
+    super::aes_hash::aes_mix_fe(&mut f, &e);
+    for i in 0..REGISTER_COUNT_FLT {
+        nreg.f[i] = bytes_to_f128(f[i]);
+    }
+}
+
 /// Swap lo and hi of an f128 pair
 #[inline(always)]
 fn swap_f128(a: (f64, f64)) -> (f64, f64) {
@@ -466,13 +527,15 @@ fn serialize_register_file(nreg: &NativeRegisterFile) -> [u8; 256] {
 fn compile_program(
     program_bytes: &[u8], // raw program bytes (instructions start at offset 128)
     register_usage: &mut [i32; REGISTERS_COUNT],
-    bytecode: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    bytecode: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
+    program_size: usize, // RxVersion::program_size(); entries beyond it are left stale
 ) {
+    debug_assert!(program_size <= RANDOMX_PROGRAM_SIZE_MAX);
     for r in register_usage.iter_mut() {
         *r = -1;
     }
 
-    for i in 0..RANDOMX_PROGRAM_SIZE {
+    for i in 0..program_size {
         let instr_offset = INSTRUCTIONS_OFFSET + i * 8; // instructions after entropy
         let instr = RawInstruction::from_bytes(&program_bytes[instr_offset..instr_offset + 8]);
         let ibc = &mut bytecode[i];
@@ -827,17 +890,19 @@ fn compile_program(
 // ============================================================================
 
 fn execute_bytecode(
-    bytecode: &[BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    bytecode: &[BytecodeInstruction], // program_size entries (sliced by caller)
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
     config: &ProgramConfiguration,
+    version: RxVersion,
 ) {
     let mut pc: i32 = 0;
-    let len = RANDOMX_PROGRAM_SIZE as i32;
+    let len = bytecode.len() as i32;
 
     // Safety: all register indices (dst, src) are < 8 (masked to % 8 during compilation).
     // All scratchpad offsets are masked to be within SCRATCHPAD_L3_SIZE.
-    // Bytecode indices are bounded by RANDOMX_PROGRAM_SIZE.
+    // Bytecode indices are bounded by the program size: pc is only ever set to
+    // 0..len via the while condition, and CBRANCH targets are generated < program_size.
     unsafe {
     while pc < len {
         let ibc = bytecode.get_unchecked(pc as usize);
@@ -973,8 +1038,12 @@ fn execute_bytecode(
                 }
             }
             InstructionType::Cfround => {
-                let rm = (nreg.r(ibc.src).rotate_right(ibc.imm as u32)) & 3;
-                set_rounding_mode(rm as u32);
+                // V2: conditional — the mode is written only when bits 2-5 of
+                // the rotated source are all zero (1/16 chance). Spec §5.4.1.
+                let rotated = nreg.r(ibc.src).rotate_right(ibc.imm as u32);
+                if version == RxVersion::V1 || (rotated & 60) == 0 {
+                    set_rounding_mode((rotated & 3) as u32);
+                }
             }
             InstructionType::Istore => {
                 let addr = (nreg.r(ibc.dst).wrapping_add(ibc.imm) as u32 & ibc.mem_mask) as usize;
@@ -1001,10 +1070,11 @@ fn execute_vm(
     cache_memory: &[u8],
     ss_programs: &[SuperscalarProgram; 8],
     dataset: Option<&RandomXDataset>,
-    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     jit: Option<&mut super::jit::JitCompiler>,
+    version: RxVersion,
 ) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit)
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -1015,9 +1085,10 @@ fn execute_vm(
     cache_memory: &[u8],
     ss_programs: &[SuperscalarProgram; 8],
     dataset: Option<&RandomXDataset>,
-    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
+    version: RxVersion,
 ) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf)
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1028,8 +1099,9 @@ fn execute_vm_inner(
     cache_memory: &[u8],
     ss_programs: &[SuperscalarProgram; 8],
     dataset: Option<&RandomXDataset>,
-    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE],
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     #[cfg(target_arch = "aarch64")] mut jit: Option<&mut super::jit::JitCompiler>,
+    version: RxVersion,
 ) {
     // NOTE: Rounding mode is NOT reset per-chain. C++ resets once before all chains,
     // and lets CFROUND changes carry over between chains. Caller must call set_rounding_mode(0)
@@ -1078,14 +1150,15 @@ fn execute_vm_inner(
     };
 
     // Compile program into pre-allocated buffer
+    let program_size = version.program_size();
     let mut register_usage = [0i32; REGISTERS_COUNT];
-    compile_program(program_bytes, &mut register_usage, bytecode_buf);
-    let bytecode = &*bytecode_buf;
+    compile_program(program_bytes, &mut register_usage, bytecode_buf, program_size);
+    let bytecode = &bytecode_buf[..program_size];
 
     // JIT compile the bytecode to native code (aarch64 only)
     #[cfg(target_arch = "aarch64")]
     let jit_fn = jit.as_mut().map(|jit| {
-        jit.compile(bytecode_buf);
+        jit.compile(bytecode, version);
         unsafe { jit.get_fn() }
     });
 
@@ -1133,18 +1206,24 @@ fn execute_vm_inner(
                 // JIT: call native code. It reads/writes nreg directly.
                 unsafe { f(nreg as *mut NativeRegisterFile, scratchpad.as_mut_ptr(), &config as *const ProgramConfiguration) };
             } else {
-                execute_bytecode(bytecode, nreg, scratchpad, &config);
+                execute_bytecode(bytecode, nreg, scratchpad, &config, version);
             }
         }
         #[cfg(not(target_arch = "aarch64"))]
-        execute_bytecode(&bytecode, nreg, scratchpad, &config);
+        execute_bytecode(bytecode, nreg, scratchpad, &config, version);
 
         // Dataset read
         let read_ptr = dataset_offset + (mem_ma as u64 & CACHE_LINE_ALIGN_MASK as u64);
 
-        // V1: update mem_mx
         unsafe {
-        mem_mx ^= (nreg.r(config.read_reg2) ^ nreg.r(config.read_reg3)) as u32;
+        // spMix2 goes into `mp`: mx for V1, ma for V2 (prefetch then runs two
+        // iterations ahead of the read). RANDOMX_V2_SEMANTICS.md §4. The read
+        // address (`read_ptr`) was captured from the pre-XOR `ma` above.
+        let sp_mix2 = (nreg.r(config.read_reg2) ^ nreg.r(config.read_reg3)) as u32;
+        match version {
+            RxVersion::V1 => mem_mx ^= sp_mix2,
+            RxVersion::V2 => mem_ma ^= sp_mix2,
+        }
 
         // Full mode: array lookup. Light mode: compute on-the-fly.
         let item_number = read_ptr / CACHE_LINE_SIZE as u64;
@@ -1159,11 +1238,16 @@ fn execute_vm_inner(
         // Swap mx and ma
         std::mem::swap(&mut mem_mx, &mut mem_ma);
 
-        // Prefetch the next dataset line (mem_ma is now what was mem_mx).
+        // Prefetch the just-XORed `mp` value (post-swap: mem_ma for V1 — read
+        // next iteration; mem_mx for V2 — read the iteration after that).
         // Issued early so the hardware has the full remainder of the iteration to fetch.
         #[cfg(target_arch = "aarch64")]
         if let Some(ds) = dataset {
-            let next_read_ptr = dataset_offset + (mem_ma as u64 & CACHE_LINE_ALIGN_MASK as u64);
+            let mp = match version {
+                RxVersion::V1 => mem_ma,
+                RxVersion::V2 => mem_mx,
+            };
+            let next_read_ptr = dataset_offset + (mp as u64 & CACHE_LINE_ALIGN_MASK as u64);
             let addr = ds.as_ptr().add(next_read_ptr as usize);
             std::arch::asm!("prfm pldl1keep, [{addr}]", addr = in(reg) addr, options(nostack, readonly, preserves_flags));
         }
@@ -1173,9 +1257,15 @@ fn execute_vm_inner(
             store64(scratchpad, sp_addr1 as usize + 8 * i, nreg.r(i));
         }
 
-        // V1: f[i] = f[i] XOR e[i]
-        for i in 0..REGISTER_COUNT_FLT {
-            *nreg.f_mut(i) = xor_f128(nreg.f(i), nreg.e(i));
+        // Combine f with e: V1 XORs; V2 runs 4 single AES rounds per f-register
+        // with the live e-registers as round keys (RANDOMX_V2_SEMANTICS.md §3).
+        match version {
+            RxVersion::V1 => {
+                for i in 0..REGISTER_COUNT_FLT {
+                    *nreg.f_mut(i) = xor_f128(nreg.f(i), nreg.e(i));
+                }
+            }
+            RxVersion::V2 => aes_mix_f_e(nreg),
         }
 
         // Store f-registers back to scratchpad
@@ -1237,6 +1327,15 @@ pub fn calculate_commitment(input: &[u8], hash: &[u8; 32]) -> [u8; 32] {
 /// `input` is the data to hash (block header blob).
 /// Returns 32-byte hash.
 pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
+    calculate_hash_versioned(key, input, RxVersion::V1)
+}
+
+/// Calculate a RandomX v2 (rx/2) hash (light mode).
+pub fn calculate_hash_v2(key: &[u8], input: &[u8]) -> [u8; 32] {
+    calculate_hash_versioned(key, input, RxVersion::V2)
+}
+
+fn calculate_hash_versioned(key: &[u8], input: &[u8], version: RxVersion) -> [u8; 32] {
     // Save and restore FP rounding mode around the entire hash
     let saved_rm = save_rounding_mode();
 
@@ -1269,9 +1368,9 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
     set_rounding_mode(0);
 
     // Step 5: Execute program chains
-    let mut bytecode_buf: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]> =
+    let mut bytecode_buf: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
         Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
-    let mut program_bytes = vec![0u8; PROGRAM_BYTES_SIZE];
+    let mut program_bytes = vec![0u8; version.program_bytes_size()];
     for chain in 0..RANDOMX_PROGRAM_COUNT {
         // Generate program from tempHash using fillAes4Rx4
         fill_aes_4rx4(
@@ -1290,6 +1389,7 @@ pub fn calculate_hash(key: &[u8], input: &[u8]) -> [u8; 32] {
             &mut bytecode_buf,
             #[cfg(target_arch = "aarch64")]
             None,
+            version,
         );
 
         if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1337,7 +1437,8 @@ pub struct RandomXVm {
     dataset: Option<Arc<RandomXDataset>>,
     scratchpad: Vec<u8>,
     program_bytes: Vec<u8>,
-    bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE]>,
+    bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]>,
+    version: RxVersion,
     nreg: NativeRegisterFile,
     pipeline_state: [u8; 64],
     #[cfg(target_arch = "aarch64")]
@@ -1347,6 +1448,11 @@ pub struct RandomXVm {
 impl RandomXVm {
     /// Create a new VM in light mode (256 MiB cache, computes dataset items on-the-fly).
     pub fn new(key: &[u8]) -> Self {
+        Self::new_versioned(key, RxVersion::V1)
+    }
+
+    /// Light-mode VM for a specific RandomX version.
+    pub fn new_versioned(key: &[u8], version: RxVersion) -> Self {
         let cache_memory = argon2d_cache(key);
         let mut generator = Blake2Generator::new(key, 0);
         let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
@@ -1355,10 +1461,11 @@ impl RandomXVm {
             ss_programs,
             dataset: None,
             scratchpad: vec![0u8; SCRATCHPAD_L3_SIZE],
-            program_bytes: vec![0u8; PROGRAM_BYTES_SIZE],
+            program_bytes: vec![0u8; version.program_bytes_size()],
             bytecode: Box::new(std::array::from_fn(|_| BytecodeInstruction::new())),
             nreg: NativeRegisterFile::new(),
             pipeline_state: [0u8; 64],
+            version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
         }
@@ -1366,6 +1473,12 @@ impl RandomXVm {
 
     /// Create a new VM in full mode with a precomputed dataset.
     pub fn new_full(key: &[u8], dataset: Arc<RandomXDataset>) -> Self {
+        Self::new_full_versioned(key, dataset, RxVersion::V1)
+    }
+
+    /// Full-mode VM for a specific RandomX version. Dataset contents are
+    /// version-independent (same seed -> same dataset for rx/0 and rx/2).
+    pub fn new_full_versioned(key: &[u8], dataset: Arc<RandomXDataset>, version: RxVersion) -> Self {
         let cache_memory = argon2d_cache(key);
         let mut generator = Blake2Generator::new(key, 0);
         let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
@@ -1374,10 +1487,11 @@ impl RandomXVm {
             ss_programs,
             dataset: Some(dataset),
             scratchpad: vec![0u8; SCRATCHPAD_L3_SIZE],
-            program_bytes: vec![0u8; PROGRAM_BYTES_SIZE],
+            program_bytes: vec![0u8; version.program_bytes_size()],
             bytecode: Box::new(std::array::from_fn(|_| BytecodeInstruction::new())),
             nreg: NativeRegisterFile::new(),
             pipeline_state: [0u8; 64],
+            version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
         }
@@ -1432,6 +1546,7 @@ impl RandomXVm {
                 &mut self.bytecode,
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
+                self.version,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1494,6 +1609,7 @@ impl RandomXVm {
                 &mut self.bytecode,
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
+                self.version,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1587,7 +1703,12 @@ impl RandomXVm {
             // Phase 4: compile_program (timed separately, extra call)
             let t = Instant::now();
             let mut register_usage = [0i32; REGISTERS_COUNT];
-            compile_program(&self.program_bytes, &mut register_usage, &mut self.bytecode);
+            compile_program(
+                &self.program_bytes,
+                &mut register_usage,
+                &mut self.bytecode,
+                self.version.program_size(),
+            );
             total_compile += t.elapsed();
 
             // Phase 5: execute_vm (includes its own compile_program + 2048 iters + dataset)
@@ -1602,6 +1723,7 @@ impl RandomXVm {
                 &mut self.bytecode,
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
+                self.version,
             );
             total_execute_vm += t.elapsed();
 

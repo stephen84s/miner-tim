@@ -1075,3 +1075,58 @@ Semantics source: RANDOMX_V2_SEMANTICS.md; phases per PLAN_RANDOMX_V2.md.
 ### Verification
 - Both vectors pass (also cross-validates our Blake2b against tevador's
   v2-era outputs). Nothing else touched; full gate runs at Phase E.
+
+## 2026-08-16 - RandomX v2 gated port, Phases B-E: COMPLETE (offline-verifiable half)
+
+### Request
+Continuation of the approved gated rx/2 port (Phase A committed 2026-08-15 as
+9274f0d). Semantics authority: RANDOMX_V2_SEMANTICS.md.
+
+### Files Changed
+- `src/randomx/vm.rs`
+  - Phase B: `RxVersion {V1,V2}` + `program_size()/program_bytes_size()`;
+    `RANDOMX_PROGRAM_SIZE_V2=384`, `_MAX=384`; bytecode buffers MAX-sized
+    (upstream's own choice: `programBuffer[RANDOMX_PROGRAM_MAX_SIZE]`);
+    `compile_program(program_size)`; `execute_bytecode` takes a slice;
+    `execute_vm{,_inner}` take `version`; `RandomXVm.version` +
+    `new_versioned`/`new_full_versioned`; `calculate_hash_v2` (light mode).
+  - Phase C: conditional CFROUND in the interpreter (`(rotated & 60)==0` gate,
+    else no fprc write); v2 F/E combine via `aes_mix_f_e` (bit-exact byte
+    round-trip so NaN/Inf f-patterns survive); `mp`-aliasing dataset-address
+    change (spMix2 XORs into `ma` for v2; prefetch target = post-swap `mx`).
+- `src/randomx/aes_hash.rs` — `aes_mix_fe`: 4 single AES rounds per f-register,
+  e-registers as keys, enc/dec by register parity; NEON (AESE/AESMC ∘ zero-key
+  + EOR), AES-NI, and soft paths following the file's existing dispatch pattern.
+- `src/randomx/jit/compiler.rs` — `compile(bytecode: &[..], version)`;
+  v2 CFROUND emits `TST x0,#0x3C` + `B.NE` guard around the FPCR write with a
+  patched branch offset (no hand-counted skip distances); CBRANCH bounds use
+  runtime program size; offsets array MAX-sized.
+- `src/randomx/tests.rs` — v2 vectors (a) `22ec6b86…` and (e, 76-byte
+  Monero-shaped blob) `c8e92c5f…` on the interpreter path; same two through
+  `RandomXVm` (JIT on aarch64); v1/v2 same-key coexistence test.
+
+### Behaviour
+- **All v1 public APIs and the miner are untouched** — `new`/`new_full`/
+  `calculate_hash` still V1; nothing selects V2 at runtime (gated, as planned).
+- Deferred by design (blocked on pool/network reality): version dispatch
+  (pool `algo` field, per §8 of the semantics doc) and Stratum
+  `result`/`commitment` submit changes.
+
+### Verification
+- Full suite **96 passed, 0 failed**: 87 v1 vectors bit-identical through the
+  new plumbing (incl. full-mode JIT test), both v2 hash vectors on interpreter
+  AND JIT paths (v2 first-run pass on both), both commitment vectors.
+- `cargo clippy --all-targets -- -D warnings` clean.
+- v1 hot-loop impact: none measurable by construction — v1 JIT emission is
+  bit-identical (version only gates extra emission in the V2 arm), and the two
+  new per-iteration `match version` branches are constant-predicted; the
+  criterion bench cannot resolve below ~3% (2026-08-15 methodology note), so
+  no bench run was pretended.
+
+### Fork-day remainder (small, documented)
+1. Honour per-job `algo` ("rx/2") → pick `RxVersion` (semantics doc §8).
+2. `submit_share`: commitment as `result`, raw hash in `commitment` field —
+   re-verify against a real pool first (no pool-side reference exists yet).
+3. Miner loop: commitment over `job_blob_current` (pipeline off-by-one, §5.2).
+4. Watch `mainnet_hard_forks` for the v17 height; re-diff semantics doc against
+   any tevador tagged release before shipping.

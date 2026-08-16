@@ -1196,12 +1196,32 @@ miss: it forks from the **Android-era** history, which never contained
 - `~/backups/miner-tim-pre-filter-repo-2026-08-17.tar.gz` — 416 MB, excludes the
   regenerable `target/`.
 
-### NOT DONE - awaiting explicit user approval
-**Nothing has been pushed.** Publishing requires a force-push of `main` and the
-three tags (all hashes changed). Before/after that:
-1. `git push --force origin main` + `git push --force --tags`.
-2. Verify GitLab releases v0.1.0-v0.1.2 still show their tarball assets (they
-   attach to tag *names*, so they should survive — confirm each).
-3. Trigger GitLab housekeeping (or wait) — the server keeps old objects until
-   then, so the 150 MB figure will not drop immediately.
-4. Any other clone of this repo must be re-cloned, not pulled.
+### Published (user approved 2026-08-17)
+- `git push --force origin main`: `c17f0f0 -> 3eb834d` (forced).
+- `git push --force --tags`: all three force-updated; verified still
+  **annotated** (type=tag, messages preserved) and peeling to the rewritten
+  commits. `git ls-remote` matches local exactly.
+- **GitLab releases survived intact** — v0.1.1 and v0.1.2 both still list
+  `SHA256SUMS` + `minertim-<ver>-macos-arm64.tar.gz`; asset download returns
+  HTTP 200 and SHA256SUMS content is correct. (Release assets are project
+  uploads, independent of git objects, so they were never actually at risk.
+  v0.1.0 has a tag but no GitLab release — predates the glab flow, not a loss.)
+- Housekeeping triggered: `POST /projects/80460194/housekeeping`.
+
+**End-state verification — fresh clone from the remote:** `.git` = **516 KB**,
+0 `target/` blobs, all 3 tags, 50 commits, `HEAD^{tree}` identical to local,
+`cargo check` OK. Anyone cloning now gets ~516 KB instead of ~150 MB.
+
+Note: GitLab's reported `repository_size` still showed **145.3 MB** right after
+the push (storage_size 149.0, of which job_artifacts 3.7). Expected — the server
+retains unreachable objects until housekeeping finishes its grace period. The
+fresh-clone number is the meaningful one; re-check in a few days with
+`glab api "projects/80460194?statistics=true"`.
+
+### Follow-ups for the user
+1. **Any other clone must be re-cloned, not pulled** — every commit hash changed.
+2. Keep `~/backups/miner-tim-pre-filter-repo-2026-08-17*` until the GitLab size
+   figure drops, then delete manually.
+3. Pre-existing wart, deliberately left alone: `.claude/worktrees/platform-neutral`
+   is committed as a **gitlink** (mode 160000). Harmless but odd — worth
+   untracking in a separate change if you care.

@@ -1130,3 +1130,78 @@ Continuation of the approved gated rx/2 port (Phase A committed 2026-08-15 as
 3. Miner loop: commitment over `job_blob_current` (pipeline off-by-one, §5.2).
 4. Watch `mainnet_hard_forks` for the v17 height; re-diff semantics doc against
    any tevador tagged release before shipping.
+
+## 2026-08-17 - Strip target/ build artifacts from git history (repo 174 MB -> 536 KB)
+
+### Request
+"Why is the git repo in gitlab 150 MB" -> investigate, then commit the pending
+v2 work, back up + gzip the repo, and rewrite history to fix it.
+
+### Diagnosis
+The initial commit (`4fe9845`) accidentally committed the whole `target/` build
+directory — debug + release `.rlib`s (rustls 19.6 MB, jiff 13.6 MB, regex
+11.9 MB...) and incremental-compile dep-graphs. Two later commits (`028810d`,
+redone as `f07d2ca`) untracked them and `.gitignore` now excludes `target/`,
+but untracking does not remove blobs from history:
+
+| Content in history | Uncompressed blobs |
+|---|---|
+| `target/` build artifacts | **426.3 MiB** |
+| Everything real (source + docs) | 3.0 MiB |
+
+i.e. **99.3% of the repository was dead build output.**
+
+### Tooling note (important for future work)
+**`git-filter-repo` does not work on this repo — it is SHA-256 object format.**
+`git rev-parse --show-object-format` = `sha256`; filter-repo 2.47.0 crashes
+parsing the fast-export stream (`ValueError: invalid literal for int()` on a
+64-hex blob id, `fatal: stream ends early`). No damage was done — it crashed
+during parsing before writing; 49 commits, all tags and `fsck` were verified
+intact immediately afterwards. Used **`git filter-branch --index-filter`**
+instead (pure plumbing, hash-agnostic).
+
+Two incidental blockers, both handled and restored afterwards:
+- `.claude/worktrees/platform-neutral` is a **tracked gitlink** (mode 160000)
+  as well as a live linked worktree; filter-branch refuses to run with the
+  resulting unstaged delete. Worktree removed -> gitlink restored to HEAD ->
+  rewrite -> `git worktree add` to recreate it.
+- `.claude/settings.local.json` had session changes: copied out, restored after.
+- The `origin` remote was missing from `.git/config` afterwards (most likely
+  removed by the filter-repo attempt, which strips it by design). Re-added from
+  the backup's config: `git@gitlab.com:stephen84s/miner-tim.git`.
+
+`worktree-platform-neutral` was reported "unchanged" and that is correct, not a
+miss: it forks from the **Android-era** history, which never contained
+`target/`. Verified independently — 0 target blobs reachable from that branch.
+
+### Result (local only)
+- `.git`: **174 MB -> 536 KB**; pack 370 KiB, 516 objects.
+- 49 commits preserved (no `--prune-empty`, so count is 1:1 with the backup);
+  `028810d` kept because it also adds a `.gitignore` line.
+- Tags v0.1.0/v0.1.1/v0.1.2 rewritten to new hashes, names preserved.
+- 0 `target/` blobs reachable from any ref; `git fsck` clean.
+
+### Verification
+- **`HEAD^{tree}` hash is identical to the backup** (`d35ce002…`) — git trees
+  are content-addressed, so this is cryptographic proof that all tracked content
+  at HEAD survived byte-for-byte; only historical trees lost `target/`.
+- Tracked file count 41 = backup's 41 non-target tracked files.
+- Full suite **96 passed, 0 failed**; `clippy --all-targets -D warnings` clean.
+- Backup verified before the rewrite: `git fsck` clean (dangling objects only),
+  HEAD matched, working tree `diff -rq` identical, `gzip -t` OK.
+
+### Backups (keep until the remote is confirmed good)
+- `~/backups/miner-tim-pre-filter-repo-2026-08-17/` — complete directory copy
+  (APFS clone), includes `.git` and the untracked `target/`.
+- `~/backups/miner-tim-pre-filter-repo-2026-08-17.tar.gz` — 416 MB, excludes the
+  regenerable `target/`.
+
+### NOT DONE - awaiting explicit user approval
+**Nothing has been pushed.** Publishing requires a force-push of `main` and the
+three tags (all hashes changed). Before/after that:
+1. `git push --force origin main` + `git push --force --tags`.
+2. Verify GitLab releases v0.1.0-v0.1.2 still show their tarball assets (they
+   attach to tag *names*, so they should survive — confirm each).
+3. Trigger GitLab housekeeping (or wait) — the server keeps old objects until
+   then, so the 150 MB figure will not drop immediately.
+4. Any other clone of this repo must be re-cloned, not pulled.

@@ -64,17 +64,55 @@ Rust: dataset read -> xor r -> swap -> prefetch -> store r -> f^=e -> store f
 Proposed (per program, JIT drives):
 
 ```
-JIT: prologue (load register file ONCE)
+JIT: prologue: load r and a from nreg ONCE   (see note on f/e below)
+     init: ma, mx from entropy; sp_addr0 = mx; sp_addr1 = ma; counter = 2048
      loop 2048x:
-       sp_addr0/1 from r[readReg0]^r[readReg1]
-       load r from sp[sp_addr0]; load f,e from sp[sp_addr1] (cvt + e-mask)
+       sp_mix   = r[readReg0] ^ r[readReg1]              # 64-bit
+       sp_addr0 ^= sp_mix & 0xFFFFFFFF ; sp_addr0 &= SCRATCHPAD_L3_MASK64
+       sp_addr1 ^= sp_mix >> 32        ; sp_addr1 &= SCRATCHPAD_L3_MASK64
+       r[i] ^= sp[sp_addr0 + 8i]                         # XOR-accumulate, i=0..7
+       f[i]  = cvt_packed_i32(sp[sp_addr1 + 8i])         # ASSIGN, 8-byte read, i=0..3
+       e[i]  = emask(cvt_packed_i32(sp[sp_addr1 + 32 + 8i]))   # ASSIGN + mask, i=0..3
+       read_ptr = dataset_offset + (ma & CACHE_LINE_ALIGN_MASK)   # captured from PRE-XOR ma
        <program body, unchanged>
-       dataset read at dataset_offset + (ma & CACHE_LINE_ALIGN_MASK); xor into r
-       mx ^= r[readReg2]^r[readReg3]; swap(mx, ma); prefetch
-       store r to sp[sp_addr1]; f ^= e; store f to sp[sp_addr0]
-       sp_addr0 = sp_addr1 = 0; decrement counter; branch
-     epilogue (store register file ONCE)
+       mx ^= (r[readReg2] ^ r[readReg3]) as u32          # BEFORE the dataset XOR (D1)
+       r[i] ^= dataset[read_ptr + 8i]                    # i=0..7
+       swap(mx, ma)
+       prfm dataset[dataset_offset + (ma & CACHE_LINE_ALIGN_MASK)]   # post-swap ma, MASKED
+       sp[sp_addr1 + 8i]  = r[i]                         # i=0..7
+       f[i] ^= e[i]
+       sp[sp_addr0 + 16i] = f[i]                         # 16-byte write (stride differs from load!)
+       prfm sp[next sp_addr0] ; prfm sp[next sp_addr1]   # 2 lines (see 2026-08-29 audit)
+       sp_addr0 = 0 ; sp_addr1 = 0
+       counter -= 1 ; branch if nonzero
+     epilogue: store r, f, e to nreg ONCE  (a is loop-invariant, not stored)
 ```
+
+Ordering hazards that a reader must not "simplify" (each verified against
+`vm.rs`, line refs in the review on MR !1):
+
+- **`mx` is updated BEFORE the dataset XOR** (`vm.rs:1222-1226` precedes
+  `:1234-1236`). Doing it after would derive `mx` from post-XOR registers and
+  silently produce wrong hashes.
+- **`read_ptr` is captured from the pre-XOR `ma`** (`vm.rs:1216`), before the
+  `mx` update and before the swap.
+- **`sp_addr0` takes the LOW 32 bits of `sp_mix`, `sp_addr1` the HIGH 32**
+  (`vm.rs:1175`, `:1177`).
+- **`sp_addr0/1` are `^=`, not `=`.** They are initialised to `mx`/`ma` and
+  zeroed at the end of each iteration, so only the *first* iteration differs.
+  They are live values distinct from `mx`/`ma` — four separate registers.
+- **f loads read 8 bytes at stride 8; f stores write 16 bytes at stride 16.**
+  Asymmetric on purpose (packed i32 pair in, two f64 out).
+- **The prefetch targets `ma` after the swap, and must be masked.** This reaches
+  the same address as the reference implementation's prefetch-`mx`-then-swap;
+  do not "correct" it.
+- **Three prefetches per iteration:** one dataset, two scratchpad.
+
+**f/e prologue loads become dead.** f and e are assigned from the scratchpad at
+every loop head, including the first, so the 16 loads currently in
+`emit_prologue` for f/e are never read in the native-loop path. Only r and a
+need loading. The epilogue must still store f and e (the register file is hashed
+between chains).
 
 The body emission is **unchanged** — this MR adds scaffolding around it, it does
 not touch the 28 instruction emitters. That is the main reason it is reviewable.
@@ -117,8 +155,25 @@ type JitLoopFn = unsafe extern "C" fn(
 );
 ```
 
-`config` is no longer passed: everything it carried is either constant-folded
-into the code or held in a register.
+`config` is no longer passed at *call* time: everything it carried is either
+constant-folded into the emitted code or held in a register. That means it must
+be supplied at *compile* time, so `JitCompiler::compile` gains the per-program
+values it now bakes in:
+
+```rust
+pub(crate) fn compile(
+    &mut self,
+    bytecode: &[BytecodeInstruction],
+    version: RxVersion,
+    config: &ProgramConfiguration,  // readReg0..3, e_mask
+    ma: u32,                        // initial ma  (entropy(8) & CACHE_LINE_ALIGN_MASK)
+    mx: u32,                        // initial mx  (entropy(10))
+    dataset_offset: u64,
+);
+```
+
+Without this the compiler has no access to entropy at all (`compiler.rs:82`,
+call site `vm.rs:1161`) and §5.1 would be unimplementable.
 
 ## 5. New emission required
 
@@ -128,17 +183,24 @@ emitters.
 1. **Loop init** — `ma`/`mx` from entropy, `sp_addr0 = mx`, `sp_addr1 = ma`,
    counter = 2048.
 2. **Scratchpad address computation** — `EOR` + `AND` with `SCRATCHPAD_L3_MASK64`.
-3. **Register loads** — 8 × `LDR`+`EOR` for `r`; 4 × packed-i32→f64 for `f`;
-   4 × packed-i32→f64 + e-mask (`AND`/`ORR`) for `e`. The conversion helper
-   already exists as `emit_cvt_packed_int`.
+3. **Register loads** — 8 × `LDR`+`EOR` for `r` (XOR-accumulate); 4 ×
+   packed-i32→f64 **assignment** for `f` reading 8 bytes at stride 8; 4 ×
+   packed-i32→f64 + e-mask (`AND` `DYNAMIC_MANTISSA_MASK`, `ORR` `e_mask[i&1]`)
+   for `e` at `sp_addr1 + 32 + 8i`. The conversion helper already exists as
+   `emit_cvt_packed_int` (clobbers x0/x1, results in d25/d26).
 4. **Dataset read** — `AND` with `CACHE_LINE_ALIGN_MASK`, add `dataset_offset`
    and base, 8 × `LDR`+`EOR` into `r`.
 5. **`mx`/`ma` update and swap** — `EOR` with the two hardcoded read registers,
    then a register swap (no memory).
-6. **Prefetch** — `PRFM PLDL1KEEP`, both dataset and scratchpad, matching the
-   two-line behaviour established on 2026-08-29 (not four).
-7. **Register stores** — 8 × `STR` for `r`; `EOR` (`eor_v8b`) for `f ^= e`;
-   4 × 16-byte stores for `f`.
+6. **Prefetch** — `PRFM PLDL1KEEP` ×3 per iteration: one dataset line at
+   `dataset_offset + (ma & CACHE_LINE_ALIGN_MASK)` **after** the swap (the mask
+   is required — an unmasked address silently wastes the prefetch), plus the two
+   scratchpad lines established on 2026-08-29 (two, not four — see that audit
+   entry for why the `+64` pair was dead).
+7. **Register stores** — 8 × `STR` for `r` to `sp_addr1 + 8i`; `EOR`
+   (`eor_v8b`) for `f ^= e`; 4 × **16-byte** stores for `f` to `sp_addr0 + 16i`.
+   Note the deliberate asymmetry: f is *loaded* 8 bytes at stride 8 and *stored*
+   16 bytes at stride 16.
 8. **Loop control** — `SUBS` + `B.NE` back to loop head.
 
 Estimated addition: ~120–150 words of scaffolding emitted **once** per program,
@@ -149,14 +211,23 @@ replacing ~83 words executed **2048 times** plus the equivalent Rust loop body.
 | Stage | Content | Gate |
 |---|---|---|
 | A | `JitLoopFn` type, register map constants, emitter helpers still unused | builds; 87 vectors pass (path unused) |
-| B | Emit loop scaffolding; run it for **1 iteration** and compare register file against the Rust path | new differential test |
+| B | Emit loop scaffolding; differential-test against the Rust path at **N=2** iterations (see warning below) | new differential test |
 | C | Full 2048-iteration loop; wire into `execute_vm_inner` for v1+full only | 87 vectors + v2 vectors + JIT test |
-| D | Remove the now-dead per-iteration Rust path for that configuration | full suite; static word-count check |
+| D | Gate v1+full onto the native loop; keep the Rust loop live for every other configuration | full suite; instructions-retired check |
 
 Stage B is the critical one: a **differential test** that runs both paths from an
 identical starting register file and asserts bit-equality of the entire
 `NativeRegisterFile` and the scratchpad after N iterations. That catches errors
 the end-to-end vectors would only show as an opaque wrong hash.
+
+> **N=1 is not a sufficient gate.** `mx` is not consumed until the *following*
+> iteration's dataset read, so after a single iteration `nreg` and the scratchpad
+> are bit-identical whether or not the D1 ordering bug is present — the exact bug
+> this design originally contained. **Stage B gates on N=2**; N=1 is kept only as
+> a diagnostic for localising a failure. For the same reason the differential
+> harness must also write back `ma`, `mx`, `sp_addr0` and `sp_addr1` (via an
+> out-pointer or extended signature) and compare them, not just `nreg` and the
+> scratchpad.
 
 ## 7. Verification
 
@@ -164,11 +235,17 @@ the end-to-end vectors would only show as an opaque wrong hash.
   vectors, `test_vm_calculate_hash_jit` (full mode). Any failure blocks the MR.
 - **Differential test (new):** JIT-native-loop vs Rust-loop, bit-identical
   register file + scratchpad after 1, 2 and 2048 iterations.
-- **Performance:** expected ≈8% of executed JIT instructions removed. Per
-  AUDIT.md 2026-08-29 this machine cannot resolve <10% by wall-clock, so the
-  primary evidence is the **static emitted/executed instruction count**
-  (deterministic), with `benches/fullmode.rs` interleaved A/B as corroboration
-  only. **No performance claim will be made on wall-clock alone.**
+- **Performance — measure the right thing.** It is *wrong* to state this as
+  "≈8% of executed JIT instructions removed": the native loop **absorbs** work
+  currently done in Rust (scratchpad loads/stores, the i32→f64 conversions, the
+  dataset XOR), so JIT-instruction count per hash goes **up**. The real saving is
+  (a) the redundant spill/refill of the register file 16,384 times and (b) the
+  now-dead f/e prologue loads. The correct metric is therefore **total
+  instructions retired per hash across both Rust and JIT**, not a JIT-only ratio.
+  Per AUDIT.md 2026-08-29 this machine cannot resolve <10% by wall-clock
+  (within-version spread 11–19%), so instructions-retired is the primary
+  evidence, with `benches/fullmode.rs` interleaved A/B as corroboration only.
+  **No performance claim will be made on wall-clock alone.**
 - **Safety review:** the emitted code writes the scratchpad through raw pointers
   in a loop; a bad mask is a memory-safety bug, not just a wrong hash. Every mask
   and bound gets an explicit justification comment, as done for the dataset index

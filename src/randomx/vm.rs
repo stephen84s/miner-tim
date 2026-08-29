@@ -1277,6 +1277,15 @@ fn execute_vm_inner(
         // sp_addr0/sp_addr1 reset to 0, so the next values are simply
         // (sp_mix as u32) & MASK and ((sp_mix >> 32) as u32) & MASK
         // where sp_mix uses r-registers AFTER the dataset XOR above.
+        //
+        // Two lines, not four: each iteration touches exactly 64 bytes at
+        // sp_addr0 (r loads / f stores) and 64 at sp_addr1 (f+e loads / r
+        // stores), and SCRATCHPAD_L3_MASK64 makes both 64-byte aligned. Apple
+        // Silicon cache lines are 128 bytes (`hw.cachelinesize`), so each of
+        // those regions lies wholly within a single line. The `+64` prefetches
+        // this code used to issue therefore either re-fetched the same line or
+        // pulled an adjacent line that is never read — 32,768 wasted prefetches
+        // per hash plus the L1 pollution that comes with them.
         #[cfg(target_arch = "aarch64")]
         {
             let next_sp_mix = nreg.r(config.read_reg0) ^ nreg.r(config.read_reg1);
@@ -1284,16 +1293,11 @@ fn execute_vm_inner(
             let next_sp_addr1 = ((next_sp_mix >> 32) as u32 & SCRATCHPAD_L3_MASK64) as usize;
             let base = scratchpad.as_ptr();
             let a0 = base.add(next_sp_addr0);
-            let a1 = base.add(next_sp_addr0 + 64);
             let a2 = base.add(next_sp_addr1);
-            let a3 = base.add(next_sp_addr1 + 64);
             std::arch::asm!(
                 "prfm pldl1keep, [{a0}]",
-                "prfm pldl1keep, [{a1}]",
                 "prfm pldl1keep, [{a2}]",
-                "prfm pldl1keep, [{a3}]",
-                a0 = in(reg) a0, a1 = in(reg) a1,
-                a2 = in(reg) a2, a3 = in(reg) a3,
+                a0 = in(reg) a0, a2 = in(reg) a2,
                 options(nostack, readonly, preserves_flags),
             );
         }

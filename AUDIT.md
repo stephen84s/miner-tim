@@ -1225,3 +1225,82 @@ fresh-clone number is the meaningful one; re-check in a few days with
 3. Pre-existing wart, deliberately left alone: `.claude/worktrees/platform-neutral`
    is committed as a **gitlink** (mode 160000). Harmless but odd — worth
    untracking in a separate change if you care.
+
+## 2026-08-29 - Performance investigation: profiled hot paths; batch measured as a NULL result
+
+### Request
+"Go through the codebase and see where we can extract more performance, to
+improve on the work xmrig have done", then implement the recommended batch.
+
+### Profiling findings (all measured, not estimated)
+1. **Per-iteration register-file spill — the big one.** Our JIT compiles only the
+   256-instruction program *body*; the 2048-iteration loop stays in Rust, so the
+   whole register file is reloaded/stored across every iteration boundary.
+   Measured emission: **1024 words total, of which prologue+epilogue = 83 (8.1%)**,
+   executed 2048*8 = 16,384 times per hash ≈ **1.36M register save/restore ops
+   per hash**. xmrig avoids this entirely by generating the whole loop natively.
+   *This remains the single largest structural gap and is NOT addressed here.*
+2. **JIT compile cost = 4.10 us x 8 per hash = 1.46% of a ~2.25 ms mining hash**
+   (and ~1.8-2.2% under v2's 384-instruction programs). Split: 55% emit (a fresh
+   16 KB `Vec` per compile), 45% `write_code` (2x W^X toggles + ~4 KB memcpy +
+   `sys_icache_invalidate`).
+3. **Half the scratchpad prefetches were dead.** `hw.cachelinesize` on M2 Max is
+   **128 bytes**, not 64. Each iteration touches exactly 64 B at `sp_addr0` and
+   64 B at `sp_addr1`, both 64-B aligned by `SCRATCHPAD_L3_MASK64`, so each lies
+   wholly inside one line. The `+64` prefetches therefore re-fetched the same
+   line or pulled a line never read — 32,768 wasted prefetches per hash.
+4. Dataset read used bounds-checked indexing (16,384x/hash).
+
+**Ruled out:** allocation alignment (measured >=64 KB for scratchpad and dataset
+— no cache-line straddling, no action needed). Also confirmed v1 *cannot*
+prefetch the dataset more than one iteration ahead (the address depends on
+registers not yet computed) — precisely what RandomX v2's `mp` aliasing fixes,
+so our v2 port already earns that for free.
+
+### Implemented (kept)
+- `src/randomx/vm.rs` — dropped the two dead prefetches per iteration (4 -> 2),
+  with the 128-byte-cache-line reasoning recorded in the comment.
+- `src/randomx/jit/{compiler,aarch64}.rs` — `JitCompiler` now owns and reuses one
+  `Emitter` (added `Emitter::clear()`), eliminating 8 x 16 KB allocations per hash.
+- `benches/fullmode.rs` (new) — full-mode multi-threaded hashrate harness:
+  one shared precomputed dataset, N pipelined worker threads, no network, with a
+  post-dataset-build cooldown. The existing criterion bench is *light* mode,
+  where on-the-fly dataset-item computation swamps any main-loop change.
+
+### Reverted deliberately
+`RandomXDataset::get_item_unchecked` (bounds-check removal). The invariant was
+proven sound (`0x7FFF_FFC0` both 64-aligns and bounds the offset below
+`DATASET_BASE_SIZE`; max index 34,078,718 < 34,078,720) — but it delivered no
+measurable gain and added an `unsafe` API to a correctness-critical path. Same
+standard applied to the `emit_mem_addr` change on 2026-08-15. If the loop is ever
+moved into the JIT (finding 1) this becomes moot anyway.
+
+### Measurement: NULL RESULT (stated plainly)
+Interleaved A/B of old vs new binaries, cooldown between runs, via the new
+full-mode harness:
+
+| Phase | mean old | mean new | mean diff | 95% CI | verdict |
+|---|---|---|---|---|---|
+| 1 thread (6 paired rounds) | 502.9 H/s | 509.2 H/s | **+1.84%** | -35.6 .. +48.2 H/s | CI includes 0 |
+| 11 threads (4 paired rounds) | 4493.8 H/s | 4350.0 H/s | **-2.96%** | -488 .. +200 H/s | CI includes 0 |
+
+**No measurable performance change.** Per-round diffs flip sign in both phases
+(1T: -11.2%, +7.9%, +3.1%, -4.0%, -3.8%, +19.0%). This is consistent with the
+arithmetic: JIT compile was only 1.46% of hash time and only part of that was
+removed; the prefetch and bounds-check effects are smaller still.
+
+**Methodology finding (important for future work):** even this purpose-built
+full-mode harness, with interleaving and cooldowns, has a *within-version* spread
+of **11-19%** (1T: old alone ranged 462-550 H/s; 11T: 4258-4742). So this machine
+cannot resolve hashrate changes below roughly 10% by wall-clock benchmarking, not
+the ~3% previously assumed. Anything smaller must be established by deterministic
+proxies (static emitted-instruction counts, the microbenchmarks used above) or by
+hardware counters — never by comparing two mining runs.
+
+The two kept changes are retained on correctness//cleanliness grounds, not
+performance: the removed prefetches were provably dead, and the emitter reuse
+removes real allocation work. Neither is claimed to make the miner faster.
+
+### Verification
+- Full suite **96 passed, 0 failed** (87 v1 vectors bit-identical, v2 vectors,
+  commitment vectors); `cargo clippy --all-targets -- -D warnings` clean.

@@ -95,6 +95,13 @@ impl Emitter {
         self.code.len()
     }
 
+    /// Reset for reuse, keeping the allocated capacity. Lets a `JitCompiler`
+    /// emit every program into one buffer instead of allocating per compile.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.code.clear();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.code.is_empty()
     }

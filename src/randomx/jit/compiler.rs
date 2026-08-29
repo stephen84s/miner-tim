@@ -62,12 +62,16 @@ pub(crate) type JitFn = unsafe extern "C" fn(
 
 pub struct JitCompiler {
     memory: JitMemory,
+    /// Reused across compiles — a fresh `Emitter` per compile meant a 16 KB
+    /// allocation 8 times per hash (~55% of compile cost, measured).
+    emitter: Emitter,
 }
 
 impl JitCompiler {
     pub fn new() -> Result<Self, &'static str> {
         Ok(JitCompiler {
             memory: JitMemory::new(JIT_CODE_SIZE)?,
+            emitter: Emitter::new(),
         })
     }
 
@@ -76,13 +80,14 @@ impl JitCompiler {
     /// 384 for rx/2) — callers slice their max-size buffer to the program size.
     /// `version` selects version-dependent emission (v2: conditional CFROUND).
     pub(crate) fn compile(&mut self, bytecode: &[BytecodeInstruction], version: RxVersion) {
-        let mut e = Emitter::new();
-
-        emit_prologue(&mut e);
-        emit_body(&mut e, bytecode, version);
-        emit_epilogue(&mut e);
-
-        self.memory.write_code(&e.code);
+        {
+            let e = &mut self.emitter;
+            e.clear();
+            emit_prologue(e);
+            emit_body(e, bytecode, version);
+            emit_epilogue(e);
+        }
+        self.memory.write_code(&self.emitter.code);
     }
 
     /// Get the JIT function pointer.

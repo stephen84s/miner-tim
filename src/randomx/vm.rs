@@ -56,6 +56,19 @@ const DYNAMIC_MANTISSA_MASK: u64 = (1u64 << (MANTISSA_SIZE + DYNAMIC_EXPONENT_BI
 const ENTROPY_OFFSET: usize = 0; // entropy at the start
 const INSTRUCTIONS_OFFSET: usize = 16 * 8; // 128 bytes after entropy
 
+/// Loop-carried state of `execute_vm_inner`, returned so the native-loop JIT
+/// can be differentially tested against the interpreter. `ma`/`mx` are not
+/// consumed until the *following* iteration's dataset read, so comparing only
+/// the register file and scratchpad cannot detect an ordering error — see
+/// DESIGN_JIT_NATIVE_LOOP.md defect D2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LoopState {
+    pub ma: u32,
+    pub mx: u32,
+    pub sp_addr0: u32,
+    pub sp_addr1: u32,
+}
+
 /// RandomX algorithm version. `V1` = rx/0 (current mainnet), `V2` = rx/2
 /// (Monero HF v17, tevador/RandomX#317). See RANDOMX_V2_SEMANTICS.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -524,7 +537,7 @@ fn serialize_register_file(nreg: &NativeRegisterFile) -> [u8; 256] {
 // Program compilation (opcode -> bytecode)
 // ============================================================================
 
-fn compile_program(
+pub(crate) fn compile_program(
     program_bytes: &[u8], // raw program bytes (instructions start at offset 128)
     register_usage: &mut [i32; REGISTERS_COUNT],
     bytecode: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
@@ -1073,8 +1086,9 @@ fn execute_vm(
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
-) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version)
+    iterations: usize,
+) -> LoopState {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version, iterations)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -1087,8 +1101,40 @@ fn execute_vm(
     dataset: Option<&RandomXDataset>,
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     version: RxVersion,
-) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version)
+    iterations: usize,
+) -> LoopState {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version, iterations)
+}
+
+
+/// Derive the per-program parameters that the entropy block encodes.
+///
+/// Extracted so the native-loop JIT and the interpreter provably agree on them
+/// — the JIT bakes these in at compile time, so a divergent derivation would be
+/// invisible until hashes came out wrong.
+pub(crate) fn derive_program_params(
+    program_bytes: &[u8],
+) -> (ProgramConfiguration, u32, u32, u64) {
+    let entropy = |idx: usize| -> u64 {
+        let off = ENTROPY_OFFSET + idx * 8;
+        u64::from_le_bytes(program_bytes[off..off + 8].try_into().unwrap())
+    };
+
+    let ma = (entropy(8) as u32) & CACHE_LINE_ALIGN_MASK;
+    let mx = entropy(10) as u32;
+
+    let address_registers = entropy(12);
+    let config = ProgramConfiguration {
+        e_mask: [get_float_mask(entropy(14)), get_float_mask(entropy(15))],
+        read_reg0: (address_registers & 1) as usize,
+        read_reg1: 2 + ((address_registers >> 1) & 1) as usize,
+        read_reg2: 4 + ((address_registers >> 2) & 1) as usize,
+        read_reg3: 6 + ((address_registers >> 3) & 1) as usize,
+    };
+
+    let dataset_offset = (entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE as u64;
+
+    (config, ma, mx, dataset_offset)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,7 +1148,8 @@ fn execute_vm_inner(
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     #[cfg(target_arch = "aarch64")] mut jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
-) {
+    iterations: usize,
+) -> LoopState {
     // NOTE: Rounding mode is NOT reset per-chain. C++ resets once before all chains,
     // and lets CFROUND changes carry over between chains. Caller must call set_rounding_mode(0)
     // once before the chain loop.
@@ -1129,25 +1176,7 @@ fn execute_vm_inner(
         );
     }
 
-    let ma = (entropy(8) as u32) & CACHE_LINE_ALIGN_MASK;
-    let mx = entropy(10) as u32;
-
-    let address_registers = entropy(12);
-    let read_reg0 = (address_registers & 1) as usize;
-    let read_reg1 = 2 + ((address_registers >> 1) & 1) as usize;
-    let read_reg2 = 4 + ((address_registers >> 2) & 1) as usize;
-    let read_reg3 = 6 + ((address_registers >> 3) & 1) as usize;
-
-    let dataset_offset =
-        (entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE as u64;
-
-    let config = ProgramConfiguration {
-        e_mask: [get_float_mask(entropy(14)), get_float_mask(entropy(15))],
-        read_reg0,
-        read_reg1,
-        read_reg2,
-        read_reg3,
-    };
+    let (config, ma, mx, dataset_offset) = derive_program_params(program_bytes);
 
     // Compile program into pre-allocated buffer
     let program_size = version.program_size();
@@ -1169,7 +1198,7 @@ fn execute_vm_inner(
 
     // Main execution loop — all register accesses are unchecked since indices
     // are always valid (read_reg0..3 are 0-7, loop i is 0-7 or 0-3).
-    for _ic in 0..RANDOMX_PROGRAM_ITERATIONS {
+    for _ic in 0..iterations {
         unsafe {
         let sp_mix = nreg.r(config.read_reg0) ^ nreg.r(config.read_reg1);
         sp_addr0 ^= sp_mix as u32;
@@ -1306,6 +1335,81 @@ fn execute_vm_inner(
         sp_addr1 = 0;
         } // unsafe
     }
+
+    LoopState { ma: mem_ma, mx: mem_mx, sp_addr0, sp_addr1 }
+}
+
+
+// ---------------------------------------------------------------------------
+// Test-only hooks for the native-loop differential test
+// (DESIGN_JIT_NATIVE_LOOP.md stage B). These exist so the test exercises the
+// real interpreter loop rather than a re-implementation of it, which could
+// share the very bug under test.
+// ---------------------------------------------------------------------------
+
+/// Reset the FP rounding mode, mirroring `calculate_hash`'s
+/// `set_rounding_mode(0)` at the start of a hash. Both paths in the
+/// differential test must start from the same mode: CFROUND writes FPCR and
+/// deliberately never restores it (the mode carries across program chains), so
+/// running one path leaves the mode altered for the next.
+#[cfg(test)]
+pub(crate) fn reset_rounding_mode_for_test() {
+    set_rounding_mode(0);
+}
+
+/// Seed the loop's live inputs exactly as `execute_vm_inner` does: r zeroed,
+/// a-registers from the program entropy. The native-loop prologue reads both
+/// from `nreg`, so the JIT path must start from the same state.
+#[cfg(test)]
+pub(crate) fn init_registers_from_entropy_for_test(
+    nreg: &mut NativeRegisterFile,
+    program_bytes: &[u8],
+) {
+    let entropy = |idx: usize| -> u64 {
+        let off = ENTROPY_OFFSET + idx * 8;
+        u64::from_le_bytes(program_bytes[off..off + 8].try_into().unwrap())
+    };
+    nreg.r = [0u64; REGISTERS_COUNT];
+    for i in 0..REGISTER_COUNT_FLT {
+        nreg.a[i] = (
+            f64::from_bits(get_small_positive_float_bits(entropy(i * 2))),
+            f64::from_bits(get_small_positive_float_bits(entropy(i * 2 + 1))),
+        );
+    }
+}
+
+/// Run the real interpreter/body-JIT loop for `iterations` and return its
+/// loop-carried state.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_vm_for_test(
+    nreg: &mut NativeRegisterFile,
+    scratchpad: &mut [u8],
+    program_bytes: &[u8],
+    dataset: Option<&std::sync::Arc<RandomXDataset>>,
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
+    jit: Option<&mut super::jit::JitCompiler>,
+    version: RxVersion,
+    iterations: usize,
+) -> LoopState {
+    // Unused when `dataset` is Some (they only feed light mode's
+    // init_dataset_item), but the signature requires them.
+    let cache: Vec<u8> = Vec::new();
+    let mut ss_gen = Blake2Generator::new(b"diff-test", 0);
+    let dummy_programs: [SuperscalarProgram; 8] =
+        std::array::from_fn(|_| generate_superscalar(&mut ss_gen));
+    execute_vm(
+        nreg,
+        scratchpad,
+        program_bytes,
+        &cache,
+        &dummy_programs,
+        dataset.map(|d| d.as_ref()),
+        bytecode_buf,
+        jit,
+        version,
+        iterations,
+    )
 }
 
 // ============================================================================
@@ -1394,6 +1498,7 @@ fn calculate_hash_versioned(key: &[u8], input: &[u8], version: RxVersion) -> [u8
             #[cfg(target_arch = "aarch64")]
             None,
             version,
+            RANDOMX_PROGRAM_ITERATIONS,
         );
 
         if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1551,6 +1656,7 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1614,6 +1720,7 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1728,6 +1835,7 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
             );
             total_execute_vm += t.elapsed();
 

@@ -129,6 +129,13 @@ impl RandomXDataset {
         &self.items[item_number as usize]
     }
 
+    /// Raw pointer to the dataset backing store, for the native-loop JIT and
+    /// the differential test.
+    #[cfg(test)]
+    pub(crate) fn as_ptr_for_test(&self) -> *const u8 {
+        self.items.as_ptr() as *const u8
+    }
+
     /// Raw pointer to the dataset backing store, for prefetch hints.
     #[inline(always)]
     pub(crate) fn as_ptr(&self) -> *const u8 {

@@ -803,7 +803,7 @@ mod tests {
         // C1/C9). If either stopped being encodable the address computation
         // would need a temp register it does not have.
         assert!(
-            Emitter::encode_bitmask_imm(0x1FFC0).is_some(),
+            Emitter::encode_bitmask_imm(0x1FFFC0).is_some(),
             "SCRATCHPAD_L3_MASK64 must be encodable as bitmask immediate"
         );
         // CACHE_LINE_ALIGN_MASK. This one is the memory-safety bound on the

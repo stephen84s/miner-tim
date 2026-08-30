@@ -706,3 +706,173 @@ mod v2_jit_tests {
         );
     }
 }
+
+// ============================================================================
+// Native-loop JIT: differential test against the interpreter
+// (DESIGN_JIT_NATIVE_LOOP.md stage B)
+// ============================================================================
+#[cfg(all(test, target_arch = "aarch64"))]
+mod native_loop_diff_tests {
+    use crate::randomx::dataset::RandomXDataset;
+    use crate::randomx::jit::JitCompiler;
+    use crate::randomx::vm::{
+        self, BytecodeInstruction, NativeRegisterFile, RxVersion, RANDOMX_PROGRAM_SIZE,
+        RANDOMX_PROGRAM_SIZE_MAX,
+    };
+    use std::sync::Arc;
+
+    const SCRATCHPAD_L3_SIZE: usize = 2_097_152;
+
+    /// Deterministic pseudo-random program bytes + scratchpad, so both paths
+    /// start from byte-identical state.
+    fn make_program_bytes(seed: u8) -> Vec<u8> {
+        use crate::randomx::blake2gen::Blake2Generator;
+        let mut pb = vec![0u8; 128 + RANDOMX_PROGRAM_SIZE * 8];
+        let mut g = Blake2Generator::new(&[seed; 32], 0);
+        for b in pb.iter_mut() {
+            *b = g.get_byte();
+        }
+        pb
+    }
+
+    fn make_scratchpad(seed: u8) -> Vec<u8> {
+        use crate::randomx::blake2gen::Blake2Generator;
+        let mut sp = vec![0u8; SCRATCHPAD_L3_SIZE];
+        let mut g = Blake2Generator::new(&[seed ^ 0xA5; 32], 0);
+        // Fill a prefix deterministically; the rest stays zero. The masked
+        // addresses roam the whole 2 MiB either way.
+        for b in sp.iter_mut() {
+            *b = g.get_byte();
+        }
+        sp
+    }
+
+    /// Run both paths for `iters` iterations from identical state and assert
+    /// the register file, scratchpad and loop-carried state all match exactly.
+    fn assert_paths_agree(seed: u8, iters: usize, dataset: &Arc<RandomXDataset>) {
+        let program_bytes = make_program_bytes(seed);
+        let (config, ma, mx, dataset_offset) = vm::derive_program_params(&program_bytes);
+
+        let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut register_usage = [0i32; 8];
+        vm::compile_program(
+            &program_bytes,
+            &mut register_usage,
+            &mut bytecode,
+            RANDOMX_PROGRAM_SIZE,
+        );
+
+        // ---- reference: the interpreter/body-JIT path ----
+        // Both paths must start from the same FP rounding mode. CFROUND writes
+        // FPCR and never restores it (by design — the mode carries across
+        // chains), so without this the second path inherits the first path's
+        // final mode and FP results differ by 1 ULP.
+        vm::reset_rounding_mode_for_test();
+        let mut ref_nreg = NativeRegisterFile::new();
+        let mut ref_sp = make_scratchpad(seed);
+        let mut ref_bc: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut ref_jit = JitCompiler::new().expect("jit");
+        let ref_state = vm::execute_vm_for_test(
+            &mut ref_nreg,
+            &mut ref_sp,
+            &program_bytes,
+            Some(dataset),
+            &mut ref_bc,
+            Some(&mut ref_jit),
+            RxVersion::V1,
+            iters,
+        );
+
+        // ---- native loop ----
+        vm::reset_rounding_mode_for_test();
+        let mut jit = JitCompiler::new().expect("jit");
+        jit.compile_native_loop(
+            &bytecode[..RANDOMX_PROGRAM_SIZE],
+            RxVersion::V1,
+            &config,
+            ma,
+            mx,
+            dataset_offset,
+        );
+        let mut new_nreg = NativeRegisterFile::new();
+        // a-registers are the loop's only live input besides r; seed them the
+        // same way execute_vm_inner does, from the program entropy.
+        vm::init_registers_from_entropy_for_test(&mut new_nreg, &program_bytes);
+        let mut new_sp = make_scratchpad(seed);
+        let mut out = [0u64; 4];
+        unsafe {
+            let f = jit.get_loop_fn();
+            f(
+                &mut new_nreg as *mut NativeRegisterFile,
+                new_sp.as_mut_ptr(),
+                dataset.as_ptr_for_test(),
+                iters as u64,
+                out.as_mut_ptr(),
+            );
+        }
+
+        // ---- compare ----
+        assert_eq!(
+            new_nreg.r, ref_nreg.r,
+            "seed {seed}, {iters} iters: r-registers diverged"
+        );
+        for i in 0..4 {
+            assert_eq!(
+                (new_nreg.f[i].0.to_bits(), new_nreg.f[i].1.to_bits()),
+                (ref_nreg.f[i].0.to_bits(), ref_nreg.f[i].1.to_bits()),
+                "seed {seed}, {iters} iters: f[{i}] diverged"
+            );
+            assert_eq!(
+                (new_nreg.e[i].0.to_bits(), new_nreg.e[i].1.to_bits()),
+                (ref_nreg.e[i].0.to_bits(), ref_nreg.e[i].1.to_bits()),
+                "seed {seed}, {iters} iters: e[{i}] diverged"
+            );
+        }
+        assert!(
+            new_sp == ref_sp,
+            "seed {seed}, {iters} iters: scratchpad diverged"
+        );
+        // D2: ma/mx are not consumed until the following iteration, so these
+        // must be compared explicitly or an ordering bug hides at low N.
+        assert_eq!(
+            (out[0] as u32, out[1] as u32, out[2] as u32, out[3] as u32),
+            (
+                ref_state.ma,
+                ref_state.mx,
+                ref_state.sp_addr0,
+                ref_state.sp_addr1
+            ),
+            "seed {seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
+        );
+    }
+
+    /// Build a small dataset once for the whole module (full mode is required —
+    /// the native loop reads the dataset directly).
+    fn test_dataset() -> Arc<RandomXDataset> {
+        let vm_light = vm::RandomXVm::new(b"native loop test key");
+        let (cache, programs) = vm_light.cache_and_programs();
+        Arc::new(RandomXDataset::generate(cache, programs, 8))
+    }
+
+    /// The headline gate. N=1 cannot catch an mx-ordering error (design D2), so
+    /// N=2 is the minimum meaningful comparison; N=3 guards the steady state.
+    #[test]
+    #[ignore = "allocates the 2 GiB dataset; run explicitly"]
+    fn native_loop_matches_interpreter() {
+        let ds = test_dataset();
+        for seed in [1u8, 2, 7] {
+            assert_paths_agree(seed, 1, &ds);
+            assert_paths_agree(seed, 2, &ds);
+            assert_paths_agree(seed, 3, &ds);
+        }
+    }
+
+    #[test]
+    #[ignore = "allocates the 2 GiB dataset; run explicitly"]
+    fn native_loop_matches_interpreter_full_program() {
+        let ds = test_dataset();
+        assert_paths_agree(11, 2048, &ds);
+    }
+}

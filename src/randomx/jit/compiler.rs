@@ -76,6 +76,12 @@ pub(crate) type JitLoopFn = unsafe extern "C" fn(
     scratchpad: *mut u8,
     dataset: *const u8,
     iterations: u64,
+    // loop_state_out: receives [ma, mx, sp_addr0, sp_addr1] zero-extended to
+    // u64 when the loop exits. Written once, so it costs nothing per iteration.
+    // Required by the differential test: ma/mx are not consumed until the
+    // *following* iteration, so comparing only the register file and scratchpad
+    // cannot localise an ordering error (design D2).
+    loop_state_out: *mut u64,
 );
 
 /// Which ABI the currently-resident code was compiled for.
@@ -713,6 +719,268 @@ fn emit_cvt_packed_int(e: &mut Emitter) {
     e.emit(0xB9800400 | (reg::X1 << 5) | reg::X0); // LDRSW x0, [x1, #4]
     e.scvtf_dx(26, reg::X0);
 }
+
+// ============================================================================
+// Native iteration loop (DESIGN_JIT_NATIVE_LOOP.md)
+//
+// Emits the whole 2048-iteration loop so the RandomX register file stays
+// resident across iterations, instead of being spilled and refilled 16,384
+// times per hash by the body-only prologue/epilogue.
+//
+// v1 + full mode only. Light mode's dataset read is SuperscalarHash and v2
+// needs the AES F/E mix; both keep the body-only path.
+// ============================================================================
+
+/// Scratchpad address mask: (SCRATCHPAD_L3_SIZE/64 - 1) * 64.
+const SCRATCHPAD_L3_MASK64: u64 = 0x1F_FFC0;
+/// Dataset address mask. **Memory-safety critical** (design C1): the native
+/// loop performs no bounds check, and the worst-case read lands exactly one
+/// cache line short of `DATASET_TOTAL_SIZE`. Widening this by a single bit is
+/// a 2 GiB-scale out-of-bounds read, not merely a wrong hash.
+const CACHE_LINE_ALIGN_MASK: u64 = 0x7FFF_FFC0;
+
+const COND_NE: u32 = 1;
+
+impl JitCompiler {
+    /// Compile a program as a self-driving native loop.
+    ///
+    /// `config`, `init_ma`, `init_mx` and `dataset_offset` are baked in, so the
+    /// emitted code takes only (nreg, scratchpad, dataset, iterations).
+    #[allow(dead_code, clippy::too_many_arguments)] // wired up in stage C
+    pub(crate) fn compile_native_loop(
+        &mut self,
+        bytecode: &[BytecodeInstruction],
+        version: RxVersion,
+        config: &ProgramConfiguration,
+        init_ma: u32,
+        init_mx: u32,
+        dataset_offset: u64,
+    ) {
+        {
+            let e = &mut self.emitter;
+            e.clear();
+            emit_loop_prologue(e, config, init_ma, init_mx, dataset_offset);
+            let loop_head = e.len();
+            emit_iteration_pre(e, config);
+            emit_body(e, bytecode, version);
+            emit_iteration_post(e, config);
+            // counter -= 1; branch back while non-zero
+            e.subs_imm(reg::X28, reg::X28, 1);
+            let rel = loop_head as i32 - e.len() as i32;
+            e.b_cond(COND_NE, rel);
+            emit_loop_epilogue(e);
+        }
+        self.memory.write_code(&self.emitter.code);
+        self.kind = Some(CompiledKind::NativeLoop);
+    }
+}
+
+/// Save callee-saved state, capture arguments, load the register file once,
+/// and initialise loop state.
+fn emit_loop_prologue(
+    e: &mut Emitter,
+    config: &ProgramConfiguration,
+    init_ma: u32,
+    init_mx: u32,
+    dataset_offset: u64,
+) {
+    e.stp_pre(reg::FP, reg::LR, reg::SP, -16);
+    e.stp_pre(reg::X19, reg::X20, reg::SP, -16);
+    e.stp_pre(reg::X21, reg::X22, reg::SP, -16);
+    e.stp_pre(reg::X23, reg::X24, reg::SP, -16);
+    e.stp_pre(reg::X25, reg::X26, reg::SP, -16);
+    e.stp_pre(reg::X27, reg::X28, reg::SP, -16);
+    e.stp_fp_pre(reg::D8, reg::D9, reg::SP, -16);
+    e.stp_fp_pre(reg::D10, reg::D11, reg::SP, -16);
+    e.stp_fp_pre(reg::D12, reg::D13, reg::SP, -16);
+    e.stp_fp_pre(reg::D14, reg::D15, reg::SP, -16);
+
+    // Capture x2/x3 FIRST — `emit_cfround` uses both as scratch, so the first
+    // CFROUND in the body would otherwise destroy the incoming arguments.
+    e.mov_reg(reg::X22, reg::X2); // dataset base
+    e.mov_reg(reg::X28, reg::X3); // iteration count
+    e.mov_reg(reg::X23, reg::X4); // loop-state out-pointer
+    e.mov_reg(reg::X21, reg::X0); // nreg
+    e.mov_reg(reg::X16, reg::X1); // scratchpad
+
+    // Fold the loop-invariant dataset_offset into the base pointer, so the
+    // per-iteration address is just base + (ma & mask).
+    e.mov_imm64(reg::X0, dataset_offset);
+    e.add_reg(reg::X22, reg::X22, reg::X0);
+
+    // r[0..7] from nreg. f/e are deliberately NOT loaded: both are reassigned
+    // from the scratchpad at every loop head, so those 16 loads are dead here.
+    for i in 0..8u32 {
+        e.ldr_imm(8 + i, reg::X21, i * 8);
+    }
+    // a[0..3] (loop-invariant, never stored back)
+    for i in 0..8u32 {
+        e.ldr_fp_imm(16 + i, reg::X21, 192 + i * 8);
+    }
+
+    // e_mask stays in registers — `emit_fdiv_m` reads x19/x20 directly — but is
+    // now materialised as a constant instead of loaded through a config pointer.
+    e.mov_imm64(reg::X19, config.e_mask[0]);
+    e.mov_imm64(reg::X20, config.e_mask[1]);
+
+    e.mov_imm64(reg::X0, FSCAL_MASK);
+    e.fmov_dx(reg::D24, reg::X0);
+
+    // Loop state: ma, mx, and sp_addr0/sp_addr1 seeded from mx/ma respectively.
+    e.mov_imm64(reg::X24, init_ma as u64);
+    e.mov_imm64(reg::X25, init_mx as u64);
+    e.mov_imm64(reg::X26, init_mx as u64); // sp_addr0 = mx
+    e.mov_imm64(reg::X27, init_ma as u64); // sp_addr1 = ma
+}
+
+/// Per-iteration work before the program body: scratchpad addressing and the
+/// r/f/e loads.
+fn emit_iteration_pre(e: &mut Emitter, config: &ProgramConfiguration) {
+    // sp_mix = r[readReg0] ^ r[readReg1]   (64-bit)
+    e.eor_reg(reg::X0, r_reg(config.read_reg0), r_reg(config.read_reg1));
+
+    // sp_addr0 ^= low32(sp_mix); sp_addr0 &= MASK   (W-form: these are u32)
+    e.eor_reg_w(reg::X26, reg::X26, reg::X0);
+    e.and_bitmask(reg::X26, reg::X26, SCRATCHPAD_L3_MASK64, reg::X1);
+    // sp_addr1 ^= high32(sp_mix); sp_addr1 &= MASK
+    e.lsr_imm(reg::X1, reg::X0, 32);
+    e.eor_reg_w(reg::X27, reg::X27, reg::X1);
+    e.and_bitmask(reg::X27, reg::X27, SCRATCHPAD_L3_MASK64, reg::X1);
+
+    // r[i] ^= scratchpad[sp_addr0 + 8i]  (XOR-accumulate)
+    e.add_reg(reg::X2, reg::X16, reg::X26);
+    for i in 0..8u32 {
+        e.ldr_imm(reg::X3, reg::X2, i * 8);
+        e.eor_reg(r_reg(i as usize), r_reg(i as usize), reg::X3);
+    }
+
+    // f[i] = cvt_packed_i32(scratchpad[sp_addr1 + 8i])   (ASSIGN, stride 8)
+    for i in 0..4usize {
+        e.add_imm(reg::X0, reg::X27, (i as u32) * 8);
+        emit_cvt_packed_int(e); // -> d25 (lo), d26 (hi)
+        let (flo, fhi) = f_regs(i);
+        e.fmov_dd(flo, reg::D25);
+        e.fmov_dd(fhi, reg::D26);
+    }
+
+    // e[i] = mask(cvt_packed_i32(scratchpad[sp_addr1 + 32 + 8i]))
+    for i in 0..4usize {
+        e.add_imm(reg::X0, reg::X27, 32 + (i as u32) * 8);
+        emit_cvt_packed_int(e);
+        // (bits & DYNAMIC_MANTISSA_MASK) | e_mask[lane]
+        e.fmov_xd(reg::X0, reg::D25);
+        e.and_bitmask(reg::X0, reg::X0, DYNAMIC_MANTISSA_MASK, reg::X1);
+        e.orr_reg(reg::X0, reg::X0, reg::X19);
+        e.fmov_dx(reg::D25, reg::X0);
+        e.fmov_xd(reg::X0, reg::D26);
+        e.and_bitmask(reg::X0, reg::X0, DYNAMIC_MANTISSA_MASK, reg::X1);
+        e.orr_reg(reg::X0, reg::X0, reg::X20);
+        e.fmov_dx(reg::D26, reg::X0);
+        let (elo, ehi) = e_regs(i);
+        e.fmov_dd(elo, reg::D25);
+        e.fmov_dd(ehi, reg::D26);
+    }
+}
+
+/// Per-iteration work after the program body: dataset read, mx/ma update,
+/// prefetches, and the register stores.
+fn emit_iteration_post(e: &mut Emitter, config: &ProgramConfiguration) {
+    // read_ptr = dataset_base_with_offset + (ma & CACHE_LINE_ALIGN_MASK).
+    // Captured from the PRE-update ma (design C1 / ordering hazard list).
+    e.and_bitmask(reg::X0, reg::X24, CACHE_LINE_ALIGN_MASK, reg::X1);
+    e.add_reg(reg::X0, reg::X22, reg::X0);
+
+    // mx ^= (r[readReg2] ^ r[readReg3]) as u32 — BEFORE the dataset XOR.
+    // Reversing these two produces wrong hashes (see design §3, defect D1).
+    e.eor_reg(reg::X1, r_reg(config.read_reg2), r_reg(config.read_reg3));
+    e.eor_reg_w(reg::X25, reg::X25, reg::X1);
+
+    // r[i] ^= dataset[read_ptr + 8i]
+    for i in 0..8u32 {
+        e.ldr_imm(reg::X2, reg::X0, i * 8);
+        e.eor_reg(r_reg(i as usize), r_reg(i as usize), reg::X2);
+    }
+
+    // swap(mx, ma)
+    e.mov_reg(reg::X1, reg::X24);
+    e.mov_reg(reg::X24, reg::X25);
+    e.mov_reg(reg::X25, reg::X1);
+
+    // Prefetch the dataset line for a later iteration, from the post-swap ma.
+    // The mask is required — an unmasked address silently wastes the prefetch.
+    e.and_bitmask(reg::X0, reg::X24, CACHE_LINE_ALIGN_MASK, reg::X1);
+    e.prfm_reg(reg::X22, reg::X0);
+
+    // scratchpad[sp_addr1 + 8i] = r[i]
+    e.add_reg(reg::X0, reg::X16, reg::X27);
+    for i in 0..8u32 {
+        e.str_imm(r_reg(i as usize), reg::X0, i * 8);
+    }
+
+    // f[i] ^= e[i]  (v1; v2's AES mix keeps the body-only path for now)
+    for i in 0..4usize {
+        let (flo, fhi) = f_regs(i);
+        let (elo, ehi) = e_regs(i);
+        e.eor_v8b(flo, flo, elo);
+        e.eor_v8b(fhi, fhi, ehi);
+    }
+
+    // scratchpad[sp_addr0 + 16i] = f[i]  (16 bytes at stride 16 — note this is
+    // NOT the stride the f loads used; see design §3 ordering hazards)
+    e.add_reg(reg::X0, reg::X16, reg::X26);
+    for i in 0..4usize {
+        let (flo, fhi) = f_regs(i);
+        e.stp_fp_imm(flo, fhi, reg::X0, (i as i32) * 16);
+    }
+
+    // Prefetch next iteration's two scratchpad lines (two, not four — the +64
+    // pair was dead: Apple Silicon cache lines are 128 B, see AUDIT 2026-08-29).
+    e.eor_reg(reg::X0, r_reg(config.read_reg0), r_reg(config.read_reg1));
+    e.and_bitmask(reg::X1, reg::X0, SCRATCHPAD_L3_MASK64, reg::X2);
+    e.prfm_reg(reg::X16, reg::X1);
+    e.lsr_imm(reg::X1, reg::X0, 32);
+    e.and_bitmask(reg::X1, reg::X1, SCRATCHPAD_L3_MASK64, reg::X2);
+    e.prfm_reg(reg::X16, reg::X1);
+
+    // sp_addr0 = sp_addr1 = 0 (the next iteration XORs into them)
+    e.movz(reg::X26, 0, 0);
+    e.movz(reg::X27, 0, 0);
+}
+
+/// Store the register file once and restore callee-saved state.
+///
+/// FPCR is deliberately NOT restored: `emit_cfround` writes the rounding mode
+/// and RandomX requires it to carry across program chains. Containment is at
+/// the outer boundary in `vm.rs` (`save_rounding_mode` / `restore_rounding_mode`
+/// around the whole hash). Making this "ABI-clean" would break consensus.
+fn emit_loop_epilogue(e: &mut Emitter) {
+    // Loop-carried state out (ma, mx, sp_addr0, sp_addr1), zero-extended.
+    e.str_imm(reg::X24, reg::X23, 0);
+    e.str_imm(reg::X25, reg::X23, 8);
+    e.str_imm(reg::X26, reg::X23, 16);
+    e.str_imm(reg::X27, reg::X23, 24);
+    for i in 0..8u32 {
+        e.str_imm(8 + i, reg::X21, i * 8);
+    }
+    for i in 0..8u32 {
+        e.str_fp_imm(i, reg::X21, 64 + i * 8);
+    }
+    for i in 0..8u32 {
+        e.str_fp_imm(8 + i, reg::X21, 128 + i * 8);
+    }
+    e.ldp_fp_post(reg::D14, reg::D15, reg::SP, 16);
+    e.ldp_fp_post(reg::D12, reg::D13, reg::SP, 16);
+    e.ldp_fp_post(reg::D10, reg::D11, reg::SP, 16);
+    e.ldp_fp_post(reg::D8, reg::D9, reg::SP, 16);
+    e.ldp_post(reg::X27, reg::X28, reg::SP, 16);
+    e.ldp_post(reg::X25, reg::X26, reg::SP, 16);
+    e.ldp_post(reg::X23, reg::X24, reg::SP, 16);
+    e.ldp_post(reg::X21, reg::X22, reg::SP, 16);
+    e.ldp_post(reg::X19, reg::X20, reg::SP, 16);
+    e.ldp_post(reg::FP, reg::LR, reg::SP, 16);
+    e.ret();
+}
+
 
 #[cfg(test)]
 mod tests {

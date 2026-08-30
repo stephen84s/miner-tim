@@ -54,17 +54,53 @@ fn a_regs(idx: usize) -> (u32, u32) {
 }
 
 /// JIT function signature: (nreg, scratchpad, config) -> ()
+/// Body-only compilation: the caller drives the 2048-iteration loop.
 pub(crate) type JitFn = unsafe extern "C" fn(
     nreg: *mut NativeRegisterFile,
     scratchpad: *mut u8,
     config: *const ProgramConfiguration,
 );
 
+/// Native-loop JIT signature: (nreg, scratchpad, dataset, iterations) -> ()
+/// The emitted code runs the whole iteration loop itself, keeping the RandomX
+/// register file resident across iterations. `config` is not passed — its
+/// contents are baked in at compile time (readReg0..3) or held in registers
+/// (e_mask, in x19/x20).
+///
+/// See DESIGN_JIT_NATIVE_LOOP.md. Note `dataset` arrives in x2 and `iterations`
+/// in x3, both of which `emit_cfround` uses as scratch, so the prologue must
+/// capture them before emitting any body code.
+#[allow(dead_code)] // wired up in stage C
+pub(crate) type JitLoopFn = unsafe extern "C" fn(
+    nreg: *mut NativeRegisterFile,
+    scratchpad: *mut u8,
+    dataset: *const u8,
+    iterations: u64,
+);
+
+/// Which ABI the currently-resident code was compiled for.
+///
+/// `JitMemory::as_fn` is a `transmute_copy` guarded only by a pointer-size
+/// assert, and both signatures are pointer-sized — so nothing would catch
+/// calling native-loop code through [`JitFn`]. That mis-call is silent and
+/// nasty: x2 (a dataset pointer) would be dereferenced as a
+/// `*const ProgramConfiguration`. Both kinds are alive at once during the
+/// staged rollout, so the kind is tracked and asserted on every fetch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompiledKind {
+    /// Program body only; caller drives the loop.
+    Body,
+    /// Whole iteration loop emitted natively.
+    NativeLoop,
+}
+
 pub struct JitCompiler {
     memory: JitMemory,
     /// Reused across compiles — a fresh `Emitter` per compile meant a 16 KB
     /// allocation 8 times per hash (~55% of compile cost, measured).
     emitter: Emitter,
+    /// ABI of the resident code; guards the `get_*_fn` transmutes.
+    kind: Option<CompiledKind>,
 }
 
 impl JitCompiler {
@@ -72,6 +108,7 @@ impl JitCompiler {
         Ok(JitCompiler {
             memory: JitMemory::new(JIT_CODE_SIZE)?,
             emitter: Emitter::new(),
+            kind: None,
         })
     }
 
@@ -88,6 +125,7 @@ impl JitCompiler {
             emit_epilogue(e);
         }
         self.memory.write_code(&self.emitter.code);
+        self.kind = Some(CompiledKind::Body);
     }
 
     /// Get the JIT function pointer.
@@ -96,7 +134,28 @@ impl JitCompiler {
     /// `compile` must have been called first; the returned function must be
     /// invoked with valid nreg/scratchpad/config pointers.
     pub(crate) unsafe fn get_fn(&self) -> JitFn { unsafe {
+        debug_assert_eq!(
+            self.kind,
+            Some(CompiledKind::Body),
+            "get_fn() on code compiled for a different ABI — see CompiledKind"
+        );
         self.memory.as_fn::<JitFn>()
+    }}
+
+    /// Get the native-loop function pointer.
+    ///
+    /// # Safety
+    /// Native-loop code must have been compiled first; the returned function
+    /// must be invoked with valid nreg/scratchpad/dataset pointers and the
+    /// dataset must be at least `DATASET_TOTAL_SIZE` bytes.
+    #[allow(dead_code)] // wired up in stage C
+    pub(crate) unsafe fn get_loop_fn(&self) -> JitLoopFn { unsafe {
+        debug_assert_eq!(
+            self.kind,
+            Some(CompiledKind::NativeLoop),
+            "get_loop_fn() on code compiled for a different ABI — see CompiledKind"
+        );
+        self.memory.as_fn::<JitLoopFn>()
     }}
 }
 

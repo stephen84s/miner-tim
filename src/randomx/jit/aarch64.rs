@@ -71,6 +71,15 @@ pub mod reg {
     pub const D22: u32 = 22;
     pub const D23: u32 = 23;
     pub const D24: u32 = 24;
+    // d25/d26 are body-clobbered scratch (emit_cvt_packed_int, emit_fswap_r).
+    // d27-d31 are unreferenced and genuinely free.
+    pub const D25: u32 = 25;
+    pub const D26: u32 = 26;
+    pub const D27: u32 = 27;
+    pub const D28: u32 = 28;
+    pub const D29: u32 = 29;
+    pub const D30: u32 = 30;
+    pub const D31: u32 = 31;
 }
 
 /// Code emitter — wraps a Vec<u32> of ARM64 instruction words.
@@ -140,6 +149,51 @@ impl Emitter {
     pub fn sub_imm(&mut self, rd: u32, rn: u32, imm12: u32) {
         debug_assert!(imm12 < 4096);
         self.emit(0xD1000000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd);
+    }
+
+    /// SUBS Xd, Xn, #imm12 (64-bit, sets flags).
+    /// Distinct from `sub_imm`, which is plain SUB and does NOT set flags —
+    /// the native-loop counter needs the flag-setting form.
+    pub fn subs_imm(&mut self, rd: u32, rn: u32, imm12: u32) {
+        debug_assert!(imm12 < 4096);
+        self.emit(0xF1000000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd);
+    }
+
+    /// EOR Wd, Wn, Wm (32-bit XOR; zeroes bits 63:32 of Xd).
+    /// Used for the `ma`/`mx`/`sp_addr` updates, which are `u32` in the Rust
+    /// path — a 64-bit EOR would leave the upper half polluted and diverge from
+    /// the reference state the differential test compares against.
+    pub fn eor_reg_w(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.emit(0x4A000000 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    /// PRFM PLDL1KEEP, [Xn, Xm] (register offset)
+    pub fn prfm_reg(&mut self, rn: u32, rm: u32) {
+        self.emit(0xF8A06800 | (rm << 16) | (rn << 5));
+    }
+
+    /// PRFM PLDL1KEEP, [Xn, #imm] (unsigned offset, scaled by 8)
+    pub fn prfm_imm(&mut self, rn: u32, byte_offset: u32) {
+        debug_assert!(byte_offset.is_multiple_of(8));
+        let scaled = byte_offset / 8;
+        debug_assert!(scaled < 4096);
+        self.emit(0xF9800000 | (scaled << 10) | (rn << 5));
+    }
+
+    /// STP Dt1, Dt2, [Xn, #imm] (signed offset, scaled by 8, no writeback).
+    /// The f-registers are stored as 16 bytes at stride 16; the existing
+    /// `stp_fp_pre` mutates the base pointer and is unusable here.
+    pub fn stp_fp_imm(&mut self, dt1: u32, dt2: u32, rn: u32, byte_offset: i32) {
+        debug_assert!(byte_offset % 8 == 0);
+        let imm7 = ((byte_offset / 8) as u32) & 0x7F;
+        self.emit(0x6D000000 | (imm7 << 15) | (dt2 << 10) | (rn << 5) | dt1);
+    }
+
+    /// LDP Dt1, Dt2, [Xn, #imm] (signed offset, scaled by 8, no writeback)
+    pub fn ldp_fp_imm(&mut self, dt1: u32, dt2: u32, rn: u32, byte_offset: i32) {
+        debug_assert!(byte_offset % 8 == 0);
+        let imm7 = ((byte_offset / 8) as u32) & 0x7F;
+        self.emit(0x6D400000 | (imm7 << 15) | (dt2 << 10) | (rn << 5) | dt1);
     }
 
     /// NEG Xd, Xn (= SUB Xd, XZR, Xn)
@@ -744,6 +798,21 @@ mod tests {
         // SCRATCHPAD_L3_MASK = 0x1FFFF8
         let result = Emitter::encode_bitmask_imm(0x1FFFF8);
         assert!(result.is_some(), "L3 mask must be encodable as bitmask immediate");
+
+        // Masks the native loop additionally needs (DESIGN_JIT_NATIVE_LOOP.md
+        // C1/C9). If either stopped being encodable the address computation
+        // would need a temp register it does not have.
+        assert!(
+            Emitter::encode_bitmask_imm(0x1FFC0).is_some(),
+            "SCRATCHPAD_L3_MASK64 must be encodable as bitmask immediate"
+        );
+        // CACHE_LINE_ALIGN_MASK. This one is the memory-safety bound on the
+        // JIT dataset read: the native loop has no bounds check, and the
+        // worst-case read ends one cache line short of DATASET_TOTAL_SIZE.
+        assert!(
+            Emitter::encode_bitmask_imm(0x7FFFFFC0).is_some(),
+            "CACHE_LINE_ALIGN_MASK must be encodable as bitmask immediate"
+        );
     }
 
     #[test]
@@ -789,5 +858,58 @@ mod tests {
         e.add_reg_shifted(reg::X8, reg::X9, reg::X10, 2);
         let expected = 0x8B000000 | (reg::X10 << 16) | (2 << 10) | (reg::X9 << 5) | reg::X8;
         assert_eq!(e.code[0], expected);
+    }
+
+    // ---- native-loop encoders (DESIGN_JIT_NATIVE_LOOP.md C7) ----
+    // Every expected word below was produced by `as -arch arm64`.
+
+    #[test]
+    fn test_subs_imm_sets_flags() {
+        // subs x28, x28, #1 -> 0xF100079C. Distinct from sub_imm (0xD1...),
+        // which does NOT set flags and cannot drive the loop counter.
+        let mut e = Emitter::new();
+        e.subs_imm(reg::X28, reg::X28, 1);
+        assert_eq!(e.code[0], 0xF100079C);
+        let mut e = Emitter::new();
+        e.subs_imm(reg::X0, reg::X1, 4095);
+        assert_eq!(e.code[0], 0xF13FFC20);
+        // guard against a regression to the non-flag-setting form
+        let mut e = Emitter::new();
+        e.sub_imm(reg::X28, reg::X28, 1);
+        assert_ne!(e.code[0], 0xF100079C, "sub_imm must not set flags");
+    }
+
+    #[test]
+    fn test_eor_reg_w() {
+        // eor w25, w25, w0 -> 0x4A000339 (32-bit; zeroes bits 63:32)
+        let mut e = Emitter::new();
+        e.eor_reg_w(reg::X25, reg::X25, reg::X0);
+        assert_eq!(e.code[0], 0x4A000339);
+    }
+
+    #[test]
+    fn test_prfm() {
+        let mut e = Emitter::new();
+        e.prfm_reg(reg::X22, reg::X24);
+        assert_eq!(e.code[0], 0xF8B86AC0); // prfm pldl1keep, [x22, x24]
+        let mut e = Emitter::new();
+        e.prfm_imm(reg::X16, 64);
+        assert_eq!(e.code[0], 0xF9802200); // prfm pldl1keep, [x16, #64]
+        let mut e = Emitter::new();
+        e.prfm_imm(reg::X16, 0);
+        assert_eq!(e.code[0], 0xF9800200); // prfm pldl1keep, [x16]
+    }
+
+    #[test]
+    fn test_stp_ldp_fp_imm() {
+        let mut e = Emitter::new();
+        e.stp_fp_imm(reg::D0, reg::D1, reg::X0, 0);
+        assert_eq!(e.code[0], 0x6D000400); // stp d0, d1, [x0]
+        let mut e = Emitter::new();
+        e.stp_fp_imm(reg::D2, reg::D3, reg::X0, 16);
+        assert_eq!(e.code[0], 0x6D010C02); // stp d2, d3, [x0, #16]
+        let mut e = Emitter::new();
+        e.ldp_fp_imm(reg::D0, reg::D1, reg::X0, 32);
+        assert_eq!(e.code[0], 0x6D420400); // ldp d0, d1, [x0, #32]
     }
 }

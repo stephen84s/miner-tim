@@ -129,22 +129,49 @@ registers. (`x18` is reserved on macOS and remains unused.)
 | `x19`,`x20` | `e_mask[0]`, `e_mask[1]` | existing |
 | `x21` | `nreg` pointer (for the single final store) | existing |
 | `x22` | dataset base pointer | **new** |
-| `x23` | `dataset_offset` | **new** |
+| ~~`x23`~~ | ~~`dataset_offset`~~ — dropped, folded into x22 (C6) | n/a |
 | `x24` | `ma` | **new** |
 | `x25` | `mx` | **new** |
 | `x26` | `sp_addr0` | **new** |
 | `x27` | `sp_addr1` | **new** |
 | `x28` | iteration counter | **new** |
-| `x0`–`x7`, `x17` | temporaries | existing |
+| `x0`–`x3` | body temporaries (x2/x3 also CFROUND scratch — see capture order) | existing |
+| `x4`–`x7`, `x17` | free — unreferenced by every emitter | free |
 | `d0`–`d7` / `d8`–`d15` / `d16`–`d23` | `f` / `e` / `a` | existing |
 | `d24` | FSCAL mask | existing |
-| `d25`–`d31` | temporaries (FP conversion) | existing/free |
+| `d25`,`d26` | **body-clobbered** scratch (cvt / fswap) — no loop state here | existing |
+| `d27`–`d31` | genuinely free | free |
 
-`readReg0..3` and `e_mask` are **compile-time constants** for a given program
-(derived from program entropy), so register selection is baked into the emitted
-code rather than loaded through the config pointer — a small bonus win.
+`readReg0..3` are **compile-time constants** for a given program (derived from
+program entropy), so register selection is baked into the emitted code rather
+than read through the config pointer — a small bonus win.
+
+**`e_mask` is NOT constant-folded.** `emit_fdiv_m` reads it *as registers*
+x19/x20 (`compiler.rs:519`, `:524`), and §3 promises the body emitters are
+untouched. What changes is only the *source* of those registers: the prologue's
+`ldr_imm(X19, X2, 0)` / `ldr_imm(X20, X2, 8)` (`compiler.rs:137-138`) become
+`mov_imm64(X19, e_mask[0])` / `mov_imm64(X20, e_mask[1])`. e_mask stays in
+registers for the whole loop.
 
 New JIT function signature:
+
+**Argument capture order is mandatory, not stylistic.** `emit_cfround` uses x2
+(`compiler.rs:607`, `:609`) and x3 (`:608`, `:609`) as temporaries, so the first
+CFROUND in the body destroys both incoming arguments. The new prologue must
+therefore, immediately after the ten `stp_pre` saves and **before anything
+else**, emit:
+
+```
+mov x22, x2      # dataset base   - x2 is CFROUND scratch, capture first
+mov x28, x3      # iteration count - x3 is CFROUND scratch, capture first
+mov x21, x0      # nreg
+mov x16, x1      # scratchpad
+<32 register-file loads off x0>
+mov_imm64 x19/x20 <- e_mask         (see D1 note above)
+mov_imm64 x0, FSCAL_MASK ; fmov d24, x0    # x0 clobbered last, after its final use
+```
+
+After this point x0–x3 are dead and free as temporaries.
 
 ```rust
 type JitLoopFn = unsafe extern "C" fn(
@@ -205,6 +232,80 @@ emitters.
 
 Estimated addition: ~120–150 words of scaffolding emitted **once** per program,
 replacing ~83 words executed **2048 times** plus the equivalent Rust loop body.
+
+
+## 5a. Implementation constraints (from the MR !1 ABI review)
+
+These are not suggestions; violating any of them is a correctness or
+memory-safety bug.
+
+**C1 — The dataset AND mask must remain literally `0x7FFF_FFC0`.** The JIT path
+has *no bounds check* (the Rust path went through `RandomXDataset::get_item`).
+Worst case: `dataset_offset` max `524287*64 = 33,554,368`, `(ma & mask)` max
+`2,147,483,584`, so the last byte read is `2,181,038,016` against a
+`DATASET_TOTAL_SIZE` of `2,181,038,080` — **64 bytes, one single cache line, of
+margin.** (The review stated this as exactly zero margin; it conflated
+`DATASET_EXTRA_ITEMS` = 524287 with `DATASET_EXTRA_SIZE/64` = 524288. One line
+of margin, not none — but the practical conclusion is identical.) Widening the
+mask by one bit, or letting `dataset_offset` exceed its modulus, is a 2 GiB-scale
+out-of-bounds read, not a wrong hash. The mask is encodable as a bitmask
+immediate (`and x24, x24, #0x7fffffc0` = `0x927A6318`) so it needs no temp.
+
+**C2 — The emitted loop must contain no `BL`.** x8–x15 (`r`), d0–d7 (`f`),
+d16–d23 (`a`), d24 (FSCAL mask), x16/x17 are all caller-saved and all live
+across the loop; a single call to an external routine legally destroys every one
+of them. This is what permanently forecloses hoisting light mode's
+`init_dataset_item` into the native loop, and is consistent with §8 item 3.
+
+**C3 — The epilogue must NOT save/restore FPCR.** `emit_cfround` writes FPCR and
+deliberately never restores it: the RandomX rounding mode carries across program
+chains (`vm.rs:1106-1108`). It is contained at the outer boundary instead —
+`save_rounding_mode()` (`vm.rs:1344`), `set_rounding_mode(0)` (`:1372`),
+`restore_rounding_mode()` (`:1427`). A well-meaning "make the JIT ABI-clean"
+change here would silently break consensus.
+
+**C4 — `JitMemory::as_fn` cannot distinguish the two ABIs.** It is a
+`transmute_copy` guarded only by a pointer-size assert (`memory.rs:93-99`), and
+both `JitFn` (3 args) and `JitLoopFn` (4 args) are pointer-sized. Calling loop
+code through the old signature silently dereferences a dataset pointer as a
+`*const ProgramConfiguration`. Since stages A–C keep both alive, `JitCompiler`
+must record which kind it last compiled and `debug_assert!` it in `get_fn()` and
+a new `get_loop_fn()`.
+
+**C5 — Use W-forms for `ma`/`mx`/`sp_addr` updates.** These are `u32` in Rust
+(`vm.rs:1222-1226`); 64-bit `EOR` would leave bits 63:32 polluted. Numerically
+harmless — the masks clear everything ≥ bit 31 before use — but it diverges from
+the Rust state and would undermine Stage B's bit-equality premise once the
+differential test compares `ma`/`mx` (which D2 requires it to).
+
+**C6 — `x23` is unnecessary; fold `dataset_offset` into the base pointer.**
+`dataset_base + dataset_offset` is loop-invariant, so compute it once into x22
+and drop x23 from the allocation. (`vm.rs:1216` re-adds them every iteration for
+no reason.) Headroom is also larger than §4 implies: x4–x7 and x17 are entirely
+unreferenced by any emitter, so the free-temp budget is 9, not 4.
+
+**C7 — Encoders that do not yet exist** and must be added to `aarch64.rs`
+(all verified against `as -arch arm64`):
+- `SUBS Xd,Xn,#imm` = `0xF1000000` — the existing `sub_imm` is `0xD1000000`,
+  which does **not** set flags, so the loop counter needs a new encoder
+  (`subs x28,x28,#1` = `0xF100079C`).
+- `PRFM PLDL1KEEP` register-offset `0xF8A06800` and immediate-offset `0xF9800000`.
+- 32-bit W-forms for `EOR` (`0x4A000000`) and `AND`-immediate (`0x12000000`);
+  every existing ALU encoder is hardcoded 64-bit (per C5).
+- A signed-offset `STP Dt1,Dt2,[Xn,#imm]` plus a temp holding `x16 + sp_addr0`,
+  because f is stored 16 bytes at stride 16 from `sp_addr0` while f and e are
+  loaded 8 bytes at stride 8 from `sp_addr1`.
+
+**C8 — d25/d26 are body-clobbered scratch, not free.** `emit_cvt_packed_int`
+writes both; `emit_fswap_r` writes d25. No loop state may live there across the
+body. d27–d31 are genuinely unreferenced. §4's table is corrected accordingly.
+
+**C9 — Hygiene worth doing while here:** add `D25`–`D31` to the `reg` module (d25
+/d26 are currently bare literals, so nothing prevents a future collision with
+d24); add `0x1FFFC0` and `0x7FFFFFC0` to `test_bitmask_imm_scratchpad_masks`
+(both assemble cleanly, so the assertion is free); assert that CBRANCH targets
+stay within the body once it is emitted at a non-zero offset inside the loop
+scaffolding.
 
 ## 6. Staging (each stage keeps the tree green)
 

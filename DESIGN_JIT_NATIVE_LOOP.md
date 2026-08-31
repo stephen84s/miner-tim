@@ -321,7 +321,11 @@ identical starting register file and asserts bit-equality of the entire
 `NativeRegisterFile` and the scratchpad after N iterations. That catches errors
 the end-to-end vectors would only show as an opaque wrong hash.
 
-> **N=1 is not a sufficient gate.** `mx` is not consumed until the *following*
+> **UPDATE (review round 3):** with the loop-state out-pointer in place, N=1
+> *does* now catch the D1 ordering bug, so the warning below is partly stale.
+> N=2 is retained anyway as belt-and-braces. The original reasoning:
+>
+> **N=1 was not a sufficient gate.** `mx` is not consumed until the *following*
 > iteration's dataset read, so after a single iteration `nreg` and the scratchpad
 > are bit-identical whether or not the D1 ordering bug is present — the exact bug
 > this design originally contained. **Stage B gates on N=2**; N=1 is kept only as
@@ -329,6 +333,39 @@ the end-to-end vectors would only show as an opaque wrong hash.
 > harness must also write back `ma`, `mx`, `sp_addr0` and `sp_addr1` (via an
 > out-pointer or extended signature) and compare them, not just `nreg` and the
 > scratchpad.
+
+## 6a. What the tests CANNOT cover (review round 3)
+
+Stated explicitly so nobody mistakes green tests for full coverage:
+
+- **The three prefetches are unverifiable.** `PRFM` never faults and changes no
+  architectural state, so a wrong register, a missing mask, or a pre- vs
+  post-swap error is invisible to the differential test *and* to the end-to-end
+  vectors — and §7 already rules out wall-clock detection at this effect size.
+  They are correct by construction and code review only.
+- **CI can never run any of this.** `pub mod jit` is
+  `#[cfg(target_arch = "aarch64")]` and the GitLab runners are x86_64 Linux, so
+  the emitter does not compile there, let alone execute. The differential tests
+  are therefore a **mandatory local gate**, not a CI backstop. They now run in
+  the default `cargo test` rather than behind `#[ignore]`, so `make test` on an
+  Apple Silicon machine is the real gate.
+- **The differential test validates the scaffolding, not the body.** Both paths
+  go through the same `emit_body`, so anything shared by both prologues — the
+  `NativeRegisterFile` offsets, `FSCAL_MASK`, `DYNAMIC_MANTISSA_MASK` — passes
+  the diff test and can only fail the end-to-end vectors. Conversely it *does*
+  uniquely validate that no body emitter clobbers the values the native loop
+  hoists out of the loop (x16, x19/x20, d16–d23, d24), which the body-only path
+  would silently recover from by reloading them each iteration.
+- **Correction to a standing assumption:** the 87 vectors largely do **not**
+  exercise the JIT body. `vm::calculate_hash` passes `None` for the JIT, so the
+  light-mode vectors run the interpreter; only about four hashes in the suite
+  execute JIT-emitted code end to end. Per-opcode coverage within those is
+  saturated, but program-space variety is thin.
+- **`sp_addr0`/`sp_addr1` in the loop-state comparison are vacuous** (both sides
+  zero them every iteration). Only `ma`/`mx` carry signal there.
+- **`readReg0..3` cannot alias** — they are derived into disjoint ranges
+  {0,1},{2,3},{4,5},{6,7}, so there is no aliasing case to test. 4 of 16
+  combinations are currently covered.
 
 ## 7. Verification
 

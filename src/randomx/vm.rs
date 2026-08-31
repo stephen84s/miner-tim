@@ -1357,6 +1357,17 @@ pub(crate) fn reset_rounding_mode_for_test() {
     set_rounding_mode(0);
 }
 
+/// Read the current FP rounding mode, so the differential test can confirm
+/// both paths leave it in the same state (design C3).
+#[cfg(test)]
+pub(crate) fn read_rounding_mode_for_test() -> u64 {
+    // save_rounding_mode returns u32 on x86_64 and u64 on aarch64; widen.
+    #[allow(clippy::useless_conversion)]
+    {
+        save_rounding_mode() as u64
+    }
+}
+
 /// Seed the loop's live inputs exactly as `execute_vm_inner` does: r zeroed,
 /// a-registers from the program entropy. The native-loop prologue reads both
 /// from `nreg`, so the JIT path must start from the same state.

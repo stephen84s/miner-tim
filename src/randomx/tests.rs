@@ -739,8 +739,9 @@ mod native_loop_diff_tests {
         use crate::randomx::blake2gen::Blake2Generator;
         let mut sp = vec![0u8; SCRATCHPAD_L3_SIZE];
         let mut g = Blake2Generator::new(&[seed ^ 0xA5; 32], 0);
-        // Fill a prefix deterministically; the rest stays zero. The masked
-        // addresses roam the whole 2 MiB either way.
+        // Fills the whole 2 MiB deterministically (~32k Blake2b compressions,
+        // ~10 ms). A partially-zero scratchpad would weaken the comparison,
+        // since masked addresses roam the entire region.
         for b in sp.iter_mut() {
             *b = g.get_byte();
         }
@@ -784,6 +785,7 @@ mod native_loop_diff_tests {
             RxVersion::V1,
             iters,
         );
+        let ref_fpcr = vm::read_rounding_mode_for_test();
 
         // ---- native loop ----
         vm::reset_rounding_mode_for_test();
@@ -812,6 +814,7 @@ mod native_loop_diff_tests {
                 out.as_mut_ptr(),
             );
         }
+        let native_fpcr = vm::read_rounding_mode_for_test();
 
         // ---- compare ----
         assert_eq!(
@@ -834,8 +837,14 @@ mod native_loop_diff_tests {
             new_sp == ref_sp,
             "seed {seed}, {iters} iters: scratchpad diverged"
         );
-        // D2: ma/mx are not consumed until the following iteration, so these
-        // must be compared explicitly or an ordering bug hides at low N.
+        // D2: ma/mx are not consumed until the *following* iteration, so
+        // comparing only nreg+scratchpad cannot detect an ordering error. These
+        // carry the real signal.
+        //
+        // NOTE: sp_addr0/sp_addr1 are zeroed at the end of every iteration on
+        // both sides, so those two comparisons are structurally 0 == 0. They
+        // are kept as a guard against that zeroing being dropped, but they
+        // prove nothing about addressing — do not read them as coverage.
         assert_eq!(
             (out[0] as u32, out[1] as u32, out[2] as u32, out[3] as u32),
             (
@@ -846,23 +855,35 @@ mod native_loop_diff_tests {
             ),
             "seed {seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
         );
+        // The rounding mode must evolve identically. An epilogue that saved and
+        // restored FPCR — the C3 violation the design warns about — would pass
+        // every assertion above and only surface as a wrong hash across chains.
+        assert_eq!(
+            native_fpcr, ref_fpcr,
+            "seed {seed}, {iters} iters: final FP rounding mode diverged"
+        );
     }
 
-    /// Build a small dataset once for the whole module (full mode is required —
-    /// the native loop reads the dataset directly).
+    /// The 2 GiB dataset, built once for the whole module. Previously built
+    /// per test function, which meant two concurrent 2 GiB allocations plus two
+    /// 256 MiB Argon2d caches when both tests ran.
     fn test_dataset() -> Arc<RandomXDataset> {
-        let vm_light = vm::RandomXVm::new(b"native loop test key");
-        let (cache, programs) = vm_light.cache_and_programs();
-        Arc::new(RandomXDataset::generate(cache, programs, 8))
+        static DS: std::sync::LazyLock<Arc<RandomXDataset>> = std::sync::LazyLock::new(|| {
+            let vm_light = vm::RandomXVm::new(b"native loop test key");
+            let (cache, programs) = vm_light.cache_and_programs();
+            Arc::new(RandomXDataset::generate(cache, programs, 8))
+        });
+        DS.clone()
     }
 
     /// The headline gate. N=1 cannot catch an mx-ordering error (design D2), so
     /// N=2 is the minimum meaningful comparison; N=3 guards the steady state.
     #[test]
-    #[ignore = "allocates the 2 GiB dataset; run explicitly"]
     fn native_loop_matches_interpreter() {
         let ds = test_dataset();
-        for seed in [1u8, 2, 7] {
+        // seed 78 has dataset_offset at 99.67% of its maximum, exercising the
+        // widest address arithmetic reachable; the others spread readReg0..3.
+        for seed in [1u8, 2, 7, 78] {
             assert_paths_agree(seed, 1, &ds);
             assert_paths_agree(seed, 2, &ds);
             assert_paths_agree(seed, 3, &ds);
@@ -870,7 +891,6 @@ mod native_loop_diff_tests {
     }
 
     #[test]
-    #[ignore = "allocates the 2 GiB dataset; run explicitly"]
     fn native_loop_matches_interpreter_full_program() {
         let ds = test_dataset();
         assert_paths_agree(11, 2048, &ds);

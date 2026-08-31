@@ -756,6 +756,23 @@ impl JitCompiler {
         init_mx: u32,
         dataset_offset: u64,
     ) {
+        // The emitted loop is v1 + full-mode ONLY. `emit_iteration_post`
+        // unconditionally emits v1's `f ^= e` and v1's mx-aliasing; a v2 program
+        // would need the AES F/E mix and `mp` aliasing instead, and light mode
+        // has no dataset to read. Neither mistake is detectable by the
+        // differential test (it only ever exercises v1+full), so it is asserted
+        // here rather than left to the caller. See DESIGN_JIT_NATIVE_LOOP.md §2.
+        assert_eq!(
+            version,
+            RxVersion::V1,
+            "native loop is v1-only; v2 needs the AES F/E mix and mp aliasing"
+        );
+        // Memory-safety bound (design C1): the emitted dataset read is
+        // base + dataset_offset + (ma & 0x7FFF_FFC0) and has no runtime check.
+        debug_assert!(
+            dataset_offset <= 524_287 * 64,
+            "dataset_offset exceeds DATASET_EXTRA_ITEMS*64; emitted loop would read out of bounds"
+        );
         {
             let e = &mut self.emitter;
             e.clear();

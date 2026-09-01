@@ -30,6 +30,7 @@
 | **Completed** | **BENCH-01** | **xmrig 6.26.0 vs MinerTim ABAB benchmark.** MinerTim won both positions (+4.4%, +13.1%); no rx/0 hashrate gap exists. NEON FP closed for v1 (re-gate under v2 only). Next: RandomX v2 gated port. |
 | **Completed** | **RESEARCH-01** | **Research delivered**: RANDOMX_V2_SEMANTICS.md (v2 = 5 changes; plan's Stratum mapping was backwards — corrected in place) and NEON_FP_PORT_NOTES.md (~300-400 LOC port, ABI risk eliminated). V2 implementation unblocked on semantics. |
 | **Completed** | **RX2-01** | **RandomX v2 gated port (offline half).** RxVersion plumbing, 384-instr programs, conditional CFROUND (interpreter + JIT), AES F/E mix (NEON/AES-NI/soft), mp-aliasing prefetch, commitment fn. All reference vectors pass on interpreter AND JIT paths; 87 v1 vectors bit-identical. Nothing selects V2 at runtime yet. Fork-day remainder (dispatch + Stratum) documented in AUDIT.md 2026-08-16. |
+| **Active** | **JIT-01** | **JIT native iteration loop.** Stages A-C done on `feat/jit-native-loop` (MR !1): loop emitted in ARM64, wired behind `RandomXVm::set_native_loop()` (**default off**), anchored by a full-mode known-answer hash on both the direct and pipelined paths. Four rounds of independent review applied. Also repaired CI, red on `main` since the edition-2024 migration. **Next: stage D** — measure by deterministic proxies (not wall-clock, see 2026-08-29) and decide the default. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

@@ -70,7 +70,6 @@ pub(crate) type JitFn = unsafe extern "C" fn(
 /// See DESIGN_JIT_NATIVE_LOOP.md. Note `dataset` arrives in x2 and `iterations`
 /// in x3, both of which `emit_cfround` uses as scratch, so the prologue must
 /// capture them before emitting any body code.
-#[allow(dead_code)] // wired up in stage C
 pub(crate) type JitLoopFn = unsafe extern "C" fn(
     nreg: *mut NativeRegisterFile,
     scratchpad: *mut u8,
@@ -162,7 +161,7 @@ impl JitCompiler {
     /// unmodified-from-garbage, because the prologue deliberately does not load
     /// them (they are reassigned at every loop head). Production always passes
     /// `RANDOMX_PROGRAM_ITERATIONS`.
-    #[allow(dead_code)] // wired up in stage C
+    // (no dead_code allowance: wired into execute_vm_inner as of stage C)
     pub(crate) unsafe fn get_loop_fn(&self) -> JitLoopFn { unsafe {
         assert_eq!(
             self.kind,
@@ -762,7 +761,7 @@ impl JitCompiler {
     ///
     /// `config`, `init_ma`, `init_mx` and `dataset_offset` are baked in, so the
     /// emitted code takes only (nreg, scratchpad, dataset, iterations).
-    #[allow(dead_code, clippy::too_many_arguments)] // wired up in stage C
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_native_loop(
         &mut self,
         bytecode: &[BytecodeInstruction],

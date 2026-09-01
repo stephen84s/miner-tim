@@ -1098,8 +1098,9 @@ fn execute_vm(
     jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
     iterations: usize,
+    use_native_loop: bool,
 ) -> LoopState {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version, iterations)
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version, iterations, use_native_loop)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -1113,6 +1114,7 @@ fn execute_vm(
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     version: RxVersion,
     iterations: usize,
+    _use_native_loop: bool,
 ) -> LoopState {
     execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version, iterations)
 }
@@ -1160,6 +1162,10 @@ fn execute_vm_inner(
     #[cfg(target_arch = "aarch64")] mut jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
     iterations: usize,
+    // Opt in to the self-driving native loop (DESIGN_JIT_NATIVE_LOOP.md stage
+    // C). Ignored unless every precondition the emitted code assumes holds:
+    // v1, full mode, aarch64 JIT present.
+    #[cfg(target_arch = "aarch64")] use_native_loop: bool,
 ) -> LoopState {
     // NOTE: Rounding mode is NOT reset per-chain. C++ resets once before all chains,
     // and lets CFROUND changes carry over between chains. Caller must call set_rounding_mode(0)
@@ -1194,6 +1200,40 @@ fn execute_vm_inner(
     let mut register_usage = [0i32; REGISTERS_COUNT];
     compile_program(program_bytes, &mut register_usage, bytecode_buf, program_size);
     let bytecode = &bytecode_buf[..program_size];
+
+    // Native loop: the emitted code drives all `iterations` itself, keeping the
+    // register file in ARM64 registers across iterations instead of spilling it
+    // to `nreg` and reloading 2048 times. Only valid for v1 + full mode — the
+    // emitted iteration tail hard-codes v1's `f ^= e` and mx-aliasing and reads
+    // the dataset with no light-mode fallback, so anything else falls through
+    // to the per-iteration body JIT below. `compile_native_loop` asserts the
+    // version too, so a miswired caller trips there rather than mining garbage.
+    #[cfg(target_arch = "aarch64")]
+    if use_native_loop
+        && version == RxVersion::V1
+        && let (Some(ds), Some(jit)) = (dataset, jit.as_mut())
+    {
+        jit.compile_native_loop(bytecode, version, &config, ma, mx, dataset_offset);
+        let f = unsafe { jit.get_loop_fn() };
+        // Must be a real 32-byte buffer: the epilogue stores ma/mx/sp_addr0/
+        // sp_addr1 through this pointer unconditionally.
+        let mut out = [0u64; 4];
+        unsafe {
+            f(
+                nreg as *mut NativeRegisterFile,
+                scratchpad.as_mut_ptr(),
+                ds.as_ptr(),
+                iterations as u64,
+                out.as_mut_ptr(),
+            );
+        }
+        return LoopState {
+            ma: out[0] as u32,
+            mx: out[1] as u32,
+            sp_addr0: out[2] as u32,
+            sp_addr1: out[3] as u32,
+        };
+    }
 
     // JIT compile the bytecode to native code (aarch64 only)
     #[cfg(target_arch = "aarch64")]
@@ -1438,6 +1478,10 @@ pub(crate) fn execute_vm_for_test(
         jit,
         version,
         iterations,
+        // The differential test drives the native loop itself, via
+        // `compile_native_loop`; this hook is the interpreter/body-JIT side of
+        // the comparison and must never take the native path.
+        false,
     )
 }
 
@@ -1528,6 +1572,7 @@ fn calculate_hash_versioned(key: &[u8], input: &[u8], version: RxVersion) -> [u8
             None,
             version,
             RANDOMX_PROGRAM_ITERATIONS,
+            false, // light mode: no dataset for the native loop to read
         );
 
         if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1581,6 +1626,10 @@ pub struct RandomXVm {
     pipeline_state: [u8; 64],
     #[cfg(target_arch = "aarch64")]
     jit: Option<super::jit::JitCompiler>,
+    /// Opt-in for the self-driving native loop. Off by default: stage C wires
+    /// the path up and anchors it with a known-answer hash, stage D measures it
+    /// and decides the default. See DESIGN_JIT_NATIVE_LOOP.md.
+    use_native_loop: bool,
 }
 
 impl RandomXVm {
@@ -1606,6 +1655,7 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
+            use_native_loop: false,
         }
     }
 
@@ -1632,6 +1682,7 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
+            use_native_loop: false,
         }
     }
 
@@ -1641,6 +1692,15 @@ impl RandomXVm {
         let mut generator = Blake2Generator::new(key, 0);
         self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         self.dataset = dataset;
+    }
+
+    /// Enable or disable the native-loop JIT path.
+    ///
+    /// Takes effect only where every precondition the emitted code assumes
+    /// holds: aarch64, rx/0, full mode. Elsewhere it is silently ignored and
+    /// execution stays on the per-iteration body JIT / interpreter.
+    pub fn set_native_loop(&mut self, enabled: bool) {
+        self.use_native_loop = enabled;
     }
 
     /// Get references to cache and programs (for dataset generation).
@@ -1686,6 +1746,7 @@ impl RandomXVm {
                 self.jit.as_mut(),
                 self.version,
                 RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1750,6 +1811,7 @@ impl RandomXVm {
                 self.jit.as_mut(),
                 self.version,
                 RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1865,6 +1927,7 @@ impl RandomXVm {
                 self.jit.as_mut(),
                 self.version,
                 RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
             total_execute_vm += t.elapsed();
 

@@ -1304,3 +1304,129 @@ removes real allocation work. Neither is claimed to make the miner faster.
 ### Verification
 - Full suite **96 passed, 0 failed** (87 v1 vectors bit-identical, v2 vectors,
   commitment vectors); `cargo clippy --all-targets -- -D warnings` clean.
+
+---
+
+## 2026-09-01 - JIT native iteration loop, stages A-C (branch `feat/jit-native-loop`, MR !1)
+
+### Request / goal
+"Extract more performance… improve on the work xmrig have done", executed under
+the branch + merge-request workflow with independent subagent review. The
+performance finding this implements is #1 from the 2026-08-29 investigation: the
+2048-iteration RandomX loop is driven from Rust, so the whole register file is
+spilled to `nreg` and reloaded on every iteration — 8 r-registers, 8 f and 8 e
+halves, 2048 times per chain, 16384 times per hash. Moving the loop itself into
+emitted ARM64 keeps the register file resident.
+
+### Design first (`DESIGN_JIT_NATIVE_LOOP.md`)
+Written and reviewed before any code. The review caught a wrong-hash ordering
+defect (D1: `mx ^= spMix2` must happen *before* the dataset XOR of the
+r-registers, because `spMix2` is computed from the pre-XOR registers) and a hole
+in the proposed safety gate that would have hidden it (D2: comparing only the
+register file and scratchpad cannot detect an `ma`/`mx` ordering error, because
+neither is consumed until the *following* iteration — hence `LoopState` is
+returned and compared). Nine constraints C1-C9 are recorded there; C1 (the
+dataset read has no runtime bound check) is now pinned by a `const _: () =
+assert!(…)` in `vm.rs` so it holds in every build profile.
+
+### Files changed
+- `src/randomx/jit/aarch64.rs` — six new assembler-verified encoders: `subs_imm`
+  (`0xF1000000`; note `sub_imm` `0xD1000000` does *not* set flags), `eor_reg_w`,
+  `prfm_reg`, `prfm_imm`, `stp_fp_imm`, `ldp_fp_imm`. Every encoding was checked
+  against `as -arch arm64` output before use. `D25`-`D31` constants;
+  `Emitter::clear()`.
+- `src/randomx/jit/compiler.rs` — `compile_native_loop()` plus
+  `emit_loop_prologue` / `emit_iteration_pre` / `emit_iteration_post` /
+  `emit_loop_epilogue`. New `CompiledKind` enum: `JitMemory::as_fn` is a
+  `transmute_copy` guarded only by a pointer-size assert, and both function
+  signatures are pointer-sized, so nothing would have caught calling native-loop
+  code through the 3-argument body ABI — x2 (a dataset pointer) would have been
+  dereferenced as a `*const ProgramConfiguration`. Asserted on every fetch, with
+  `assert_eq!` not `debug_assert_eq!` so release builds are covered too.
+- `src/randomx/vm.rs` — `LoopState`, `derive_program_params()` (extracted so the
+  JIT and the interpreter provably agree on `ma`/`mx`/`e_mask`/`dataset_offset`
+  rather than deriving them twice), `execute_vm_inner` now takes `iterations` and
+  returns `LoopState`, native-loop dispatch, `RandomXVm::set_native_loop()`.
+- `src/randomx/tests.rs` — `native_loop_diff_tests` module and two known-answer
+  tests (below).
+
+### Behaviour / API changes
+- `RandomXVm::set_native_loop(bool)` — new public knob, **default off**. Takes
+  effect only where every precondition the emitted code assumes holds: aarch64,
+  rx/0, full mode. Elsewhere silently ignored, execution stays on the existing
+  per-iteration body JIT / interpreter.
+- Nothing in the shipping mining path changes yet. `Miner` never calls the new
+  setter, so the default build behaves exactly as before. Stage D measures the
+  path and decides the default.
+- The emitted loop is **v1 + full mode only**, asserted in `compile_native_loop`.
+  `emit_iteration_post` hard-codes v1's `f ^= e` and v1's `mx` aliasing; v2 needs
+  the AES F/E mix and `mp` aliasing, and light mode has no dataset to read.
+  Neither mistake is detectable by the differential test, so it is asserted at
+  the compile boundary rather than left to the caller.
+
+### Verification
+- **Differential** (`native_loop_matches_interpreter`): native loop vs the real
+  interpreter/body-JIT loop — not a re-implementation of it, which could share
+  the bug under test. Compares the full register file, the entire 2 MiB
+  scratchpad, the full-u64 `LoopState`, and the final FPCR. Seeds 1/2/7/78 at
+  N=1, 2 and 3 (N=1 cannot catch an `mx`-ordering error; N=2 is the minimum
+  meaningful comparison) and seed 11 at the full N=2048.
+- **Known-answer, the stage-C gate** (`test_native_loop_known_answer`,
+  `test_native_loop_known_answer_pipelined`): a complete full-mode RandomX hash
+  driven through the native loop must equal
+  `639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f` for key
+  `test key 000` / input `This is a test`. Both reviewers independently flagged
+  that the differential tests say nothing if both paths are wrong in the same
+  way; this is the only test that anchors emitted native-loop code to a real
+  RandomX result, and the only one that exercises FPCR carry-over across all
+  eight chains and the `serialize_register_file` -> `blake2b_512` ->
+  next-program plumbing. It is asserted on **both** `calculate_hash` and
+  `calculate_hash_pipelined`, because the latter is the path the miner actually
+  runs and the former is used by nothing in production.
+- `test_vm_calculate_hash_jit` is retained unchanged with the flag off, as the
+  control proving the default path did not move.
+- Full suite: **105 passed, 0 failed, 2 ignored** (release).
+  `cargo clippy --all-targets -- -D warnings` clean on aarch64 *and* on
+  `x86_64-apple-darwin`.
+
+### Review findings applied (four rounds, independent subagents)
+1. `mx`/dataset-XOR ordering (design D1) — caught before implementation.
+2. `LoopState` returned and compared, closing the D2 blind spot.
+3. v1-only assertion; differential tests un-ignored.
+4. Release-build ABI guards (`assert_eq!`); a `CBZ x28` zero-iteration guard —
+   the emitted loop is a do-while, so `iterations == 0` wrapped the counter to
+   `u64::MAX` and ran ~2^64 times; removal of 8 redundant FMOVs per iteration
+   (131,072 per hash) by writing masked e-values straight to their destination;
+   imm7 range asserts on `stp/ldp_fp_imm`.
+
+Two reviewer claims were checked and **rejected**: that the dataset margin is
+exactly zero (it is 64 bytes — `DATASET_EXTRA_ITEMS` is 524287 while
+`DATASET_EXTRA_SIZE/64` is 524288), and that the C9 bitmask assertion had been
+undone (it is present at `aarch64.rs:813`).
+
+### CI repair (pre-existing, unrelated to the native loop)
+Every pipeline on `main` and on this branch has been failing, so no MR on this
+project was actually being validated. Two independent causes, both fixed here:
+- `rust:lint` — 125 errors on x86_64 that no local aarch64 build can produce.
+  121 were `E0133` in the AES-NI paths of `aes_hash.rs`: the four `*_aesni`
+  functions never got the `unsafe fn f() { unsafe { … } }` treatment the NEON
+  functions received during the edition-2021 -> 2024 migration
+  (`unsafe_op_in_unsafe_fn`). Plus three deprecated `_mm_setcsr`/`_mm_getcsr`
+  calls (allowance kept deliberately: the whole MXCSR word, not just the
+  rounding bits, is consensus-relevant, so hand-rolled asm is the riskier
+  option on a path Apple Silicon never executes), one `too_many_arguments`, and
+  aarch64-only test hooks that were `#[cfg(test)]` rather than
+  `#[cfg(all(test, target_arch = "aarch64"))]`.
+- `rust:audit` — `cargo install cargo-audit --locked` fails with "binary already
+  exists in destination" whenever the cargo cache is restored, which is every
+  run after the first. Guarded with `command -v`.
+
+### Assumptions / constraints
+- CI runs on x86_64 Linux and therefore **can never execute the JIT tests** —
+  `randomx::jit` is `#[cfg(target_arch = "aarch64")]`. The differential and
+  known-answer tests are a mandatory *local* gate (`make test` on Apple
+  Silicon); a green pipeline says nothing about emitted ARM64.
+- No performance claim is made yet. Per the 2026-08-29 methodology finding this
+  machine cannot resolve wall-clock hashrate differences below ~10%, so stage D
+  must judge the change by deterministic proxies (emitted-instruction counts,
+  hardware counters), not by comparing two mining runs.

@@ -24,6 +24,19 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// The full dataset for `b"test key 000"` — the key behind every known-answer
+/// vector in this file. It is 2 GiB and three tests need it, so it is built
+/// once per test binary rather than once per test.
+fn test_key_000_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
+    static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
+        std::sync::LazyLock::new(|| {
+            let vm_light = vm::RandomXVm::new(b"test key 000");
+            let (cache, programs) = vm_light.cache_and_programs();
+            std::sync::Arc::new(super::dataset::RandomXDataset::generate(cache, programs, 8))
+        });
+    DS.clone()
+}
+
 // ============================================================================
 // Phase 1: Blake2b (RFC 7693)
 // ============================================================================
@@ -397,20 +410,14 @@ mod full_hash_tests {
     /// Uses full mode (precomputed dataset) for speed.
     #[test]
     fn test_vm_calculate_hash_jit() {
-        use std::sync::Arc;
-        use super::dataset::RandomXDataset;
-
         let key = b"test key 000";
         let input = b"This is a test";
         let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
 
-        // Build dataset (full mode)
-        let vm_light = vm::RandomXVm::new(key);
-        let (cache, programs) = vm_light.cache_and_programs();
-        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
-
-        // Full mode VM (uses JIT on aarch64)
-        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        // Full mode VM (uses the per-iteration body JIT on aarch64). The
+        // native loop stays off here — this is the control that proves the
+        // default path did not move when stage C landed.
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
         let hash = vm_full.calculate_hash(input);
 
         assert_eq!(
@@ -420,13 +427,62 @@ mod full_hash_tests {
         );
     }
 
+    /// Known-answer hash through the **native loop** (DESIGN_JIT_NATIVE_LOOP.md
+    /// stage C gate).
+    ///
+    /// The differential tests in `native_loop_diff_tests` prove the native loop
+    /// agrees with the interpreter, which says nothing if both are wrong in the
+    /// same way. This is the only test that anchors emitted native-loop code to
+    /// a real RandomX result, and the only one that exercises FPCR carry-over
+    /// across all eight chains and the
+    /// `serialize_register_file` -> `blake2b_512` -> next-program plumbing with
+    /// the native loop in the path.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_native_loop_known_answer() {
+        let key = b"test key 000";
+        let input = b"This is a test";
+        let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
+
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(true);
+
+        assert_eq!(
+            hex_encode(&vm_full.calculate_hash(input)),
+            expected,
+            "native-loop hash must match the reference test vector"
+        );
+    }
+
+    /// The same gate on the path the miner actually runs. `calculate_hash` is
+    /// used by nothing in production: workers call `prepare_scratchpad` once and
+    /// then loop on `calculate_hash_pipelined`, which overlaps the AES fill with
+    /// the chains. Same input, so the same vector must come out.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_native_loop_known_answer_pipelined() {
+        let key = b"test key 000";
+        let input = b"This is a test";
+        let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
+
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(true);
+
+        vm_full.prepare_scratchpad(input);
+        // `next_input` only seeds the *following* scratchpad; the returned hash
+        // is the one for `input`.
+        assert_eq!(
+            hex_encode(&vm_full.calculate_hash_pipelined(b"unused next blob")),
+            expected,
+            "native-loop pipelined hash must match the reference test vector"
+        );
+    }
+
     /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
     /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
     #[test]
     #[ignore]
     fn test_full_mode_matches_light_mode() {
-        use std::sync::Arc;
-        use super::dataset::RandomXDataset;
 
         let key = b"test key 000";
         let input = b"This is a test";
@@ -439,10 +495,7 @@ mod full_hash_tests {
         );
 
         // Full mode hash
-        let vm_light = vm::RandomXVm::new(key);
-        let (cache, programs) = vm_light.cache_and_programs();
-        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
-        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
         let full_hash = vm_full.calculate_hash(input);
 
         assert_eq!(

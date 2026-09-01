@@ -313,8 +313,22 @@ scaffolding.
 |---|---|---|
 | A | `JitLoopFn` type, register map constants, emitter helpers still unused | builds; 87 vectors pass (path unused) |
 | B | Emit loop scaffolding; differential-test against the Rust path at **N=2** iterations (see warning below) | new differential test |
-| C | Full 2048-iteration loop; wire into `execute_vm_inner` for v1+full only | 87 vectors + v2 vectors + JIT test |
+| C | Full 2048-iteration loop; wire into `execute_vm_inner` for v1+full only | 87 vectors + v2 vectors + JIT test + **known-answer hash through the native loop** |
 | D | Gate v1+full onto the native loop; keep the Rust loop live for every other configuration | full suite; instructions-retired check |
+
+**Stage C is DONE** (2026-09-01). The path is wired but the default is `false`:
+`RandomXVm::set_native_loop()` opts in, and `Miner` never calls it, so a default
+build behaves exactly as before. Stage D flips it.
+
+The stage-C gate was strengthened on both reviewers' recommendation. The
+differential test proves native-loop == interpreter, which is worth nothing if
+both are wrong in the same way — so C also requires a **known-answer hash**:
+a complete full-mode RandomX hash driven through the native loop must equal the
+reference vector `639183aa…` for key `test key 000` / input `This is a test`.
+Asserted on `calculate_hash` *and* on `calculate_hash_pipelined` — the latter is
+the path the miner actually runs, the former is used by nothing in production.
+This is the only test that anchors emitted native-loop code to a real RandomX
+result, and the only one that exercises FPCR carry-over across all eight chains.
 
 Stage B is the critical one: a **differential test** that runs both paths from an
 identical starting register file and asserts bit-equality of the entire

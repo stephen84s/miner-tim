@@ -185,6 +185,12 @@ impl Emitter {
     /// `stp_fp_pre` mutates the base pointer and is unusable here.
     pub fn stp_fp_imm(&mut self, dt1: u32, dt2: u32, rn: u32, byte_offset: i32) {
         debug_assert!(byte_offset % 8 == 0);
+        // imm7 is SIGNED 7-bit scaled by 8. Without this, +512 masks to -64 and
+        // silently stores 1 KiB below the base.
+        debug_assert!(
+            (-512..=504).contains(&byte_offset),
+            "STP/LDP (FP) imm7 out of range"
+        );
         let imm7 = ((byte_offset / 8) as u32) & 0x7F;
         self.emit(0x6D000000 | (imm7 << 15) | (dt2 << 10) | (rn << 5) | dt1);
     }
@@ -192,6 +198,12 @@ impl Emitter {
     /// LDP Dt1, Dt2, [Xn, #imm] (signed offset, scaled by 8, no writeback)
     pub fn ldp_fp_imm(&mut self, dt1: u32, dt2: u32, rn: u32, byte_offset: i32) {
         debug_assert!(byte_offset % 8 == 0);
+        // imm7 is SIGNED 7-bit scaled by 8. Without this, +512 masks to -64 and
+        // silently stores 1 KiB below the base.
+        debug_assert!(
+            (-512..=504).contains(&byte_offset),
+            "STP/LDP (FP) imm7 out of range"
+        );
         let imm7 = ((byte_offset / 8) as u32) & 0x7F;
         self.emit(0x6D400000 | (imm7 << 15) | (dt2 << 10) | (rn << 5) | dt1);
     }

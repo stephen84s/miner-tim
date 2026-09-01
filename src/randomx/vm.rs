@@ -37,6 +37,17 @@ const CACHE_LINE_SIZE: usize = 64;
 const CACHE_LINE_ALIGN_MASK: u32 = 0x7FFFFFC0; // Verified against C++ reference
 const DATASET_EXTRA_ITEMS: u64 = 524287;
 
+// Memory-safety invariant for the native-loop JIT (DESIGN §5a C1): the emitted
+// dataset read has no runtime bounds check, so the worst-case address must be
+// provably inside the allocation. Checked at compile time in every profile —
+// a debug_assert would be absent from the shipping miner.
+const _: () = assert!(
+    (DATASET_EXTRA_ITEMS as usize * CACHE_LINE_SIZE + CACHE_LINE_ALIGN_MASK as usize)
+        / CACHE_LINE_SIZE
+        < super::dataset::DATASET_ITEM_COUNT,
+    "worst-case dataset read would fall outside the allocation"
+);
+
 const CONDITION_OFFSET: u32 = 8; // RANDOMX_JUMP_OFFSET
 const CONDITION_MASK: u32 = (1 << 8) - 1; // (1 << RANDOMX_JUMP_BITS) - 1
 const STORE_L3_CONDITION: u32 = 14;
@@ -1355,6 +1366,13 @@ fn execute_vm_inner(
 #[cfg(test)]
 pub(crate) fn reset_rounding_mode_for_test() {
     set_rounding_mode(0);
+}
+
+/// Scratchpad size, so tests size their buffers from the same constant the JIT
+/// masks against rather than a local copy that could drift.
+#[cfg(test)]
+pub(crate) fn scratchpad_size() -> usize {
+    SCRATCHPAD_L3_SIZE
 }
 
 /// Read the current FP rounding mode, so the differential test can confirm

@@ -140,7 +140,7 @@ impl JitCompiler {
     /// `compile` must have been called first; the returned function must be
     /// invoked with valid nreg/scratchpad/config pointers.
     pub(crate) unsafe fn get_fn(&self) -> JitFn { unsafe {
-        debug_assert_eq!(
+        assert_eq!(
             self.kind,
             Some(CompiledKind::Body),
             "get_fn() on code compiled for a different ABI — see CompiledKind"
@@ -152,11 +152,19 @@ impl JitCompiler {
     ///
     /// # Safety
     /// Native-loop code must have been compiled first; the returned function
-    /// must be invoked with valid nreg/scratchpad/dataset pointers and the
-    /// dataset must be at least `DATASET_TOTAL_SIZE` bytes.
+    /// must be invoked with valid nreg/scratchpad/dataset pointers, a dataset
+    /// of at least `DATASET_TOTAL_SIZE` bytes, and a `loop_state_out` buffer of
+    /// at least 32 bytes.
+    ///
+    /// `iterations` should be >= 1. A zero is caught by an emitted `CBZ` guard
+    /// so it returns immediately rather than wrapping the counter and running
+    /// ~2^64 times — but note the f/e registers are then written back
+    /// unmodified-from-garbage, because the prologue deliberately does not load
+    /// them (they are reassigned at every loop head). Production always passes
+    /// `RANDOMX_PROGRAM_ITERATIONS`.
     #[allow(dead_code)] // wired up in stage C
     pub(crate) unsafe fn get_loop_fn(&self) -> JitLoopFn { unsafe {
-        debug_assert_eq!(
+        assert_eq!(
             self.kind,
             Some(CompiledKind::NativeLoop),
             "get_loop_fn() on code compiled for a different ABI — see CompiledKind"
@@ -623,6 +631,14 @@ fn emit_cbranch(
     // Branch target: the interpreter does `pc = target; pc += 1`, so the next
     // instruction executed is target + 1. In the JIT, branch to offsets[target + 1].
     // ibc.target is i16 — cast to i32 first to avoid overflow on negative values.
+    // A forward target would read offsets[] before it is filled (0), and in the
+    // native loop word 0 is the prologue — re-running it grows the stack on
+    // every pass. compile_program only ever derives targets from a prior write,
+    // so target+1 <= pc always; assert it so that stays true.
+    debug_assert!(
+        (ibc.target as i32) < _pc as i32,
+        "CBRANCH forward target would branch into the loop prologue"
+    );
     let target_signed = (ibc.target as i32) + 1;
     let target_offset = if target_signed >= 0 && (target_signed as usize) < program_size {
         offsets[target_signed as usize]
@@ -769,7 +785,7 @@ impl JitCompiler {
         );
         // Memory-safety bound (design C1): the emitted dataset read is
         // base + dataset_offset + (ma & 0x7FFF_FFC0) and has no runtime check.
-        debug_assert!(
+        assert!(
             dataset_offset <= 524_287 * 64,
             "dataset_offset exceeds DATASET_EXTRA_ITEMS*64; emitted loop would read out of bounds"
         );
@@ -777,6 +793,12 @@ impl JitCompiler {
             let e = &mut self.emitter;
             e.clear();
             emit_loop_prologue(e, config, init_ma, init_mx, dataset_offset);
+            // `subs`/`b.ne` below is a do-while: with iterations == 0 the
+            // counter wraps to u64::MAX and the loop runs ~2^64 times. The Rust
+            // loop runs zero times. Skip straight to the epilogue instead.
+            // (Patched once the epilogue's offset is known.)
+            let zero_guard = e.len();
+            e.emit(0xB4000000 | reg::X28); // CBZ x28, <patched>
             let loop_head = e.len();
             emit_iteration_pre(e, config);
             emit_body(e, bytecode, version);
@@ -784,7 +806,14 @@ impl JitCompiler {
             // counter -= 1; branch back while non-zero
             e.subs_imm(reg::X28, reg::X28, 1);
             let rel = loop_head as i32 - e.len() as i32;
+            debug_assert!(
+                (-(1 << 18)..(1 << 18)).contains(&rel),
+                "loop back-branch out of B.cond imm19 range"
+            );
             e.b_cond(COND_NE, rel);
+            // Patch the zero-iteration guard to land here, past the loop.
+            let skip = (e.len() - zero_guard) as u32;
+            e.code[zero_guard] = 0xB4000000 | ((skip & 0x7FFFF) << 5) | reg::X28;
             emit_loop_epilogue(e);
         }
         self.memory.write_code(&self.emitter.code);
@@ -885,17 +914,18 @@ fn emit_iteration_pre(e: &mut Emitter, config: &ProgramConfiguration) {
         e.add_imm(reg::X0, reg::X27, 32 + (i as u32) * 8);
         emit_cvt_packed_int(e);
         // (bits & DYNAMIC_MANTISSA_MASK) | e_mask[lane]
+        // Write the masked value directly into the e-register rather than
+        // round-tripping via d25/d26 — that cost 2 extra FMOVs per lane,
+        // 131,072 wasted instructions per hash.
+        let (elo, ehi) = e_regs(i);
         e.fmov_xd(reg::X0, reg::D25);
         e.and_bitmask(reg::X0, reg::X0, DYNAMIC_MANTISSA_MASK, reg::X1);
         e.orr_reg(reg::X0, reg::X0, reg::X19);
-        e.fmov_dx(reg::D25, reg::X0);
+        e.fmov_dx(elo, reg::X0);
         e.fmov_xd(reg::X0, reg::D26);
         e.and_bitmask(reg::X0, reg::X0, DYNAMIC_MANTISSA_MASK, reg::X1);
         e.orr_reg(reg::X0, reg::X0, reg::X20);
-        e.fmov_dx(reg::D26, reg::X0);
-        let (elo, ehi) = e_regs(i);
-        e.fmov_dd(elo, reg::D25);
-        e.fmov_dd(ehi, reg::D26);
+        e.fmov_dx(ehi, reg::X0);
     }
 }
 

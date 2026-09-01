@@ -721,7 +721,6 @@ mod native_loop_diff_tests {
     };
     use std::sync::Arc;
 
-    const SCRATCHPAD_L3_SIZE: usize = 2_097_152;
 
     /// Deterministic pseudo-random program bytes + scratchpad, so both paths
     /// start from byte-identical state.
@@ -737,7 +736,7 @@ mod native_loop_diff_tests {
 
     fn make_scratchpad(seed: u8) -> Vec<u8> {
         use crate::randomx::blake2gen::Blake2Generator;
-        let mut sp = vec![0u8; SCRATCHPAD_L3_SIZE];
+        let mut sp = vec![0u8; vm::scratchpad_size()];
         let mut g = Blake2Generator::new(&[seed ^ 0xA5; 32], 0);
         // Fills the whole 2 MiB deterministically (~32k Blake2b compressions,
         // ~10 ms). A partially-zero scratchpad would weaken the comparison,
@@ -846,12 +845,15 @@ mod native_loop_diff_tests {
         // are kept as a guard against that zeroing being dropped, but they
         // prove nothing about addressing — do not read them as coverage.
         assert_eq!(
-            (out[0] as u32, out[1] as u32, out[2] as u32, out[3] as u32),
+            // Compare the FULL u64. Truncating to u32 here would let a 64-bit
+            // EOR on ma/mx pass — the exact C5 violation this out-pointer
+            // exists to detect.
+            (out[0], out[1], out[2], out[3]),
             (
-                ref_state.ma,
-                ref_state.mx,
-                ref_state.sp_addr0,
-                ref_state.sp_addr1
+                ref_state.ma as u64,
+                ref_state.mx as u64,
+                ref_state.sp_addr0 as u64,
+                ref_state.sp_addr1 as u64
             ),
             "seed {seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
         );
@@ -888,6 +890,61 @@ mod native_loop_diff_tests {
             assert_paths_agree(seed, 2, &ds);
             assert_paths_agree(seed, 3, &ds);
         }
+    }
+
+    /// The emitted loop is a do-while: without the CBZ guard, `iterations == 0`
+    /// wraps the counter to u64::MAX and runs ~2^64 times, scribbling the
+    /// scratchpad throughout. If this test hangs, that guard has regressed.
+    #[test]
+    fn native_loop_zero_iterations_terminates() {
+        let ds = test_dataset();
+        let program_bytes = make_program_bytes(3);
+        let (config, ma, mx, dataset_offset) = vm::derive_program_params(&program_bytes);
+        let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut register_usage = [0i32; 8];
+        vm::compile_program(
+            &program_bytes,
+            &mut register_usage,
+            &mut bytecode,
+            RANDOMX_PROGRAM_SIZE,
+        );
+        let mut jit = JitCompiler::new().expect("jit");
+        jit.compile_native_loop(
+            &bytecode[..RANDOMX_PROGRAM_SIZE],
+            RxVersion::V1,
+            &config,
+            ma,
+            mx,
+            dataset_offset,
+        );
+        let mut nreg = NativeRegisterFile::new();
+        vm::init_registers_from_entropy_for_test(&mut nreg, &program_bytes);
+        let r_before = nreg.r;
+        let mut sp = make_scratchpad(3);
+        let sp_before = sp.clone();
+        let mut out = [0u64; 4];
+        unsafe {
+            let f = jit.get_loop_fn();
+            f(
+                &mut nreg as *mut NativeRegisterFile,
+                sp.as_mut_ptr(),
+                ds.as_ptr_for_test(),
+                0,
+                out.as_mut_ptr(),
+            );
+        }
+        // Reaching here at all is the assertion. The r-registers and scratchpad
+        // must be untouched; f/e are deliberately not checked (the prologue does
+        // not load them, so with zero iterations they are written back as
+        // whatever was in d0-d15).
+        assert_eq!(nreg.r, r_before, "zero-iteration run modified r-registers");
+        assert!(sp == sp_before, "zero-iteration run modified the scratchpad");
+        assert_eq!(
+            (out[0] as u32, out[1] as u32),
+            (ma, mx),
+            "zero-iteration run should leave ma/mx at their seeds"
+        );
     }
 
     #[test]

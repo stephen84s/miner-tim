@@ -316,6 +316,29 @@ scaffolding.
 | C | Full 2048-iteration loop; wire into `execute_vm_inner` for v1+full only | 87 vectors + v2 vectors + JIT test + **known-answer hash through the native loop** |
 | D | Gate v1+full onto the native loop; keep the Rust loop live for every other configuration | full suite; instructions-retired check |
 
+**Stage D is DONE** (2026-09-01). The default is now `true`. Measured
+**+9.01%** (95% CI +8.70%..+9.32%) at 11 threads — the configuration the miner
+actually runs — via `benches/nativeloop_ab.rs`. See AUDIT.md 2026-09-01 for the
+methodology and for why the single-thread figure is *not* the headline.
+
+Note the "instructions-retired check" in the gate above turned out to be the
+wrong instrument, and the row is left unedited as a record of that. Only
+*emitted* words can be counted, and the body-JIT path also executes
+Rust-compiled loop code that no `Emitter` sees — so the comparison is a superset
+against a subset and cannot yield a net figure. What it *can* yield is the
+apples-to-apples eliminated-overhead number, which
+`native_loop_emitted_instruction_accounting` reports and guards:
+
+| | per iteration | per hash (16,384 iterations) |
+|---|---|---|
+| body ABI prologue+epilogue **eliminated** | 83 words | 1,359,872 |
+| native loop pre+post+2 **added** | 168 words | 2,752,512 |
+
+The eliminated column is exact and is pure register save/restore. The added
+column replaces Rust work of uncounted size, so **the difference of the two is
+not a net saving** and must not be quoted as one. The static proxy is
+inconclusive on direction; the paired benchmark decided it.
+
 **Stage C is DONE** (2026-09-01). The path is wired but the default is `false`:
 `RandomXVm::set_native_loop()` opts in, and `Miner` never calls it, so a default
 build behaves exactly as before. Stage D flips it.

@@ -35,7 +35,7 @@ const SCRATCHPAD_L3_MASK64: u32 = (SCRATCHPAD_L3_SIZE / 64 - 1) as u32 * 64;
 
 const CACHE_LINE_SIZE: usize = 64;
 const CACHE_LINE_ALIGN_MASK: u32 = 0x7FFFFFC0; // Verified against C++ reference
-const DATASET_EXTRA_ITEMS: u64 = 524287;
+pub(crate) const DATASET_EXTRA_ITEMS: u64 = 524287;
 
 // Memory-safety invariant for the native-loop JIT (DESIGN §5a C1): the emitted
 // dataset read has no runtime bounds check, so the worst-case address must be
@@ -1635,9 +1635,11 @@ pub struct RandomXVm {
     pipeline_state: [u8; 64],
     #[cfg(target_arch = "aarch64")]
     jit: Option<super::jit::JitCompiler>,
-    /// Opt-in for the self-driving native loop. Off by default: stage C wires
-    /// the path up and anchors it with a known-answer hash, stage D measures it
-    /// and decides the default. See DESIGN_JIT_NATIVE_LOOP.md.
+    /// Whether to use the self-driving native loop. **On by default** as of
+    /// stage D: measured at +9.01% (95% CI +8.70%..+9.32%) at 11 threads, the
+    /// configuration the miner actually runs. Only takes effect on aarch64 +
+    /// rx/0 + full mode; `set_native_loop(false)` forces the per-iteration body
+    /// JIT back on. See DESIGN_JIT_NATIVE_LOOP.md and AUDIT.md 2026-09-01.
     use_native_loop: bool,
 }
 
@@ -1664,7 +1666,7 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
-            use_native_loop: false,
+            use_native_loop: true,
         }
     }
 
@@ -1691,7 +1693,7 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
-            use_native_loop: false,
+            use_native_loop: true,
         }
     }
 

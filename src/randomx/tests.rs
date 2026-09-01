@@ -414,10 +414,13 @@ mod full_hash_tests {
         let input = b"This is a test";
         let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
 
-        // Full mode VM (uses the per-iteration body JIT on aarch64). The
-        // native loop stays off here — this is the control that proves the
-        // default path did not move when stage C landed.
+        // Forced onto the per-iteration body JIT. Since stage D made the
+        // native loop the default, this is no longer the default path — but it
+        // is still a shipping one (`set_native_loop(false)` selects it, and so
+        // does any non-aarch64 or light-mode build), so it keeps its own
+        // known-answer vector rather than being deleted.
         let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(false);
         let hash = vm_full.calculate_hash(input);
 
         assert_eq!(

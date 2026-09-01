@@ -784,8 +784,15 @@ impl JitCompiler {
         );
         // Memory-safety bound (design C1): the emitted dataset read is
         // base + dataset_offset + (ma & 0x7FFF_FFC0) and has no runtime check.
+        //
+        // Unreachable by construction — `derive_program_params` computes
+        // `(entropy % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE`, whose
+        // maximum is exactly this bound — and kept as a hard `assert!` only to
+        // catch a future caller that derives the offset some other way. It must
+        // stay expressed in terms of the same constant the derivation uses; a
+        // literal here would silently drift if `DATASET_EXTRA_ITEMS` changed.
         assert!(
-            dataset_offset <= 524_287 * 64,
+            dataset_offset <= super::super::vm::DATASET_EXTRA_ITEMS * 64,
             "dataset_offset exceeds DATASET_EXTRA_ITEMS*64; emitted loop would read out of bounds"
         );
         {
@@ -1031,6 +1038,80 @@ fn emit_loop_epilogue(e: &mut Emitter) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Emitted-instruction accounting for the native loop (stage D).
+    ///
+    /// This is a *deterministic* measurement — no timing, no thermal noise —
+    /// but it is deliberately narrow, and the narrowness is the point. Only
+    /// emitted words can be counted here; the body-JIT path also executes
+    /// Rust-compiled loop code (scratchpad addressing, the r/f/e loads, the
+    /// dataset read, `f ^= e`, the stores, the prefetches) that no `Emitter`
+    /// ever sees. So:
+    ///
+    /// * The **eliminated** figure is exact and apples-to-apples: the body ABI
+    ///   reloads and re-stores the whole register file on every one of the
+    ///   16,384 iterations per hash, and the native loop does it twice per
+    ///   chain instead. Pure overhead, provably removed.
+    /// * The **added** figure is emitted words that *replace* Rust work of
+    ///   uncounted size. It is not a cost, and the difference of the two is NOT
+    ///   a net instruction saving. Anyone tempted to quote one number from this
+    ///   test should quote the eliminated one and say what it is.
+    ///
+    /// Wall-clock evidence is the `nativeloop_ab` bench, not this.
+    #[test]
+    fn native_loop_emitted_instruction_accounting() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let config = ProgramConfiguration {
+            e_mask: [0x3000_0000_0000_0000, 0x3000_0000_0000_0000],
+            read_reg0: 0,
+            read_reg1: 2,
+            read_reg2: 4,
+            read_reg3: 6,
+        };
+
+        let mut e = Emitter::new();
+        emit_prologue(&mut e);
+        let prologue = e.len();
+        e.clear();
+        emit_epilogue(&mut e);
+        let epilogue = e.len();
+        e.clear();
+        emit_iteration_pre(&mut e, &config);
+        let iter_pre = e.len();
+        e.clear();
+        emit_iteration_post(&mut e, &config);
+        let iter_post = e.len();
+        e.clear();
+        emit_body(&mut e, &bytecode[..RANDOMX_PROGRAM_SIZE_MAX], RxVersion::V1);
+        let body = e.len();
+
+        // 8 chains x 2048 iterations.
+        const ITERS_PER_HASH: usize = 8 * 2048;
+        let eliminated = (prologue + epilogue) * ITERS_PER_HASH;
+        let added = (iter_pre + iter_post + 2) * ITERS_PER_HASH;
+
+        println!(
+            "body-JIT blob: prologue={prologue} body={body} epilogue={epilogue} \
+             (executed {ITERS_PER_HASH}x/hash)\n\
+             native loop:   pre={iter_pre} post={iter_post} +2 (subs/b.ne)\n\
+             ELIMINATED per hash: {eliminated} words of register save/restore\n\
+             ADDED per hash:      {added} words replacing Rust loop code"
+        );
+
+        // Regression guard on the sign, not the magnitude: the body ABI's
+        // per-iteration register traffic is the thing this design exists to
+        // remove, so it must stay strictly larger than nothing.
+        assert!(
+            prologue + epilogue > 0,
+            "body ABI has no per-iteration register traffic left; \
+             the native loop's premise no longer holds"
+        );
+        assert!(
+            iter_pre > 0 && iter_post > 0,
+            "native loop emits no per-iteration work — it cannot be correct"
+        );
+    }
 
     #[test]
     fn test_jit_nop_program() {

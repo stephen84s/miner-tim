@@ -1442,3 +1442,116 @@ failed, 2 ignored on x86_64 Linux.
   machine cannot resolve wall-clock hashrate differences below ~10%, so stage D
   must judge the change by deterministic proxies (emitted-instruction counts,
   hardware counters), not by comparing two mining runs.
+
+---
+
+## 2026-09-01 - JIT native iteration loop, stage D: measured, default flipped ON
+
+### Request / goal
+Complete stage D of `DESIGN_JIT_NATIVE_LOOP.md`: measure the native loop against
+the per-iteration body JIT and decide whether it becomes the default. Constrained
+by the 2026-08-29 methodology finding that this machine cannot resolve wall-clock
+hashrate differences below ~10% *between binaries*.
+
+### Result: +9.01% at 11 threads. Default flipped to ON.
+
+| Phase | body JIT | native loop | paired diff | 95% CI | verdict |
+|---|---|---|---|---|---|
+| 1 thread | 337.5 H/s | 358.3 H/s | +6.06% | +0.79% .. +11.33% | faster, but see below |
+| **11 threads (aggregate)** | **4262.3 H/s** | **4646.2 H/s** | **+9.01%** | **+8.70% .. +9.32%** | **faster** |
+
+All 24 paired differences at 11 threads are positive, spanning +7.9% to +10.7%.
+
+**The single-thread number is not the headline and should not be quoted as one.**
+Its mean is skewed by four outliers (+41.7%, +36.3%, +22.0%, +18.8%); the *median*
+paired difference is only about +2.1%, and the two arms' medians are nearly equal
+(324.2 vs 325.7 H/s). Eleven threads is both the configuration the miner runs and,
+by a wide margin, the cleaner measurement.
+
+The direction is consistent with the mechanism: the native loop's win is removing
+per-iteration register spill/reload traffic to `nreg`, and that traffic costs most
+when every core is competing for the same cache and memory bandwidth — which is
+exactly the multi-threaded case.
+
+### Methodology (this supersedes the 2026-08-29 pessimism, for paired tests only)
+`benches/nativeloop_ab.rs` gets a 95% CI of **±0.31%** where binary-vs-binary
+comparison could not resolve 10%. The difference is not more samples, it is
+removing the dominant noise source rather than averaging over it:
+
+- **Both arms in one process**, sharing one `Arc<RandomXDataset>` — no second
+  dataset build, no second thermal ramp, no page-cache difference.
+- **A-B-B-A round ordering**, so drift linear in time over a block contributes
+  equally to both arms instead of accumulating into the difference.
+- **Paired differences** as the statistic, not two independent means. The noise
+  that swamped the two-binary comparison is drift *shared* by both arms of a
+  pair, and differencing cancels it.
+- **Two `RandomXVm` instances**, each with the flag fixed at construction, rather
+  than one VM toggled between rounds. Each VM owns a `JitCompiler` with its own
+  MAP_JIT region; toggling one VM would rewrite that region and re-invalidate
+  icache on every switch, and the two arms emit very differently sized blobs — so
+  a toggled design would have measured icache/iTLB residency alongside the change
+  under test.
+
+The 2026-08-29 finding stands unchanged for what it actually covered: comparing
+two mining runs of two binaries. It is not a general limit on this machine.
+
+### Correctness evidence gathered as a side effect
+The two arms are fed an identical blob sequence from an identical starting
+scratchpad, so every hash must be bit-identical; the harness asserts this every
+round and fails loudly rather than reporting a benchmark number. Across both
+phases that is roughly **147,000 hashes verified identical** — 12,288
+single-threaded plus 135,168 across 11 threads — covering thousands of distinct
+RandomX programs, entropy blocks and `dataset_offset` values.
+
+This matters more than the timing. The stage-C known-answer tests pin exactly one
+program stream; flipping the default turns the native loop on for every seed a
+pool sends, and this is the only evidence that spans that space.
+
+### C1 re-verified before flipping
+`compile_native_loop` asserts `dataset_offset <= DATASET_EXTRA_ITEMS * 64` in
+release. Since stage D enables the path for arbitrary pool work, a reachable
+violation would panic a worker mid-hash rather than mine garbage. It is
+**unreachable by construction**: `derive_program_params` computes
+`(entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE`, whose maximum is
+exactly `524287 * 64`. The assert previously wrote that bound as a literal while
+the derivation used the constant; it now uses the constant, so the two cannot
+drift apart.
+
+### Files changed
+- `benches/nativeloop_ab.rs` (new), `Cargo.toml` — the paired A/B harness.
+- `src/randomx/vm.rs` — `use_native_loop` now defaults to `true`;
+  `DATASET_EXTRA_ITEMS` made `pub(crate)`.
+- `src/randomx/jit/compiler.rs` — C1 assert expressed via the shared constant;
+  new `native_loop_emitted_instruction_accounting` test.
+- `src/randomx/tests.rs` — `test_vm_calculate_hash_jit` now calls
+  `set_native_loop(false)` explicitly. It is no longer the default path, but it
+  is still a shipping one (forced off, non-aarch64, or light mode), so it keeps
+  its own known-answer vector rather than being deleted.
+
+### The instruction-count proxy was the wrong instrument — recorded, not hidden
+The stage-D gate in the design said "instructions-retired check". Only *emitted*
+words are countable, and the body-JIT path also executes Rust-compiled loop code
+that no `Emitter` sees, so any "native vs body" word count compares a superset
+against a subset and looks like a large win regardless of the truth.
+
+What is apples-to-apples, and what the new test reports and guards:
+
+| | per iteration | per hash (16,384 iterations) |
+|---|---|---|
+| body ABI prologue+epilogue **eliminated** | 83 words | 1,359,872 |
+| native loop pre+post+2 **added** | 168 words | 2,752,512 |
+
+The eliminated column is exact and is pure register save/restore overhead. The
+added column is emitted code replacing Rust work of unknown size. **Their
+difference is not a net instruction saving and must not be quoted as one.** The
+static proxy was inconclusive on direction; the benchmark decided it.
+
+### Verification
+- Full suite **106 passed, 0 failed, 2 ignored** with the native loop as the
+  default; `cargo clippy --all-targets -- -D warnings` clean.
+- The stage-C known-answer tests still pass, now exercising the default path.
+
+### Scope note
+Unchanged: the native loop is v1 + full mode + aarch64 only. Light mode, rx/2 and
+non-aarch64 targets still run the body JIT or the interpreter, and
+`set_native_loop(false)` forces the old path back on any build.

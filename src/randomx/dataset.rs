@@ -131,12 +131,15 @@ impl RandomXDataset {
 
     /// Raw pointer to the dataset backing store, for the native-loop JIT and
     /// the differential test.
-    #[cfg(test)]
+    #[cfg(all(test, target_arch = "aarch64"))]
     pub(crate) fn as_ptr_for_test(&self) -> *const u8 {
         self.items.as_ptr() as *const u8
     }
 
-    /// Raw pointer to the dataset backing store, for prefetch hints.
+    /// Raw pointer to the dataset backing store, for prefetch hints and the
+    /// native-loop JIT. Both are aarch64-only, so on other targets this would
+    /// be dead code.
+    #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     pub(crate) fn as_ptr(&self) -> *const u8 {
         self.items.as_ptr() as *const u8

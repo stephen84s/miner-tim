@@ -360,7 +360,13 @@ fn is_zero_or_power_of_2(x: u64) -> bool {
 const RX_MXCSR_DEFAULT: u32 = 0x9FC0;
 
 /// Set hardware FP state for RandomX (FTZ, DAZ, exception masks, rounding mode).
+///
+/// `_mm_setcsr`/`_mm_getcsr` are deprecated in favour of inline assembly, but
+/// the whole MXCSR word — not just the rounding bits — is consensus-relevant
+/// here (FTZ and DAZ change results), so the allowance is preferred over
+/// hand-rolled asm on a path no Apple Silicon build ever executes.
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn set_rounding_mode(mode: u32) {
     unsafe {
         core::arch::x86_64::_mm_setcsr(RX_MXCSR_DEFAULT | ((mode & 3) << 13));
@@ -368,11 +374,13 @@ fn set_rounding_mode(mode: u32) {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn save_rounding_mode() -> u32 {
     unsafe { core::arch::x86_64::_mm_getcsr() }
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn restore_rounding_mode(saved: u32) {
     unsafe { core::arch::x86_64::_mm_setcsr(saved); }
 }
@@ -1104,6 +1112,7 @@ fn execute_vm(
 }
 
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
 fn execute_vm(
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
@@ -1403,21 +1412,21 @@ fn execute_vm_inner(
 /// differential test must start from the same mode: CFROUND writes FPCR and
 /// deliberately never restores it (the mode carries across program chains), so
 /// running one path leaves the mode altered for the next.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn reset_rounding_mode_for_test() {
     set_rounding_mode(0);
 }
 
 /// Scratchpad size, so tests size their buffers from the same constant the JIT
 /// masks against rather than a local copy that could drift.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn scratchpad_size() -> usize {
     SCRATCHPAD_L3_SIZE
 }
 
 /// Read the current FP rounding mode, so the differential test can confirm
 /// both paths leave it in the same state (design C3).
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn read_rounding_mode_for_test() -> u64 {
     // save_rounding_mode returns u32 on x86_64 and u64 on aarch64; widen.
     #[allow(clippy::useless_conversion)]
@@ -1429,7 +1438,7 @@ pub(crate) fn read_rounding_mode_for_test() -> u64 {
 /// Seed the loop's live inputs exactly as `execute_vm_inner` does: r zeroed,
 /// a-registers from the program entropy. The native-loop prologue reads both
 /// from `nreg`, so the JIT path must start from the same state.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn init_registers_from_entropy_for_test(
     nreg: &mut NativeRegisterFile,
     program_bytes: &[u8],
@@ -1449,7 +1458,7 @@ pub(crate) fn init_registers_from_entropy_for_test(
 
 /// Run the real interpreter/body-JIT loop for `iterations` and return its
 /// loop-carried state.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_vm_for_test(
     nreg: &mut NativeRegisterFile,

@@ -48,7 +48,11 @@ rust:lint:
 rust:audit:
   stage: check
   before_script:
-    - cargo install cargo-audit --locked
+    # The cargo cache is restored across pipelines, so cargo-audit is usually
+    # already in .cargo/bin — and a plain `cargo install` errors out ("binary
+    # already exists in destination") rather than no-opping, which failed this
+    # job on every cached run.
+    - command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
   script:
     # Scans Cargo.lock against https://rustsec.org advisories.
     - cargo audit

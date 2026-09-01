@@ -523,7 +523,7 @@ unsafe fn hash_and_fill_aes_1rx4_neon(scratchpad: &mut [u8], hash_out: &mut [u8;
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
-unsafe fn fill_aes_1rx4_aesni(state: &mut [u8; 64], output: &mut [u8]) {
+unsafe fn fill_aes_1rx4_aesni(state: &mut [u8; 64], output: &mut [u8]) { unsafe {
     use std::arch::x86_64::*;
 
     let mut s0 = _mm_loadu_si128(state.as_ptr() as *const __m128i);
@@ -556,11 +556,11 @@ unsafe fn fill_aes_1rx4_aesni(state: &mut [u8; 64], output: &mut [u8]) {
     _mm_storeu_si128(state.as_mut_ptr().add(16) as *mut __m128i, s1);
     _mm_storeu_si128(state.as_mut_ptr().add(32) as *mut __m128i, s2);
     _mm_storeu_si128(state.as_mut_ptr().add(48) as *mut __m128i, s3);
-}
+}}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
-unsafe fn fill_aes_4rx4_aesni(state: &[u8; 64], output: &mut [u8]) {
+unsafe fn fill_aes_4rx4_aesni(state: &[u8; 64], output: &mut [u8]) { unsafe {
     use std::arch::x86_64::*;
 
     let mut s0 = _mm_loadu_si128(state.as_ptr() as *const __m128i);
@@ -607,11 +607,11 @@ unsafe fn fill_aes_4rx4_aesni(state: &[u8; 64], output: &mut [u8]) {
         _mm_storeu_si128(out.add(i * 4 + 3), s3);
         i += 1;
     }
-}
+}}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
-unsafe fn hash_aes_1rx4_aesni(input: &[u8]) -> [u8; 64] {
+unsafe fn hash_aes_1rx4_aesni(input: &[u8]) -> [u8; 64] { unsafe {
     use std::arch::x86_64::*;
 
     let mut s0 = _mm_loadu_si128(HASH_1R_STATE0.as_ptr() as *const __m128i);
@@ -653,11 +653,11 @@ unsafe fn hash_aes_1rx4_aesni(input: &[u8]) -> [u8; 64] {
     _mm_storeu_si128(out.as_mut_ptr().add(32) as *mut __m128i, s2);
     _mm_storeu_si128(out.as_mut_ptr().add(48) as *mut __m128i, s3);
     out
-}
+}}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "aes,sse2")]
-unsafe fn hash_and_fill_aes_1rx4_aesni(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) {
+unsafe fn hash_and_fill_aes_1rx4_aesni(scratchpad: &mut [u8], hash_out: &mut [u8; 64], fill_state: &mut [u8; 64]) { unsafe {
     use std::arch::x86_64::*;
 
     // Hash state
@@ -730,7 +730,7 @@ unsafe fn hash_and_fill_aes_1rx4_aesni(scratchpad: &mut [u8], hash_out: &mut [u8
     _mm_storeu_si128(hash_out.as_mut_ptr().add(16) as *mut __m128i, hs1);
     _mm_storeu_si128(hash_out.as_mut_ptr().add(32) as *mut __m128i, hs2);
     _mm_storeu_si128(hash_out.as_mut_ptr().add(48) as *mut __m128i, hs3);
-}
+}}
 
 // ============================================================================
 // RandomX v2: F/E-register AES mix (RANDOMX_V2_SEMANTICS.md §3)

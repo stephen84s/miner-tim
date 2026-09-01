@@ -1495,6 +1495,14 @@ removing the dominant noise source rather than averaging over it:
 The 2026-08-29 finding stands unchanged for what it actually covered: comparing
 two mining runs of two binaries. It is not a general limit on this machine.
 
+**Read the 11-thread CI for what it is.** It is a CI on the *aggregate* hashrate
+difference: per-round rates are summed across threads and the pairing is done on
+the sums, over n=24 rounds. Aggregate throughput is genuinely steadier than any
+one thread, so ±0.31% is a fair interval for the quantity the miner cares about —
+but it is *not* a statement about per-thread effect size, and it should not be
+compared like-for-like against the single-thread phase's ±5%. The claim this
+supports is "aggregate hashrate is ~9% higher", nothing narrower.
+
 ### Correctness evidence gathered as a side effect
 The two arms are fed an identical blob sequence from an identical starting
 scratchpad, so every hash must be bit-identical; the harness asserts this every

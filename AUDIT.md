@@ -1419,7 +1419,19 @@ project was actually being validated. Two independent causes, both fixed here:
   `#[cfg(all(test, target_arch = "aarch64"))]`.
 - `rust:audit` — `cargo install cargo-audit --locked` fails with "binary already
   exists in destination" whenever the cargo cache is restored, which is every
-  run after the first. Guarded with `command -v`.
+  run after the first. Guarded by testing `$CARGO_HOME/bin/cargo-audit` directly;
+  `command -v` does **not** work here because `CARGO_HOME` is redirected into the
+  project but the image only has `/usr/local/cargo/bin` on PATH. Fixing *that*
+  by setting `PATH` as a CI variable is a trap that was tried and reverted:
+  GitLab does not expand `$PATH` in variable values, so the value is clobbered
+  and the runner cannot prepare the environment at all ("exec:
+  gitlab-runner-build: not found"). It is unnecessary anyway — cargo searches
+  `$CARGO_HOME/bin` for `cargo-*` subcommands.
+
+**Result: pipeline #59 green on all three jobs.** `rust:test` in particular had
+been *skipped*, never executed, on every recent pipeline — it is in the `test`
+stage and the `check` stage always failed first. It now runs: 41 passed, 0
+failed, 2 ignored on x86_64 Linux.
 
 ### Assumptions / constraints
 - CI runs on x86_64 Linux and therefore **can never execute the JIT tests** —

@@ -1,5 +1,5 @@
 # Review: MR !1 — JIT native iteration loop
-Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T14:05:00Z
+Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T14:25:00Z
 
 ## Status
 IN PROGRESS
@@ -18,7 +18,50 @@ IN PROGRESS
 | Benchmark | benches/nativeloop_ab.rs | NOT STARTED | |
 
 ## Findings
-(none yet)
+
+### F1 — The A/B benchmark now measures the native loop against ITSELF; the +9.01% claim is not reproducible from the committed tree  [MAJOR]
+**Where:** `benches/nativeloop_ab.rs:93-96`, `src/randomx/vm.rs:1669` and `:1696`
+**Claim:** The "baseline" arm of the paired benchmark is not the body-JIT path.
+Both arms run the native loop, so a re-run of the harness as committed can only
+report noise around 0%, and its per-round hash-equality assertion degenerates to
+comparing a path against itself.
+
+**Evidence:**
+```rust
+// benches/nativeloop_ab.rs:93
+let mut base_vm = RandomXVm::new_full(KEY, dataset.clone());
+let mut nat_vm  = RandomXVm::new_full(KEY, dataset.clone());
+nat_vm.set_native_loop(true);        // <-- base_vm is never set to false
+```
+and, in the *same commit* (260bc89, "stage D"), `RandomXVm::new_full` gained
+`use_native_loop: true` (vm.rs:1696; `new` likewise at :1669). Before that commit
+the field defaulted to `false` and `base_vm` really was the body JIT — which is
+almost certainly the state in which the +9.01% figure was actually measured. The
+default flip and the harness landed together, so the harness was invalidated by
+the very change it was written to justify. `src/randomx/tests.rs` was updated in
+that commit to add an explicit `set_native_loop(false)` to
+`test_vm_calculate_hash_jit`; the bench was not given the same treatment.
+
+**Failure scenario:** No wrong hashes and no memory unsafety. The damage is to
+the evidence:
+1. The headline performance claim in AUDIT.md, CLAUDE.md and the design doc
+   cannot be reproduced or re-checked by anyone (including CI or a future
+   reviewer) by running the harness that is supposed to support it.
+2. The "~147,000 hashes verified identical between the two paths" correctness
+   argument — described in AUDIT.md as mattering "more than the timing", and as
+   the *only* evidence covering program space beyond the single known-answer
+   stream — is, for any run of the committed code, a tautology. Whatever run
+   produced the original number is not repeatable.
+3. A future regression that slows or breaks the body-JIT path would be invisible
+   to this harness.
+
+Fix is one line (`base_vm.set_native_loop(false);`), plus re-running the
+measurement to confirm the number still holds.
+
+**Confidence:** HIGH on the code fact (read directly, both call sites). MEDIUM
+on "the original measurement was taken pre-flip" — that is inference from the
+commit contents, not something I can verify. Empirical confirmation attempted
+below.
 
 ## Verified-correct
 

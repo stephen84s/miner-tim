@@ -1,5 +1,5 @@
 # Review: MR !1 — JIT native iteration loop
-Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T14:25:00Z
+Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T14:55:00Z
 
 ## Status
 IN PROGRESS
@@ -58,10 +58,134 @@ the evidence:
 Fix is one line (`base_vm.set_native_loop(false);`), plus re-running the
 measurement to confirm the number still holds.
 
-**Confidence:** HIGH on the code fact (read directly, both call sites). MEDIUM
-on "the original measurement was taken pre-flip" — that is inference from the
-commit contents, not something I can verify. Empirical confirmation attempted
-below.
+**Also — and this is why F1 is MAJOR rather than a benchmarking nit:** the
+harness is the *only* thing in this MR that exercises the native loop over a
+broad program space. Recorded coverage after F1:
+- differential tests: 4 seeds x {1,2,3} iterations + 1 seed x 2048 = 5 distinct
+  programs, covering 4 of the 16 `readReg0..3` combinations;
+- known-answer tests: 8 real chains x 2048 iterations each, twice
+  (`calculate_hash` and `calculate_hash_pipelined`), against the canonical
+  vector — genuinely strong, but one fixed program stream;
+- benchmark: claimed ~147,000 hashes over thousands of programs — **void as
+  committed**, because both arms are the same code path.
+So the surviving broad-space evidence is ~13 programs, not thousands.
+
+**Confirmed empirically.** Ran `cargo bench --bench nativeloop_ab -- 1 3 64` on
+this branch:
+```
+=== 1 thread ===
+  body JIT     : mean    606.6 H/s   median    606.2
+  native loop  : mean    606.5 H/s   median    608.0
+  paired diff  : -0.02%  (95% CI -0.92% .. +0.89%, n=6)
+  verdict      : NO MEASURABLE DIFFERENCE (CI includes 0)
+```
+Two arms of identical code, as predicted.
+
+**Commit archaeology confirms the mechanism** (raises the earlier MEDIUM to
+HIGH): `git show 260bc89^:src/randomx/vm.rs` has `use_native_loop: false` at
+both constructors; `git show 260bc89:src/randomx/vm.rs` has `true`; and
+`benches/nativeloop_ab.rs` is *added* by 260bc89 already without a
+`set_native_loop(false)` on `base_vm`. So the harness has never been valid in
+any committed tree state — it was presumably valid in the author's working tree
+before the vm.rs edit was applied.
+
+**Important framing:** my near-zero result does NOT show the +9.01% was wrong.
+It shows the claim is *unverifiable from this tree*. My own absolute numbers
+(606 H/s both arms, vs the recorded 337.5 / 358.3) differ from the recorded run
+by ~70%, which is itself a reminder that the single-thread phase is dominated by
+machine state; I used 3 pairs x 64 hashes rather than the default 12 x 256.
+
+**Confidence:** HIGH.
+
+### F2 — `make test` runs debug, but the AUDIT's verification was release, so the debug_assert safety nets never ran in the profile that was actually verified  [MINOR]
+**Where:** `Makefile:42-43` (`test:` -> `cargo test`), AUDIT.md 2026-09-01
+("Full suite: 105 passed ... (release)", "106 passed ... (release)")
+**Claim:** Three of the guards this MR added are `debug_assert!` and are
+therefore inert in a release test run: the imm7 range checks on
+`stp_fp_imm`/`ldp_fp_imm` (aarch64.rs), the `subs_imm` imm12 check, and the
+CBRANCH forward-target check (compiler.rs:637-640). The AUDIT reports the suite
+run in release. So the runs that were used as evidence did not exercise those
+asserts, and `make test` (which would) is a different profile from the one
+verified.
+**Failure scenario:** None today — I proved the CBRANCH invariant holds by
+construction (see VC12) and the imm7 offsets used are 0/16/32/48, far inside
+range. This is a process gap, not a live bug: the guards read as safety nets in
+the AUDIT narrative but do not run there.
+**Confidence:** HIGH on the facts; the "no live bug" part is HIGH for CBRANCH
+and imm7 specifically.
+
+### F3 — The CBZ zero-iteration patch has no range assertion, unlike the loop back-branch  [MINOR]
+**Where:** `src/randomx/jit/compiler.rs:816-822`
+**Claim:** The back-branch gets
+`debug_assert!((-(1<<18)..(1<<18)).contains(&rel), "loop back-branch out of B.cond imm19 range")`,
+but the forward CBZ patch two lines later does
+`e.code[zero_guard] = 0xB4000000 | ((skip & 0x7FFFF) << 5) | reg::X28;`
+with no check that `skip < 2^18`. A silent `& 0x7FFFF` truncation would produce
+a branch to a wrong (possibly negative) offset.
+**Failure scenario:** Unreachable today — the whole native-loop blob measures
+254 words with an empty body and roughly 1.2k words with a full 256-instruction
+program (I emitted and disassembled it), against a 2^18-word limit. It would
+take a ~200x growth in emitted body size to reach. Recording it because the
+neighbouring branch is asserted and this one is not, so the asymmetry looks like
+an oversight rather than a decision.
+**Confidence:** HIGH that the assert is absent; HIGH that it is currently
+unreachable.
+
+### F4 — Two 2 GiB `LazyLock` datasets can be resident simultaneously in the test binary  [MINOR]
+**Where:** `src/randomx/tests.rs:30-40` (`test_key_000_dataset`, key
+`test key 000`) and `src/randomx/tests.rs` `native_loop_diff_tests::test_dataset`
+(key `native loop test key`).
+**Claim:** These are two different keys, so they are two different 2 GiB
+allocations, both `static LazyLock` and therefore never freed for the life of
+the test process. With the default parallel test harness both can be live at
+once, plus two 256 MiB Argon2d caches — ~4.5 GiB peak. Separately,
+`native_loop_zero_iterations_terminates` calls `test_dataset()` purely to obtain
+a pointer that the emitted code never dereferences (0 iterations), forcing a
+full 2 GiB build for nothing.
+**Failure scenario:** OOM / heavy swapping on a 8-16 GiB machine running
+`make test`. Not a correctness issue.
+**Confidence:** HIGH.
+
+### F5 — `mean_ci95` hardcodes t = 2.09 but the sample size is a CLI argument  [MINOR]
+**Where:** `benches/nativeloop_ab.rs:70-77`
+**Claim:** The comment says "2.09 covers df >= 19". With the defaults
+(`pairs = 12`) n = 24 and df = 23, where t(0.975) = 2.069 — so 2.09 is correctly
+conservative. But `pairs` is `pos.get(1)`, so a user passing `3` gets n = 6,
+df = 5, t(0.975) = 2.571, and the reported CI is ~19% too narrow. There is no
+guard or warning.
+**Failure scenario:** An under-wide CI leading to an over-confident verdict from
+a short run. (My own run above hit exactly this: n=6.)
+**Confidence:** HIGH.
+
+### F6 — 11-thread phase: threads are not synchronised, so "round i is concurrent across threads" is only approximately true  [QUESTION]
+**Where:** `benches/nativeloop_ab.rs:200-215`
+**Claim:** Each thread runs its own A-B-B-A schedule independently; nothing
+barriers them. The aggregation comment asserts "round i of thread 0 is
+concurrent with round i of every other thread", which holds only while rounds
+take equal wall time — i.e. it assumes the thing being measured. Once the arms
+differ in speed the threads drift out of phase, so each arm's rounds partly
+overlap the other arm's rounds on sibling threads.
+**Failure scenario:** The mixing dilutes a real effect rather than manufacturing
+one (each arm sees a blend of both arms' memory pressure), so it does not
+threaten the *direction* of the +9.01% result — but it does mean the aggregate
+CI of +-0.31% is narrower than the design's independence assumption warrants.
+AUDIT.md already caveats the aggregate CI; this is the mechanism behind that
+caveat.
+**Confidence:** MEDIUM — I read the code but cannot quantify the phase drift
+without a working harness (see F1).
+
+### F7 — 8 redundant FMOVs per iteration remain in the f-load path  [MINOR / opportunity, not a defect]
+**Where:** `src/randomx/jit/compiler.rs:908-916`
+**Claim:** Review round 4 removed the d25/d26 round-trip for the **e**
+registers by writing the masked value straight to the destination. The **f**
+path still does `fmov d0, d25` / `fmov d1, d26` per lane — 8 FMOVs per
+iteration, 131,072 per hash, the exact quantity the round-4 note claims to have
+eliminated. Also, `add x0, x27, #imm` followed by `add x1, x16, x0` inside
+`emit_cvt_packed_int` is two instructions where the base `x16 + sp_addr1` could
+be formed once per iteration (as the r-load path already does with x2).
+Confirmed in the disassembly I produced.
+**Failure scenario:** None — pure performance.
+**Confidence:** HIGH.
 
 ## Verified-correct
 
@@ -170,6 +294,41 @@ release. `kind` is set at the end of both `compile` and `compile_native_loop`.
 **VC10 — JIT buffer bound.** `JitMemory::write_code` has a hard
 `assert!(byte_len <= self.size)` and `JIT_CODE_SIZE` is 64 KiB; the native-loop
 blob is roughly 1.2k words (~4.8 KiB). No overflow risk.
+
+**VC12 — CBRANCH targets can never branch into the loop prologue.**
+This is the one thing that would turn a latent body-JIT wart into a native-loop
+hang (word 0 is now the `stp` prologue, and re-entering it pushes 160 bytes per
+pass). It cannot happen: `compile_program` (vm.rs:565-567) resets
+`register_usage` to **-1**, and `ibc.target = register_usage[creg]` is read
+*before* the "mark all registers used" loop sets them to `i`, so `target` is
+always in `[-1, i-1]`. `emit_cbranch` uses `offsets[target + 1]`, i.e. index
+`[0, i]`, and `emit_body` writes `offsets[i] = e.len()` **before** emitting
+instruction `i` — so every index it can reach is already populated. The
+`target = -1` case resolves to `offsets[0]`, the first body word, which is also
+where the interpreter resumes (`pc = -1; pc += 1`). Semantics match, and the
+native loop correctly does *not* re-run `emit_iteration_pre` on such a branch.
+
+**VC13 — the emitted blob was disassembled end to end and is correct.**
+I re-implemented the emit path in a standalone binary (including `aarch64.rs`
+verbatim and the four scaffolding functions extracted from `compiler.rs`),
+emitted a full prologue / CBZ / iteration-pre / iteration-post / subs / b.ne /
+epilogue with `readReg = {1,3,5,7}`, `dataset_offset = 524287*64`, and
+disassembled it with `as -arch arm64` + `otool -tV`. Everything checks:
+- `mov x22,x2; mov x28,x3; mov x23,x4; mov x21,x0; mov x16,x1` — x2/x3 captured
+  first, before anything that could clobber them (CFROUND scratch).
+- `mov x0,#0xffc0; movk x0,#0x1ff,lsl#16; add x22,x22,x0` — dataset_offset
+  (0x01FFFFC0 = 33,554,368) folded into the base (C6).
+- 8 r loads off x21, 8 a loads at +0xc0..0xf8, **no f/e loads** (correct: both
+  are reassigned at the loop head).
+- `cbz x28, 0x35c` lands exactly on the first epilogue word; `b.ne 0xbc` lands
+  exactly on the loop head. Both patched offsets are right.
+- iteration body exactly as in VC4, including `eor w25,w25,w1` (mx) *before* the
+  eight dataset `ldr`/`eor`, and `stp d0,d1,[x0]` .. `stp d6,d7,[x0,#0x30]` for
+  the stride-16 f stores.
+- epilogue stores x24/x25/x26/x27 to [x23,#0/8/16/24], then r, f, e to
+  x21 — **and only then** pops d14/d15..d8/d9, so the e-registers written to
+  `nreg` are the loop's values, not the caller's restored ones.
+- 10 pushes, 10 pops, exact reverse order, `ret`.
 
 **VC11 — no concurrency hazard.** `calculate_hash_pipelined` is fully
 sequential: `execute_vm` for all 8 chains, then `hash_and_fill_aes_1rx4`. The

@@ -1,8 +1,8 @@
 # Review: MR !1 — JIT native iteration loop
-Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T14:55:00Z
+Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T15:20:00Z
 
 ## Status
-IN PROGRESS
+COMPLETE
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -11,11 +11,11 @@ IN PROGRESS
 | AUDIT entries | AUDIT.md (2026-09-01) | DONE | Two entries read (stage A-C, stage D) |
 | Rust reference loop | src/randomx/vm.rs | DONE | execute_vm_inner:1261-1399 read line-by-line; used as ground truth |
 | Emitter encodings | src/randomx/jit/aarch64.rs | DONE | All 6 new encoders assembled+compared; bitmask imms verified |
-| Native loop emission | src/randomx/jit/compiler.rs | IN PROGRESS | Semantic walk done; disassembly cross-check pending |
+| Native loop emission | src/randomx/jit/compiler.rs | DONE | Semantic walk + full end-to-end disassembly cross-check (VC13) |
 | Memory safety (C1, scratchpad masks) | compiler.rs / dataset.rs / vm.rs | DONE | See VC5/VC6 |
 | ABI prologue/epilogue | compiler.rs / memory.rs | DONE | See VC7 |
-| Tests | src/randomx/tests.rs | NOT STARTED | |
-| Benchmark | benches/nativeloop_ab.rs | NOT STARTED | |
+| Tests | src/randomx/tests.rs | DONE | Read + executed in release; adequacy analysis below |
+| Benchmark | benches/nativeloop_ab.rs | DONE | Read + executed; F1 |
 
 ## Findings
 
@@ -336,5 +336,91 @@ sequential: `execute_vm` for all 8 chains, then `hash_and_fill_aes_1rx4`. The
 threads, so nothing else writes the scratchpad while the emitted loop holds a
 raw pointer to it.
 
+## Test adequacy (priority 4)
+
+**Executed locally** (this is the mandatory gate — CI is x86_64 and cannot run
+any of it):
+```
+cargo test --release native_loop -- --nocapture --test-threads=1
+  native_loop_emitted_instruction_accounting        ok
+  test_native_loop_known_answer                     ok
+  test_native_loop_known_answer_pipelined           ok
+  native_loop_matches_interpreter                   ok
+  native_loop_matches_interpreter_full_program      ok
+  native_loop_zero_iterations_terminates            ok
+  6 passed; 0 failed; finished in 89.83s
+cargo clippy --all-targets -- -D warnings                          clean
+cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+The accounting test's own output confirms the AUDIT's figures exactly:
+prologue 48 + epilogue 35 = 83 words eliminated per iteration; pre 111 + post 55
++ 2 = 168 added.
+
+**What the tests genuinely gate:**
+- The differential test compares against the *real* `execute_vm_inner` (via
+  `execute_vm_for_test`), not a re-implementation, so it cannot share a bug with
+  the code under test at the loop-driver level.
+- It compares the full register file (as raw bits, not floats), the entire 2 MiB
+  scratchpad, the **full u64** loop state, and the final FPCR. Comparing the
+  full u64 is what makes a C5 violation (64-bit EOR on ma/mx) detectable; the
+  comment saying so is accurate.
+- Both paths are reset to rounding mode 0 first, which is necessary and easy to
+  get wrong.
+- N=2 and N=3 close the D2 blind spot; N=2048 for one seed exercises the steady
+  state and CBRANCH-heavy behaviour.
+- The two known-answer tests are the real anchor: 8 chains x 2048 iterations
+  against the canonical `639183aa...` vector, on **both** `calculate_hash` and
+  `calculate_hash_pipelined`. This is the only test that exercises FPCR carry
+  across chains and the serialize->blake2b->next-program plumbing.
+- `test_vm_calculate_hash_jit` now explicitly sets `set_native_loop(false)`, so
+  it remains a genuine control on the body-JIT path rather than silently
+  becoming a duplicate of the native-loop test.
+
+**What would still pass (defect classes not gated):**
+1. **Any prefetch error** — wrong register, missing mask, pre- vs post-swap.
+   `PRFM` changes no architectural state. Correct by construction and by my
+   disassembly reading only. (Documented in design §6a; I confirmed the emitted
+   addresses match `vm.rs:1339` and `:1380-1391`.)
+2. **A bug in `derive_program_params` itself.** The differential test calls it
+   for the JIT side and `execute_vm_inner` calls the same function for the
+   reference side, so a bug there is invisible to it by construction. It *is*
+   caught by the known-answer tests (both paths would produce a wrong hash), so
+   this is covered — but not by the test that appears to cover it.
+3. **Program-space-specific defects.** After F1, the differential + known-answer
+   tests cover roughly 13 distinct programs. `readReg0..3` coverage is 4 of 16
+   combinations from the differential test plus whatever the 8 known-answer
+   chains happen to hit. Seed 78 puts `dataset_offset` at 99.67% of its maximum
+   but nothing tests the exact maximum, and nothing tests `ma` at exactly
+   `0x7FFFFFC0` (the two together are the C1 worst case).
+4. **v2 / light-mode misrouting** is asserted, not tested — no test asserts that
+   a V2 or light-mode VM with `set_native_loop(true)` stays off the native path.
+   The dispatch guard in `execute_vm_inner` (`version == RxVersion::V1` and
+   `dataset.is_some()`) is correct by reading, so this is a low-value gap.
+5. **Anything shared by both prologues** — `NativeRegisterFile` offsets,
+   `FSCAL_MASK`, `DYNAMIC_MANTISSA_MASK`, and every body emitter. Only the
+   known-answer vectors gate those. (Correctly stated in design §6a.)
+6. **Concurrency.** Nothing tests multiple threads each driving their own
+   native-loop JIT. `pthread_jit_write_protect_np` is per-thread and each VM owns
+   its own MAP_JIT region, so I see no hazard, but it is untested here.
+
 ## Remaining work if this review is interrupted
-- Everything below the design doc.
+- None. All areas in the coverage ledger are DONE.
+- If someone wants to go further, the two highest-value additions would be
+  (a) fixing F1 and re-running the harness to re-establish the +9.01% claim and
+  the broad-program-space correctness evidence, and (b) a differential case
+  pinned at the C1 worst case (`dataset_offset` == `DATASET_EXTRA_ITEMS*64` and
+  `ma` == `0x7FFFFFC0`), which is currently only argued, never executed.
+
+## Verdict
+- **Blockers: none.** I disassembled the full emitted loop and walked every
+  emitted instruction against `execute_vm_inner`. The D1 `mx`-before-dataset-XOR
+  ordering, the f load-stride-8 / store-stride-16 asymmetry, the W-form u32
+  updates (C5), the masked post-swap dataset prefetch, the C1 dataset bound, the
+  scratchpad masking, the AAPCS64 save/restore pairing, the FPCR non-restoration
+  and its outer containment (C3), and the `CompiledKind` ABI guard are all
+  present and correct. All six native-loop tests pass in release; clippy is clean
+  on both aarch64 and x86_64.
+- **Major: F1** — the A/B benchmark compares the native loop against itself, so
+  the +9.01% claim and the "~147,000 hashes verified identical" correctness
+  evidence cannot be reproduced from this tree.
+- **Minors: F2-F5, F7. Question: F6.**

@@ -71,8 +71,18 @@ fn mean_ci95(xs: &[f64]) -> (f64, f64) {
         return (mean, f64::NAN);
     }
     let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    // t(0.975) for the small df this harness produces; 2.09 covers df >= 19.
-    (mean, 2.09 * (var / n).sqrt())
+    // t(0.975) by degrees of freedom. `pairs` is a CLI argument, so a single
+    // hardcoded value is wrong whenever the caller asks for fewer rounds — at
+    // n=6 a flat 2.09 understates the interval by roughly a fifth.
+    let df = xs.len() - 1;
+    let t = match df {
+        1 => 12.706, 2 => 4.303, 3 => 3.182, 4 => 2.776, 5 => 2.571,
+        6 => 2.447, 7 => 2.365, 8 => 2.306, 9 => 2.262, 10 => 2.228,
+        11 => 2.201, 12 => 2.179, 13 => 2.160, 14 => 2.145, 15 => 2.131,
+        16 => 2.120, 17 => 2.110, 18 => 2.101, 19 => 2.093,
+        20..=29 => 2.045, 30..=59 => 2.001, _ => 1.96,
+    };
+    (mean, t * (var / n).sqrt())
 }
 
 fn median(xs: &[f64]) -> f64 {
@@ -95,6 +105,13 @@ fn ab_phase(
     hashes: usize,
 ) -> (Vec<f64>, Vec<f64>) {
     let mut base_vm = RandomXVm::new_full(KEY, dataset.clone());
+    // BOTH arms set the flag explicitly. Relying on the constructor default for
+    // the baseline is what broke this harness once already: it was written when
+    // the default was `false`, then stage D flipped the default to `true` in the
+    // same commit, so the "baseline" silently became a second native-loop arm
+    // and the benchmark measured the native loop against itself (~-0.02%).
+    // Never infer an arm from a default that another commit can move.
+    base_vm.set_native_loop(false);
     let mut nat_vm = RandomXVm::new_full(KEY, dataset.clone());
     nat_vm.set_native_loop(true);
 

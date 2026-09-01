@@ -1563,3 +1563,93 @@ static proxy was inconclusive on direction; the benchmark decided it.
 Unchanged: the native loop is v1 + full mode + aarch64 only. Light mode, rx/2 and
 non-aarch64 targets still run the body JIT or the interpreter, and
 `set_native_loop(false)` forces the old path back on any build.
+
+---
+
+## 2026-09-02 - CORRECTION: stage D's +9.01% is retracted. Real figure +6.76%.
+
+### What was wrong
+Independent review round 5 (see `REVIEW_MR1.md`, finding F1) found that
+`benches/nativeloop_ab.rs` built its **baseline** arm with `RandomXVm::new_full`
+and relied on the constructor default for it, calling `set_native_loop` only on
+the native arm. That was correct when the harness was written — the default was
+`false` — but the *same commit* (260bc89) flipped the default to `true`. From the
+committed tree the "baseline" was a second native-loop arm, so the benchmark
+measured the native loop against itself. The reviewer re-ran it and got -0.02%,
+"NO MEASURABLE DIFFERENCE".
+
+**Root cause, stated so it is not repeated: an experiment arm was inferred from a
+default that another change was free to move.** Both arms now set the flag
+explicitly, and the comment in the harness says why.
+
+### Corrected measurement (both arms explicit, machine quiet)
+
+| Phase | body JIT | native loop | paired diff | 95% CI |
+|---|---|---|---|---|
+| 1 thread | 570.0 H/s | 604.9 H/s | **+6.12%** | +6.02% .. +6.22% |
+| 11 threads (aggregate) | 4756.1 H/s | 5077.1 H/s | **+6.76%** | +6.20% .. +7.32% |
+
+24 of 24 paired differences positive in **both** phases.
+
+### Two things changed, not one — and the second is the more instructive
+1. The invalid baseline (above).
+2. **The original run was taken on a contended machine.** Its absolute baseline
+   was 337.5 H/s single-threaded where the clean re-run gets 570.0 H/s — a 69%
+   difference in the *baseline itself* — and its per-pair differences ranged
+   -13.8% to +41.7%, versus +5.8% to +6.8% now. The original 1-thread CI
+   (+0.79%..+11.33%) was correctly reporting that noise; the 11-thread aggregate
+   CI (+-0.31%) was not, because summing 11 threads before differencing hid it.
+   That is exactly the failure mode the 2026-09-01 entry already warned about in
+   its own caveat paragraph, and it still got quoted as the headline.
+
+**Lesson for future benchmarking here, beyond the earlier 2026-08-29 finding:** a
+tight CI is not evidence of a quiet machine. Check the absolute rates against a
+known-good baseline before trusting an interval. A run whose baseline is 40%
+below what the same harness produces on an idle machine should be discarded
+regardless of how tight its interval looks.
+
+### What this does NOT change
+The direction and the decision. The native loop is faster in every one of the 48
+paired rounds across both phases, and the default stays ON. The claim moves from
+"+9.01% at 11 threads" to "+6.1% single-threaded, +6.8% at 11 threads" — smaller,
+and now measured against a genuine baseline.
+
+### Correctness evidence is restored, not merely re-run
+The harness asserts both arms produce bit-identical hashes every round. While the
+baseline was silently the native loop, that assertion compared the native loop
+with itself and was vacuous — so the "~147,000 hashes verified identical" claim
+in the 2026-09-01 entry was, for that run, worthless. The corrected run makes it
+real: ~147,000 hashes across thousands of distinct programs, entropy blocks and
+`dataset_offset` values, verified between two genuinely different execution
+paths. This is the evidence that justifies the default being ON, and it only
+exists as of this entry.
+
+### Other review findings applied
+- **F3** — the CBZ zero-guard back-patch masked its offset (`skip & 0x7FFFF`)
+  with no range assert, while the back-branch two lines away was asserted. Added.
+  Unreachable today (~1.2k-word blob vs a 2^18 limit).
+- **F5** — `mean_ci95` hardcoded t=2.09 while `pairs` is a CLI argument, making
+  the interval ~19% too narrow at n=6. Replaced with a t-table by df.
+
+### Deferred, with reasons
+- **F2** `make test` runs debug while AUDIT verified in release, so the new
+  `debug_assert!`s never ran in the verified profile. No live bug — the reviewer
+  proved the CBRANCH invariant holds by construction — but the gap is real.
+- **F4** two 2 GiB `LazyLock` datasets can be resident at once (~4.5 GiB peak).
+- **F6** the 11-thread phase has no barrier, so "round i is concurrent across
+  threads" is assumed rather than enforced. Dilutes the effect, does not inflate.
+- **F7** 8 FMOVs per iteration remain in the f-load path — the same optimisation
+  review round 4 applied to the e path. A real follow-up win, but it changes
+  emitted ARM64 and so needs its own review round rather than riding along here.
+
+### Review round 5: no blockers
+The reviewer disassembled the emitted loop end to end and independently
+confirmed 13 items, including D1 ordering, the f stride-8-load/stride-16-store
+asymmetry, C1 (recomputed from scratch: 64 bytes margin, three guards), exact
+scratchpad masking, AAPCS64 conformance (10 push/10 pop, 16-byte aligned, x18
+untouched), C3 FPCR containment, and all six new encoders bit-compared against
+`as -arch arm64`. Full detail in `REVIEW_MR1.md`.
+
+### Verification
+- Corrected benchmark run above; 6/6 native-loop tests pass in release.
+- `cargo clippy --all-targets -- -D warnings` clean on aarch64 and x86_64.

@@ -316,10 +316,17 @@ scaffolding.
 | C | Full 2048-iteration loop; wire into `execute_vm_inner` for v1+full only | 87 vectors + v2 vectors + JIT test + **known-answer hash through the native loop** |
 | D | Gate v1+full onto the native loop; keep the Rust loop live for every other configuration | full suite; instructions-retired check |
 
-**Stage D is DONE** (2026-09-01). The default is now `true`. Measured
-**+9.01%** (95% CI +8.70%..+9.32%) at 11 threads — the configuration the miner
-actually runs — via `benches/nativeloop_ab.rs`. See AUDIT.md 2026-09-01 for the
-methodology and for why the single-thread figure is *not* the headline.
+**Stage D is DONE** (2026-09-01, number corrected 2026-09-02). The default is
+now `true`. Measured via `benches/nativeloop_ab.rs`:
+
+| Phase | body JIT | native loop | paired diff | 95% CI |
+|---|---|---|---|---|
+| 1 thread | 570.0 H/s | 604.9 H/s | **+6.12%** | +6.02% .. +6.22% |
+| 11 threads | 4756.1 H/s | 5077.1 H/s | **+6.76%** | +6.20% .. +7.32% |
+
+An earlier run of this harness reported +9.01%. It was invalid — the baseline arm
+was silently running the native loop too — and the figure was also taken on a
+contended machine. See AUDIT.md 2026-09-02 for both.
 
 Note the "instructions-retired check" in the gate above turned out to be the
 wrong instrument, and the row is left unedited as a record of that. Only

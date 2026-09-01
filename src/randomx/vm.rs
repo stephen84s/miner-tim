@@ -1636,8 +1636,8 @@ pub struct RandomXVm {
     #[cfg(target_arch = "aarch64")]
     jit: Option<super::jit::JitCompiler>,
     /// Whether to use the self-driving native loop. **On by default** as of
-    /// stage D: measured at +9.01% (95% CI +8.70%..+9.32%) at 11 threads, the
-    /// configuration the miner actually runs. Only takes effect on aarch64 +
+    /// stage D: measured at +6.76% (95% CI +6.20%..+7.32%) at 11 threads and
+    /// +6.12% (+6.02%..+6.22%) single-threaded. Only takes effect on aarch64 +
     /// rx/0 + full mode; `set_native_loop(false)` forces the per-iteration body
     /// JIT back on. See DESIGN_JIT_NATIVE_LOOP.md and AUDIT.md 2026-09-01.
     use_native_loop: bool,

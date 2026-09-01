@@ -819,6 +819,13 @@ impl JitCompiler {
             e.b_cond(COND_NE, rel);
             // Patch the zero-iteration guard to land here, past the loop.
             let skip = (e.len() - zero_guard) as u32;
+            // Same imm19 range the back-branch below is checked against; the
+            // mask would silently truncate an over-long body into a branch to
+            // the wrong instruction rather than failing.
+            debug_assert!(
+                skip < (1 << 19),
+                "CBZ zero-iteration guard offset out of imm19 range"
+            );
             e.code[zero_guard] = 0xB4000000 | ((skip & 0x7FFFF) << 5) | reg::X28;
             emit_loop_epilogue(e);
         }

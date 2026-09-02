@@ -1143,3 +1143,9 @@ untested property is that the verification is wired up *at all* — if `verified
 became unconditionally `true`, no existing test would notice. Extract the
 decision and unit-test both branches; injecting a JIT fault is the hard way to
 get there (R7-Q1).
+
+**R7-VC9 — clippy is clean on the committed HEAD for both targets.** Run against
+the clean `git archive faa4131` export, so unaffected by the working-tree edits:
+`cargo clippy --all-targets -- -D warnings` and the same with
+`--target x86_64-apple-darwin` both finish with no diagnostics. The six CLI
+parser tests pass (R7-VC8).

@@ -1262,3 +1262,58 @@ lib crate with these items `pub`, so this is an API contract, not just an
 internal note.
 **Confidence:** HIGH — enumerated every caller; confirmed the doc comment is
 unchanged by reading the file.
+
+### R8-VC2 — P1: the C1 worst-case test does reach the worst case, and a pass means what is claimed.
+Checked all three things asked:
+1. **Right entropy indices.** `ENTROPY_OFFSET = 0` (`vm.rs:67`), so
+   `entropy(idx)` is bytes `idx*8 .. idx*8+8`. The test writes `pb[13*8..13*8+8]`
+   and `pb[8*8..8*8+8]` — exactly the words `derive_program_params` reads for
+   `dataset_offset` and `ma`. Neither collides with anything else: entropy 0-7
+   seed the a-registers, 10 is `mx`, 12 the address registers, 14/15 the
+   `e_mask`. Instructions start at byte 128 (`INSTRUCTIONS_OFFSET = 16*8`), so
+   both writes stay inside the entropy block and leave the program intact.
+2. **The forced values are the maxima, not merely large.**
+   `ma = (0xFFFF_FFFF_FFFF_FFFF as u32) & 0x7FFF_FFC0 = 0x7FFF_FFC0` — the
+   largest value the mask can produce. `dataset_offset =
+   (524287 % 524288) * 64 = 524287 * 64` — the largest the modulus can produce.
+   The test asserts both before proceeding, so it cannot silently degrade into
+   testing a merely-large address.
+3. **The extreme is actually executed.** In both paths the *first* iteration
+   reads at `dataset_offset + (ma & mask)`: the interpreter takes `read_ptr`
+   from `mem_ma` before any XOR (`vm.rs:1305`), and the emitted prologue loads
+   `x24 = init_ma` and `x22 = base + dataset_offset`, with
+   `and x0, x24, #0x7fffffc0 ; add x0, x22, x0` in the first `emit_iteration_post`.
+   So iteration 1 is the pinned worst case in both arms.
+
+**What a pass proves — and it is the right thing.** The reference arm reads the
+dataset through `RandomXDataset::get_item`, which is a **bounds-checked**
+`self.items[item_number]`. So if the emitted arithmetic computed an
+out-of-range item at the top of the range, the reference would panic and the
+test would fail loudly; and if it computed a merely *different* in-range
+address, the r-registers would diverge and the comparison would fail. A pass
+therefore means "the emitted address arithmetic agrees with a bounds-checked
+read at the maximum reachable address", which is exactly the property C1 needs
+and which was previously only argued. This retires my round-5 note honestly.
+
+**One overstatement in the test's own comment** (not a finding, but worth
+knowing): it says a wrong address "means a segfault or a mismatch". A segfault
+is unlikely — 64 bytes past a 2 GiB `Vec` inside a larger heap is almost
+certainly mapped — so in practice the detector is the mismatch and the
+reference-side bounds check, not a fault. That is still sufficient; the comment
+just credits the wrong mechanism.
+
+### R8-VC3 — P2: the helper split changed nothing about what the existing tests cover.
+`assert_paths_agree(seed, iters, ds)` now calls
+`assert_paths_agree_with(&make_program_bytes(seed), seed, iters, ds)`, i.e. it
+passes the same `seed` through as `sp_seed`, and `assert_paths_agree_with` calls
+`make_scratchpad(sp_seed)` for **both** arms. So for seeds 1/2/7/78 at N=1/2/3
+and seed 11 at N=2048 the program bytes and both scratchpads are byte-identical
+to before the split. The renames are `seed` -> `sp_seed` inside the extracted
+function only, and every one is in an assertion *message*, not in a value.
+The scratchpad seeding is still tied to the right value.
+
+I also confirmed the `str.replace` collateral was fully reverted:
+`native_loop_zero_iterations_terminates` still calls `make_program_bytes(3)`
+(`tests.rs:1117`) and `make_scratchpad(3)` (`tests.rs:1140`) directly and does
+not route through either helper. The only new caller of the extracted form is
+the C1 test at `tests.rs:1094`.

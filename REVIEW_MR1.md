@@ -1317,3 +1317,73 @@ I also confirmed the `str.replace` collateral was fully reverted:
 (`tests.rs:1117`) and `make_scratchpad(3)` (`tests.rs:1140`) directly and does
 not route through either helper. The only new caller of the extracted form is
 the C1 test at `tests.rs:1094`.
+
+### R8-VC4 — P4: the withhold test closes most of the R7-Q1 gap, but not the exact hole I named.
+What is now pinned, and it is a lot: `classify_share` is a pure function with
+all four verdicts covered (`classify_share_covers_every_branch`), the
+verdict-to-action mapping is covered separately
+(`only_a_mismatch_blocks_submission`, all four variants), a single differing
+byte is covered, and `verifier_withholds_a_hash_that_does_not_match_the_reference`
+drives it with two **genuine** RandomX hashes for adjacent nonces rather than
+synthetic patterns. `pipelined_hash_matches_calculate_hash_for_the_preceding_blob`
+independently reproduces the off-by-one property I verified empirically in round
+7. The decision logic can no longer regress silently.
+
+**What remains untested is the three lines of glue in `worker_loop`:**
+```rust
+let verification_applies = verify_shares && native_loop;   // (a)
+let reference = if verification_applies { ...calculate_hash(&job_blob_current) } else { None };  // (b)
+let verified = verdict.should_submit();
+if verified && let Err(e) = pool.submit_share(...)          // (c)
+```
+My round-7 wording was "if `verified` were refactored to be unconditionally
+`true`, no test would notice" — that mutation lives in (c) and **still** would
+not be caught. So: the gap is substantially narrowed, not closed. I checked (c)
+by reading and it is correct (`should_submit()` gates `submit_share`, and
+`Withhold` is the only variant that returns false).
+I do **not** think this blocks a merge. The residue is three lines of
+straight-line code in a function that needs a live pool and a 2 GiB dataset to
+instantiate; the commit message and AUDIT.md both name it explicitly rather than
+implying full coverage, and "make `worker_loop` testable against a fake pool" is
+correctly filed as its own MR.
+
+### R8-VC5 — R7-F2/F3/F4 are all correctly fixed, and the fix is better than what I suggested.
+`fail_safe` is now a per-switch **parameter** rather than a hardcoded direction:
+`parse_native_loop` -> `parse_switch(.., default_on = true, fail_safe = false)`,
+`parse_verify_shares` -> `parse_switch(.., default_on = true, fail_safe = true)`.
+The warning text interpolates the direction (`assuming ON/OFF (the safe
+direction)`), so the message cannot drift from the behaviour. The doc block is
+re-parented onto `parse_switch` and states the asymmetry explicitly, and
+`parse_native_loop` is now a two-line wrapper — the duplication is gone. The new
+test asserts both directions side by side, including
+`assert!(parse_verify_shares(&args(&["--verify-shares", "nonsense"])))`, and the
+empty-env case I raised (`set_var(VAR, "")` -> "empty env must not disarm") is
+pinned directly.
+
+### R8-F2 — The new env-var test's SAFETY comment justifies the wrong thing; `set_var` racing `getenv` across parallel tests is the actual hazard  [MINOR]
+**Where:** `src/bin/minertim.rs`,
+`switch_reads_the_environment_and_the_flag_overrides_it`
+**Claim:** The comment reads
+`// SAFETY: a name unique to this test; no other thread reads it.`
+Name uniqueness is not what makes `std::env::set_var` unsafe. The hazard is that
+`setenv` mutates a process-global `environ` array and may reallocate it, while
+any concurrent `getenv` in another thread reads it — a use-after-free regardless
+of which *names* are involved. That is precisely why Rust 2024 marked it
+`unsafe`.
+**Evidence:** the same test binary contains tests that read the environment
+concurrently: `parse_native_loop` and `parse_verify_shares` both call
+`std::env::var` (via `parse_switch`), and `native_loop_defaults_on`,
+`native_loop_accepts_the_documented_spellings`,
+`verify_shares_fails_safe_on_because_it_is_a_safety_net` and others call them.
+`cargo test` runs these in parallel by default, so a `set_var` in one thread can
+overlap a `var()` in another.
+**Failure scenario:** flaky or crashing tests, not a production bug — the miner
+only reads the environment once, single-threaded, at startup. In practice
+libc implementations rarely shrink `environ`, so this is unlikely to bite; but
+the SAFETY comment asserts an invariant that does not hold, which is worse than
+no comment because it stops the next reader from re-checking.
+**Also, one line lower down:** `verify_shares_fails_safe_on_because_it_is_a_safety_net`
+and the `parse_native_loop` tests read the **real** `MINERTIM_VERIFY_SHARES` /
+`MINERTIM_NATIVE_LOOP` variables, so a developer who has either exported will
+see spurious failures. Pre-existing since round 6, now on more tests.
+**Confidence:** HIGH on the mechanism; the practical risk is LOW.

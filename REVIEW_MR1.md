@@ -1,8 +1,8 @@
 # Review: MR !1 — JIT native iteration loop
-Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-01T15:20:00Z
+Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-COMPLETE
+ROUND 5 COMPLETE — ROUND 6 (delta d49535a..HEAD) IN PROGRESS
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -424,3 +424,92 @@ prologue 48 + epilogue 35 = 83 words eliminated per iteration; pre 111 + post 55
   the +9.01% claim and the "~147,000 hashes verified identical" correctness
   evidence cannot be reproduced from this tree.
 - **Minors: F2-F5, F7. Question: F6.**
+
+
+---
+
+# Round 6 — delta review (d49535a..HEAD)
+Scope: `1d25c0b` (F1/F3/F5 fixes + corrected numbers) and `bbecd15` (runtime
+fallback switch). Nothing from rounds 1-5 is re-reviewed.
+
+## Round 6 coverage ledger
+| Area | File(s) | Status | Notes |
+|---|---|---|---|
+| F1 fix — is it real? | benches/nativeloop_ab.rs | IN PROGRESS | Line present; empirical proof pending |
+| F3 fix — CBZ range assert | src/randomx/jit/compiler.rs | DONE | R6-F1: bound is 2x too loose |
+| F5 fix — t-table | benches/nativeloop_ab.rs | DONE | R6-F2: buckets anti-conservative |
+| Measurement trustworthiness | AUDIT.md, bench | NOT STARTED | |
+| Fallback switch — reach | src/miner.rs, vm.rs | DONE | R6-VC1: reinit claim verified |
+| Fallback switch — precedence | src/bin/minertim.rs | IN PROGRESS | |
+| Makefile / mining.conf wiring | Makefile, mining.conf.example | DONE | R6-VC2 |
+
+## Round 6 findings
+
+### R6-F1 — The new CBZ range assert is 2x too permissive; imm19 is signed  [MINOR]
+**Where:** `src/randomx/jit/compiler.rs:822-828`
+**Claim:** The fix for my Round-5 F3 asserts `skip < (1 << 19)`, and its comment
+says this is the "same imm19 range the back-branch below is checked against".
+It is not the same range. The back-branch asserts
+`(-(1 << 18)..(1 << 18)).contains(&rel)`, which is the correct signed-imm19
+range. CBZ's imm19 is likewise a **signed** 19-bit word offset, so a forward
+branch is only representable up to `2^18 - 1`. Any `skip` in
+`[2^18, 2^19)` passes the new assert, survives `& 0x7FFFF` unchanged, and then
+sign-extends to a **negative** offset — the emitted CBZ would branch backwards
+into the middle of the loop instead of forwards to the epilogue.
+**Evidence:** The back-branch assert three lines above uses `1 << 18`; ARM ARM
+CBZ encoding is `imm19` sign-extended and shifted left 2. Confirmed by
+assembling: `cbz x28, .+16` -> `b400009c`, i.e. imm19 = 4 in bits [23:5], with
+bit 23 as the sign bit.
+**Failure scenario:** A native-loop body exceeding 262,144 emitted words would
+silently emit a backwards CBZ — an infinite loop or a jump into the middle of an
+instruction sequence, on the zero-iteration path only. Unreachable today: the
+full blob is ~1.2k words (I measured 254 with an empty body, and
+`native_loop_emitted_instruction_accounting` reports pre 111 + post 55 + a
+256-instruction body).
+**Confidence:** HIGH on the encoding and the off-by-2x; HIGH that it is
+unreachable in practice. Worth correcting because the assert was added
+*specifically* to pin this bound, and its comment asserts an equivalence that
+does not hold.
+
+### R6-F2 — The new t-table buckets pick the *largest* df in each range, so the CI is anti-conservative — including at the default n=24 used for the headline  [MINOR]
+**Where:** `benches/nativeloop_ab.rs:74-85`
+**Claim:** The exact per-df values for df = 1..19 are all correct (I checked
+each against a standard two-sided t(0.975) table). The three bucketed arms are
+not: `20..=29 => 2.045`, `30..=59 => 2.001`, `_ => 1.96` each use the value for
+the *highest* df in the bucket, so every df below the top of a bucket gets a
+t-value that is too small and therefore a CI that is too narrow.
+**Evidence:** t(0.975, 20) = 2.086 but the table returns 2.045; t(0.975, 30) =
+2.042 but the table returns 2.001; t(0.975, 60) = 2.000 but the table returns
+1.96. The default run is `pairs = 12` -> n = 24 -> **df = 23**, where the true
+value is 2.069 and the table gives 2.045 — so the reported interval is ~1.2%
+narrower than a correct t-interval. Using the *lowest* df in each bucket (2.086
+/ 2.042 / 2.000) would make it conservative in the intended direction.
+**Failure scenario:** Reported CIs are slightly optimistic. At the actual
+effect size this changes nothing — the headline +6.76% CI (+6.20%..+7.32%)
+would become roughly (+6.19%..+7.33%) and still excludes 0 by an order of
+magnitude — so it does not threaten the claim. Recording it because the whole
+point of this fix was to stop the CI being understated, and it still is, by a
+smaller amount.
+**Confidence:** HIGH.
+
+## Round 6 verified-correct
+
+**R6-VC1 — `reinit` really does preserve the flag; the coordinator's claim
+holds.** `RandomXVm::reinit` (vm.rs:1701-1706) assigns exactly three fields —
+`cache_memory`, `ss_programs`, `dataset`. It does not touch `use_native_loop`,
+and it is not a `*self = ...` reassignment (which is the shape that would
+silently reset it). So a worker that calls `set_native_loop` once at first
+construction (miner.rs:393-396) keeps the setting across every subsequent seed
+rotation. I grepped every `RandomXVm::new*` call site in `src/`: the only other
+one outside tests is `miner.rs:520`, which builds a light VM purely to obtain
+`cache_and_programs()` for dataset generation and never executes a hash, so it
+needs no flag. There is no path by which a worker gets an unflagged executing VM.
+
+**R6-VC2 — Makefile / mining.conf wiring is correct.** `-include mining.conf` is
+the Makefile's first line, so a `NATIVE_LOOP=off` in `mining.conf` is already
+set when `NATIVE_LOOP ?=` runs and the `?=` correctly does not clobber it;
+`$(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),)` then forwards it. The
+example file ships `NATIVE_LOOP=` (empty), which yields no flag and therefore
+the built-in default — the same convention already used for `THREADS` and
+`DONATE_LEVEL`. `make run NATIVE_LOOP=off` also works (command-line variables
+outrank `-include`).

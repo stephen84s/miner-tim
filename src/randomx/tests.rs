@@ -481,6 +481,56 @@ mod full_hash_tests {
         );
     }
 
+    /// The assumption the share verifier rests on: in the miner's exact usage
+    /// pattern, `calculate_hash_pipelined(next)` returns the hash of the
+    /// *current* blob, so recomputing `job_blob_current` with `calculate_hash`
+    /// reproduces it.
+    ///
+    /// If this were off by one, every share would be withheld as a false
+    /// mismatch — worse than having no verification at all, because it would
+    /// look like a JIT fault and cost 100% of revenue. Nothing else covers it:
+    /// the known-answer tests each use a single blob, where an off-by-one is
+    /// invisible.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn pipelined_hash_matches_calculate_hash_for_the_preceding_blob() {
+        let key = b"test key 000";
+        let ds = test_key_000_dataset();
+
+        // Mirror `worker_loop`: a 76-byte blob with a little-endian nonce at
+        // 39..43, advanced every iteration.
+        let blob_for = |nonce: u32| {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b[39..43].copy_from_slice(&nonce.to_le_bytes());
+            b
+        };
+
+        let mut mining_vm = vm::RandomXVm::new_full(key, ds.clone());
+        mining_vm.set_native_loop(true);
+        let mut verify_vm = vm::RandomXVm::new_full(key, ds);
+        verify_vm.set_native_loop(false);
+
+        // Worker startup: prepare on the current blob, then each call passes
+        // the *next* blob and returns the hash of the current one.
+        let mut current = blob_for(0);
+        mining_vm.prepare_scratchpad(&current);
+
+        for nonce in 1..4u32 {
+            let next = blob_for(nonce);
+            let mined = mining_vm.calculate_hash_pipelined(&next);
+            let reference = verify_vm.calculate_hash(&current);
+            assert_eq!(
+                hex_encode(&mined),
+                hex_encode(&reference),
+                "pipelined hash at nonce {} is not the hash of the blob the worker \
+                 would pass to the verifier — the verifier is off by one",
+                nonce - 1
+            );
+            current = next;
+        }
+    }
+
     /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
     /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
     #[test]

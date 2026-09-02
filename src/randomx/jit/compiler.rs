@@ -1122,6 +1122,85 @@ mod tests {
         );
     }
 
+    fn native_loop_test_config() -> ProgramConfiguration {
+        ProgramConfiguration {
+            e_mask: [0x3000_0000_0000_0000, 0x3000_0000_0000_0000],
+            read_reg0: 0,
+            read_reg1: 2,
+            read_reg2: 4,
+            read_reg3: 6,
+        }
+    }
+
+    /// The v1-only guard. `emit_iteration_post` hard-codes v1's `f ^= e` and
+    /// v1's mx aliasing, and the differential test only ever exercises v1, so
+    /// this assert is the sole thing standing between a v2 caller and silently
+    /// wrong hashes. It has never fired in normal operation — cover it.
+    #[test]
+    #[should_panic(expected = "native loop is v1-only")]
+    fn compile_native_loop_rejects_v2() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile_native_loop(&bytecode, RxVersion::V2, &native_loop_test_config(), 0, 0, 0);
+    }
+
+    /// The C1 memory-safety bound. Unreachable via `derive_program_params`
+    /// (whose maximum is exactly this bound), so it exists purely to catch a
+    /// future caller deriving the offset some other way — which means it would
+    /// otherwise ship untested.
+    #[test]
+    #[should_panic(expected = "dataset_offset exceeds")]
+    fn compile_native_loop_rejects_an_out_of_range_dataset_offset() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        let one_past_max = crate::randomx::vm::DATASET_EXTRA_ITEMS * 64 + 64;
+        jit.compile_native_loop(
+            &bytecode,
+            RxVersion::V1,
+            &native_loop_test_config(),
+            0,
+            0,
+            one_past_max,
+        );
+    }
+
+    /// The largest offset `derive_program_params` can actually produce must be
+    /// accepted — an off-by-one the other way would panic a worker mid-hash on
+    /// roughly one program in 524,288.
+    #[test]
+    fn compile_native_loop_accepts_the_maximum_real_dataset_offset() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        let max = crate::randomx::vm::DATASET_EXTRA_ITEMS * 64;
+        jit.compile_native_loop(&bytecode, RxVersion::V1, &native_loop_test_config(), 0, 0, max);
+    }
+
+    /// Calling native-loop code through the 3-argument body ABI would
+    /// dereference a dataset pointer as a `*const ProgramConfiguration`. The
+    /// guard is a release `assert_eq!`; cover both directions.
+    #[test]
+    #[should_panic(expected = "get_fn() on code compiled for a different ABI")]
+    fn get_fn_rejects_native_loop_code() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile_native_loop(&bytecode, RxVersion::V1, &native_loop_test_config(), 0, 0, 0);
+        let _ = unsafe { jit.get_fn() };
+    }
+
+    #[test]
+    #[should_panic(expected = "get_loop_fn() on code compiled for a different ABI")]
+    fn get_loop_fn_rejects_body_code() {
+        let bytecode: [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX] =
+            std::array::from_fn(|_| BytecodeInstruction::new());
+        let mut jit = JitCompiler::new().expect("JIT alloc failed");
+        jit.compile(&bytecode, RxVersion::V1);
+        let _ = unsafe { jit.get_loop_fn() };
+    }
+
     #[test]
     fn test_jit_nop_program() {
         // All NOP program — JIT should load regs, do nothing, store back

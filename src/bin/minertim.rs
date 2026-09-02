@@ -340,7 +340,7 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_native_loop;
+    use super::{parse_native_loop, parse_switch};
 
     fn args(extra: &[&str]) -> Vec<String> {
         let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
@@ -391,9 +391,28 @@ mod tests {
         assert!(!parse_native_loop(&args(&["--native-loop=on", "--native-loop=off"])));
     }
 
+    /// The environment-variable branch, and that an explicit flag beats it.
+    /// Uses a dedicated variable name so it cannot collide with a real one or
+    /// with another test running in parallel.
+    #[test]
+    fn switch_reads_the_environment_and_the_flag_overrides_it() {
+        const VAR: &str = "MINERTIM_SWITCH_ENV_BRANCH_TEST";
+        // SAFETY: a name unique to this test; no other thread reads it.
+        unsafe { std::env::set_var(VAR, "off") };
+        assert!(!parse_switch(&args(&[]), "--x", VAR, true), "env should win over default");
+        assert!(parse_switch(&args(&["--x", "on"]), "--x", VAR, true), "flag should beat env");
+
+        // An unparseable env value also fails safe rather than falling through
+        // to the default.
+        unsafe { std::env::set_var(VAR, "wat") };
+        assert!(!parse_switch(&args(&[]), "--x", VAR, true));
+
+        unsafe { std::env::remove_var(VAR) };
+        assert!(parse_switch(&args(&[]), "--x", VAR, true), "default applies once unset");
+    }
+
     #[test]
     fn verify_shares_defaults_on_and_shares_the_fail_safe_policy() {
-        use super::parse_switch;
         let f = |extra: &[&str]| {
             parse_switch(&args(extra), "--verify-shares", "MINERTIM_VERIFY_SHARES_TEST", true)
         };

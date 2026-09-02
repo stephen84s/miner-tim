@@ -1821,3 +1821,87 @@ The verifier's mismatch branch has never executed — there is no fault to trigg
 it. It is straight-line code reached only when two hashes differ, but it is
 untested in the strict sense. A fault-injection test (force a divergence and
 assert the share is withheld and counted) would close that and is worth adding.
+
+---
+
+## 2026-09-02 - Branch coverage for the new code (117 lib + 7 bin tests)
+
+### Request
+"Ensure all code branches are tested." Scoped to the code this MR adds — full
+branch coverage of the whole miner (pool I/O, reconnect, job handling, donation
+rotation) is a much larger piece of work and is **not** claimed here.
+
+### The structural problem, and the fix
+The share-verification decision was written inside `worker_loop`, a function that
+needs a live pool connection and a 2 GiB dataset. Its branches were therefore
+unreachable from any test — including the one that matters, the mismatch path,
+which by definition never runs without a JIT fault. It would have shipped having
+never executed.
+
+`ShareVerdict` + `classify_share` were extracted so the decision is a pure
+function and only the expensive recomputation stays in the worker. All four
+branches are now covered:
+
+| Branch | Meaning | Test |
+|---|---|---|
+| `!applies` | verification off, or native loop off (mining path *is* the reference) | `classify_share_covers_every_branch` |
+| `applies`, no reference | verifier unavailable — **fails open** | same |
+| `applies`, hashes equal | normal case | same |
+| `applies`, hashes differ | **withhold** | same, plus `a_single_differing_byte_is_enough_to_withhold` |
+
+`only_a_mismatch_blocks_submission` pins the verdict-to-action mapping
+separately, so a future variant cannot be added and silently default to blocking
+shares — the failure mode that costs money.
+
+### The most valuable test is not a branch test
+`pipelined_hash_matches_calculate_hash_for_the_preceding_blob` reproduces the
+worker's exact call pattern — `prepare_scratchpad(blob0)` then
+`calculate_hash_pipelined(next)` — and asserts the returned hash equals
+`calculate_hash(current)` on a separate reference VM, for three successive
+nonces.
+
+This covers the assumption the whole feature rests on. `calculate_hash_pipelined`
+returns the hash of the *previous* input, so if `job_blob_current` were off by
+one, **every share would be withheld as a false mismatch** — worse than having no
+verification, because it would look exactly like a JIT fault while costing 100%
+of revenue. Nothing else covered it: the known-answer tests each use a single
+blob, where an off-by-one is invisible.
+
+### Guard branches that only fire on panic
+These are the asserts protecting against wrong-hash and memory-safety failures.
+All existed untested, because nothing in normal operation trips them:
+
+- `compile_native_loop_rejects_v2` — the v1-only guard. `emit_iteration_post`
+  hard-codes v1's `f ^= e` and mx aliasing, and the differential test only ever
+  exercises v1, so this assert is the only thing between a v2 caller and
+  silently wrong hashes.
+- `compile_native_loop_rejects_an_out_of_range_dataset_offset` — the C1 bound.
+- `compile_native_loop_accepts_the_maximum_real_dataset_offset` — the other
+  direction. An off-by-one here would panic a worker mid-hash on roughly one
+  program in 524,288, which is the kind of thing that shows up weeks later.
+- `get_fn_rejects_native_loop_code` / `get_loop_fn_rejects_body_code` — the
+  `CompiledKind` ABI guard, both directions. Calling native-loop code through
+  the 3-argument body ABI would dereference a dataset pointer as a
+  `*const ProgramConfiguration`.
+
+### Switch parsing
+`switch_reads_the_environment_and_the_flag_overrides_it` covers the env-var
+branch, flag-beats-env, an unparseable env value failing safe, and the default
+applying once unset. Plus the earlier six: defaults, every accepted spelling,
+fail-safe on a typo, fail-safe on a bare flag, last-flag-wins.
+
+### STILL NOT COVERED — stated plainly
+1. **The verifier's lazy construction and seed-rotation reset.** `get_or_insert_with`
+   and `verify_vm = None` on seed change live in `worker_loop` and need a live
+   pool. If the reset were wrong, the verifier would be keyed to a stale seed and
+   every share would be withheld after the first rotation. Reviewed by eye, not
+   tested. **This is the highest-value remaining gap.**
+2. **The stats-loop error print** when `verify_failures > 0`, in `main`.
+3. **`worker_loop` generally** — pool I/O, reconnect, job switching, nonce
+   interleaving. Pre-existing, unchanged by this MR.
+
+Closing (1) properly means making `worker_loop` testable against a fake pool,
+which is a refactor worth its own MR rather than a rider on this one.
+
+### Verification
+117 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.

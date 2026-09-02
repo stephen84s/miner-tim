@@ -366,6 +366,48 @@ impl Miner {
     }
 }
 
+/// What to do with a candidate share once the reference path has had its say.
+///
+/// Split out of `worker_loop` because that function needs a live pool
+/// connection and a 2 GiB dataset, which makes its branches untestable. This
+/// carries the whole decision and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShareVerdict {
+    /// Verification did not apply — either switched off, or the native loop is
+    /// off and the mining path already *is* the reference path, so checking
+    /// would compare it against itself.
+    SubmitUnverified,
+    /// The reference path agreed. Normal case.
+    SubmitVerified,
+    /// Verification applied but the verifier could not run. **Fails open**: a
+    /// genuine share is worth more than the check, and withholding here would
+    /// turn a bookkeeping slip into lost revenue.
+    SubmitVerifierUnavailable,
+    /// The two paths disagree. The JIT is miscomputing; do not submit.
+    Withhold,
+}
+
+impl ShareVerdict {
+    pub(crate) fn should_submit(self) -> bool {
+        !matches!(self, ShareVerdict::Withhold)
+    }
+}
+
+pub(crate) fn classify_share(
+    verification_applies: bool,
+    mined: &[u8; 32],
+    reference: Option<&[u8; 32]>,
+) -> ShareVerdict {
+    if !verification_applies {
+        return ShareVerdict::SubmitUnverified;
+    }
+    match reference {
+        None => ShareVerdict::SubmitVerifierUnavailable,
+        Some(r) if r == mined => ShareVerdict::SubmitVerified,
+        Some(_) => ShareVerdict::Withhold,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn worker_loop(
     thread_id: u32,
@@ -513,45 +555,52 @@ fn worker_loop(
             //
             // Skipped when the native loop is off: the mining path is then already
             // the reference path, so this would compare it against itself.
-            let verified = if verify_shares && native_loop {
-                let ds = verify_dataset.clone();
-                match ds {
-                    Some(ds) => {
-                        let vvm = verify_vm.get_or_insert_with(|| {
-                            let mut v = RandomXVm::new_full(&current_key, ds);
-                            v.set_native_loop(false);
-                            v
-                        });
-                        // `calculate_hash` is self-contained — it refills the
-                        // scratchpad from the blob — so it does not disturb, and is
-                        // not disturbed by, the mining VM's pipeline state.
-                        let reference = vvm.calculate_hash(&job_blob_current);
-                        if reference == hash {
-                            true
-                        } else {
-                            stats.verify_failures.fetch_add(1, Ordering::Relaxed);
-                            log::error!(
-                                "Worker {} WITHHELD a share: the native-loop JIT and the \
-                                 reference path disagree. native={} reference={} \
-                                 job_id={} nonce={}. This is a JIT correctness failure — \
-                                 restart with --native-loop off (or NATIVE_LOOP=off in \
-                                 mining.conf) and report it.",
-                                thread_id,
-                                result_hex,
-                                hex_encode(&reference),
-                                job.job_id,
-                                nonce_hex,
-                            );
-                            false
-                        }
-                    }
-                    // Should not happen: the dataset is recorded whenever the VM is
-                    // built. Submit rather than silently dropping a real share.
-                    None => true,
-                }
+            // The decision itself lives in `classify_share` so every branch is
+            // reachable from a test; only the expensive recomputation is here.
+            let verification_applies = verify_shares && native_loop;
+            let reference = if verification_applies {
+                verify_dataset.clone().map(|ds| {
+                    let vvm = verify_vm.get_or_insert_with(|| {
+                        let mut v = RandomXVm::new_full(&current_key, ds);
+                        v.set_native_loop(false);
+                        v
+                    });
+                    // `calculate_hash` is self-contained — it refills the
+                    // scratchpad from the blob — so it neither disturbs nor is
+                    // disturbed by the mining VM's pipeline state.
+                    vvm.calculate_hash(&job_blob_current)
+                })
             } else {
-                true
+                None
             };
+
+            let verdict = classify_share(verification_applies, &hash, reference.as_ref());
+            match verdict {
+                ShareVerdict::Withhold => {
+                    stats.verify_failures.fetch_add(1, Ordering::Relaxed);
+                    log::error!(
+                        "Worker {} WITHHELD a share: the native-loop JIT and the \
+                         reference path disagree. native={} reference={} job_id={} \
+                         nonce={}. This is a JIT correctness failure — restart with \
+                         --native-loop off (or NATIVE_LOOP=off in mining.conf) and \
+                         report it.",
+                        thread_id,
+                        result_hex,
+                        reference.as_ref().map(|r| hex_encode(r)).unwrap_or_default(),
+                        job.job_id,
+                        nonce_hex,
+                    );
+                }
+                ShareVerdict::SubmitVerifierUnavailable => {
+                    log::warn!(
+                        "Worker {} submitting a share unverified: no dataset recorded \
+                         for the verifier. This should not happen.",
+                        thread_id
+                    );
+                }
+                ShareVerdict::SubmitVerified | ShareVerdict::SubmitUnverified => {}
+            }
+            let verified = verdict.should_submit();
 
             if verified
                 && let Err(e) = pool.submit_share(&job.job_id, &nonce_hex, &result_hex)
@@ -715,4 +764,81 @@ pub fn recommended_thread_count() -> u32 {
         .map(|n| n.get() as u32)
         .unwrap_or(4);
     total.saturating_sub(1).max(1)
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+
+    const A: [u8; 32] = [0xAA; 32];
+    const B: [u8; 32] = [0xBB; 32];
+
+    /// Every branch of `classify_share`. The mismatch branch in particular has
+    /// no way to occur in production without a JIT defect, so it would
+    /// otherwise ship having never executed — which is exactly how the last
+    /// several defects in this feature got in.
+    #[test]
+    fn classify_share_covers_every_branch() {
+        // Verification off (or native loop off): submit, do not consult the
+        // reference even if one is somehow present.
+        assert_eq!(classify_share(false, &A, None), ShareVerdict::SubmitUnverified);
+        assert_eq!(classify_share(false, &A, Some(&B)), ShareVerdict::SubmitUnverified);
+
+        // Applies, verifier unavailable: fail OPEN. A genuine share is worth
+        // more than the check.
+        assert_eq!(classify_share(true, &A, None), ShareVerdict::SubmitVerifierUnavailable);
+
+        // Applies, paths agree: the normal path.
+        assert_eq!(classify_share(true, &A, Some(&A)), ShareVerdict::SubmitVerified);
+
+        // Applies, paths disagree: withhold. This is the branch that has never
+        // run in the field.
+        assert_eq!(classify_share(true, &A, Some(&B)), ShareVerdict::Withhold);
+    }
+
+    /// Only `Withhold` blocks submission. Asserted separately from the
+    /// classification so a future variant cannot be added and silently default
+    /// to blocking shares — the failure mode that costs money.
+    #[test]
+    fn only_a_mismatch_blocks_submission() {
+        assert!(ShareVerdict::SubmitUnverified.should_submit());
+        assert!(ShareVerdict::SubmitVerified.should_submit());
+        assert!(ShareVerdict::SubmitVerifierUnavailable.should_submit());
+        assert!(!ShareVerdict::Withhold.should_submit());
+    }
+
+    /// A single differing byte, anywhere, must withhold — the realistic shape
+    /// of a JIT fault is one wrong limb, not a wholly different hash.
+    #[test]
+    fn a_single_differing_byte_is_enough_to_withhold() {
+        for i in 0..32 {
+            let mut near = A;
+            near[i] ^= 0x01;
+            assert_eq!(
+                classify_share(true, &A, Some(&near)),
+                ShareVerdict::Withhold,
+                "byte {i} differing was not caught"
+            );
+        }
+    }
+
+    /// A fresh `Miner` has no stats yet; the counter must read 0 rather than
+    /// panicking on the `None` branch.
+    #[test]
+    fn verify_failure_counter_is_zero_before_start() {
+        let m = Miner::new(std::sync::Arc::new(AtomicBool::new(false)));
+        assert_eq!(m.get_verify_failures(), 0);
+    }
+
+    /// Both switches default on, and the setters take effect.
+    #[test]
+    fn switch_defaults_and_setters() {
+        let mut m = Miner::new(std::sync::Arc::new(AtomicBool::new(false)));
+        assert!(m.native_loop);
+        assert!(m.verify_shares);
+        m.set_native_loop(false);
+        m.set_verify_shares(false);
+        assert!(!m.native_loop);
+        assert!(!m.verify_shares);
+    }
 }

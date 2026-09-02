@@ -440,7 +440,7 @@ fallback switch). Nothing from rounds 1-5 is re-reviewed.
 | F5 fix — t-table | benches/nativeloop_ab.rs | DONE | R6-F2: buckets anti-conservative |
 | Measurement trustworthiness | AUDIT.md, bench | NOT STARTED | |
 | Fallback switch — reach | src/miner.rs, vm.rs | DONE | R6-VC1: reinit claim verified |
-| Fallback switch — precedence | src/bin/minertim.rs | IN PROGRESS | |
+| Fallback switch — precedence | src/bin/minertim.rs | DONE | R6-VC6; R6-F3; R6-Q1 |
 | Makefile / mining.conf wiring | Makefile, mining.conf.example | DONE | R6-VC2 |
 
 ## Round 6 findings
@@ -555,3 +555,90 @@ t=12.706 and the harness correctly reported
 the old hardcoded 2.09 the same data would have reported a CI of roughly
 +/-218%, still including zero here, but the mechanism is visibly live. See R6-F2
 for the residual inaccuracy.
+
+**R6-VC6 — the precedence logic does what the AUDIT claims.** I traced
+`parse_native_loop` for every combination:
+| input | result | correct? |
+|---|---|---|
+| nothing | on | yes (default) |
+| `MINERTIM_NATIVE_LOOP=0` | off | yes |
+| `--native-loop off` / `--native-loop=off` | off | yes |
+| env `0` + `--native-loop on` | on | yes — flag beats env |
+| env `0` + `--native-loop garbage` | off | yes — a typo does not silently re-enable |
+| `--native-loop off --native-loop on` | on | yes — last flag wins |
+| `--native-loop=on --native-loop=off` | off | yes |
+| `MINERTIM_NATIVE_LOOP=""` | on + warning | acceptable; and not reachable from the shipped `mining.conf.example`, because `NATIVE_LOOP=` there is a *Makefile* variable that `$(if ...)` suppresses rather than an env var |
+All eight spellings (`on/off/true/false/yes/no/1/0`) are accepted
+case-insensitively and are covered by the four new unit tests. The
+space-separated form correctly advances `i` twice so the value token is not
+re-scanned. `threads` parsing is unaffected: `args.get(3).filter(|s|
+!s.starts_with('-'))` rejects `--native-loop` in the threads slot.
+
+### R6-F3 — `--native-loop` with no value is silently ignored: the one input shape that leaves the native loop ON with no diagnostic at all  [MINOR]
+**Where:** `src/bin/minertim.rs:222-227`
+```rust
+} else if args[i] == "--native-loop" {
+    if let Some(v) = args.get(i + 1) {
+        value = as_bool(v).or(value);
+    }
+    i += 1;
+}
+```
+**Claim:** When `--native-loop` is the final argument, `args.get(i + 1)` is
+`None` and the branch does nothing — no warning, no error, no change. The switch
+resolves to the default (**on**). Every other malformed input at least prints
+`warning: unrecognised native-loop value ...`; this one is completely silent.
+**Failure scenario:** Two realistic shapes.
+1. An operator who assumes it is a boolean flag types
+   `minertim pool wallet 11 --native-loop` intending "turn it off" (or, more
+   plausibly, copies a wrapper line and drops the value).
+2. A wrapper script writes `--native-loop $NL` with `$NL` unset and unquoted —
+   the shell removes the token entirely and leaves a bare `--native-loop`.
+In both cases the miner starts with the native loop **enabled**, the
+"Native-loop JIT DISABLED" warn line is absent, and there is no other signal.
+This is precisely the "enabled while believing it is off" case, and it happens
+during an incident when the operator is trying to stop losing shares.
+Detectable by a careful reader (the DISABLED warning is missing), but the code's
+own stated policy — warn on anything unrecognised — is not applied here.
+**Confidence:** HIGH. Read directly; the `if let Some` has no `else`.
+
+### R6-Q1 — Judgement: an unrecognised value should fail *safe*, not fail to the default  [QUESTION — pushback requested]
+**Where:** `src/bin/minertim.rs:200-211`, and the AUDIT's stated rationale.
+You asked me to push back if I disagree. I partly do — not on "don't be fatal",
+which I think is right, but on *which* non-fatal outcome.
+
+The two failure modes are asymmetric in a way the current choice gets backwards:
+- **Refusing to boot** on a typo is loud, immediate, and fixed in five seconds.
+- **Silently resolving to ON** is quiet, and it continues the exact behaviour the
+  operator was trying to stop. The comment in the code says this is "the switch
+  someone reaches for while shares are being rejected" — so at the moment the
+  parse fails, we already know the operator intended to *change* the setting.
+  Resolving to the default is the one outcome we can be confident they did not
+  want, and its cost is continued rejected shares, i.e. money, for as long as it
+  takes them to notice.
+
+A third option gets both properties: **an unparseable `--native-loop` value
+resolves to `false`.** It still boots (your requirement), it costs at most ~6%
+hashrate if the operator actually meant "on", and it never leaves a suspected-bad
+JIT running when someone was trying to disable it. The one surprising case —
+`--native-loop tru` turning it off when the operator meant on — fails in the
+harmless direction.
+
+Note the code already implements the *best* version of this for one case: with
+`MINERTIM_NATIVE_LOOP=0 --native-loop garbage` the `.or(value)` chain correctly
+keeps the env's `off`. It is only the "nothing previously resolved" case that
+falls back to `on`.
+
+I would not block a merge on this. It is a judgement call and the current
+behaviour is warned about (except in the R6-F3 shape, which is the case that
+makes me care).
+**Confidence:** N/A — this is a design opinion, not a defect claim.
+
+**R6-VC7 — the `warn`-level choice for the disabled message is right; endorsed.**
+`log::warn!` rather than `info!` is correct here: the state is abnormal,
+persistent, invisible in normal operation, and costs money. It also survives an
+operator running `RUST_LOG=warn`, which `info!` would not. The message itself is
+well-formed — it states the cost and how to undo it, which is the part most
+such messages omit. One trivial arithmetic nit, not worth changing: "roughly 7%
+lower hashrate" — if the native loop is +6.76% faster, disabling it costs
+6.76/106.76 = 6.3% of the current rate, not 7%. "Roughly" covers it.

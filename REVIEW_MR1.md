@@ -1433,3 +1433,12 @@ them.** Reasoning per item:
   means every correctness claim about emitted ARM64 rests on one machine plus
   the maintainer remembering to run `make test`. An ARM64 runner is the real
   fix and should not be deferred indefinitely.
+
+**Addendum to R8-F1 — the accessor is now asymmetric.** `cache_and_programs()`
+returns `(&[u8], &[SuperscalarProgram; 8])`. After this change `.0` is empty for
+a full-mode VM but `.1` is still fully populated, because
+`new_full_versioned` still runs `generate_superscalar` eight times. That is
+correct and the cost is negligible (microseconds, a few KB, versus 256 MiB and
+0.4 s), but it makes the tuple's two halves behave differently in a way nothing
+in the signature or the doc hints at — one is conditionally empty, the other
+never is. It strengthens the case for saying so on the accessor.

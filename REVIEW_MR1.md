@@ -768,8 +768,8 @@ rounds 1-6 is re-reviewed except to confirm those fixes landed.
 ## Round 7 coverage ledger
 | Area | File(s) | Status | Notes |
 |---|---|---|---|
-| P1 — verification soundness / off-by-one | src/miner.rs | DONE | R7-VC1: no off-by-one; invariant proved |
-| P2 — false positives | src/miner.rs, src/randomx/vm.rs | IN PROGRESS | FPCR + seed keying done; empirical run pending |
+| P1 — verification soundness / off-by-one | src/miner.rs | DONE | R7-VC1 + R7-VC2: proved by reading AND empirically |
+| P2 — false positives | src/miner.rs, src/randomx/vm.rs | DONE | R7-VC2/VC3/VC4 |
 | P3 — counter reaches the operator | src/miner.rs, src/bin/minertim.rs | NOT STARTED | |
 | P4 — cost | src/miner.rs, src/randomx/vm.rs | DONE | R7-F1: cost mis-stated by ~2 orders of magnitude |
 | Round-6 fixes landed | compiler.rs, bench, minertim.rs | NOT STARTED | |
@@ -817,3 +817,62 @@ whether the feature is cheap enough to leave on by default. Note also that the
 `set_verify_shares` doc comment's "roughly 0.005% of mining time" describes only
 the recurring hash, and is silent about the one-off build.
 **Confidence:** HIGH — read the constructor and measured it.
+
+## Round 7 verified-correct
+
+**R7-VC1 — There is no off-by-one. `job_blob_current` really is the blob whose
+hash was just returned.** The invariant, traced through `worker_loop`:
+- `calculate_hash_pipelined(&job_blob_next)` returns the hash of whatever the
+  scratchpad currently holds and *then* refills it from `job_blob_next`.
+- On a priming iteration (`pipeline_ready == false`) the code calls
+  `prepare_scratchpad(&job_blob_current)` first, so the scratchpad holds nonce N
+  and the returned hash is H(job_blob_current @ N). The nonce was written into
+  `job_blob_current` immediately above, so they agree.
+- On every later iteration the scratchpad was filled from the *previous*
+  iteration's `job_blob_next`, which carried nonce N+tc; and this iteration wrote
+  N+tc into `job_blob_current` before hashing. They agree again.
+- Both reset points are covered: `pipeline_ready = false` is set on a **job_id
+  change** (miner.rs:411) *and* on a **seed change** (miner.rs:439), and in both
+  cases the blobs are re-copied from `job.blob` before the next hash. So a new
+  job cannot leave the scratchpad primed from the old blob.
+`nonce_hex` is read from `job_blob_current[39..43]`, i.e. the same buffer, so the
+submitted nonce, the submitted hash and the verified blob are all consistent.
+
+**R7-VC2 — Confirmed empirically, including across a job change and with the two
+VMs interleaved on one thread.** I built a scratch harness (outside the repo,
+using only the public API) that replicates `worker_loop`'s exact pattern — two
+blob buffers, `write_nonce_le` into both, prime once, then
+`calculate_hash_pipelined(&next)` — with a native-loop mining VM and a
+`set_native_loop(false)` verifier, calling `verify.calculate_hash(&cur)` between
+consecutive pipelined calls exactly as the share path does, and re-priming
+mid-run to simulate a job change:
+```
+checked=24 mismatches=0
+PASS: pipelined hash == calculate_hash(job_blob_current), interleaved, across a job change
+```
+This is the strongest available evidence for priority 1 and it also settles the
+FP-state half of priority 2: had the interleaving perturbed anything, these 24
+comparisons are precisely where it would show.
+
+**R7-VC3 — FPCR interleaving cannot cause a false positive.** Both
+`calculate_hash` and `calculate_hash_pipelined` are self-contained with respect
+to the rounding mode: each opens with `save_rounding_mode()` +
+`set_rounding_mode(0)` and closes with `restore_rounding_mode(saved_rm)`. So the
+verifier's call restores whatever FPCR it found, and the mining VM's next
+pipelined call re-establishes mode 0 for itself regardless. The two VMs share no
+mutable state at all — separate scratchpads, separate `pipeline_state`, separate
+`JitCompiler`/MAP_JIT regions; the only shared object is the
+`Arc<RandomXDataset>`, which is read-only.
+
+**R7-VC4 — The verifier can never be keyed to a stale seed.** In the seed-change
+block the three assignments happen together and *before* any hashing for the new
+seed: `verify_vm = None;` (miner.rs:436) discards the old verifier,
+`verify_dataset = Some(dataset);` records the new dataset, and
+`current_key = job.seed_hash.clone();` updates the key. The lazy
+`get_or_insert_with` closure then reads `current_key`, which by construction is
+the seed the mining VM was just re-initialised to. The `None => true` arm for a
+missing `verify_dataset` is genuinely unreachable (the dataset is recorded in the
+same block that creates or re-inits the VM, and that block runs before the first
+hash because `vm.is_none()` forces it), and choosing to **submit** rather than
+withhold on that impossible path is the right call — it fails toward not
+discarding real revenue.

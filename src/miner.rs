@@ -555,6 +555,15 @@ fn worker_loop(
             //
             // Skipped when the native loop is off: the mining path is then already
             // the reference path, so this would compare it against itself.
+            //
+            // LIMIT, so nobody mistakes this for a general correctness net: the
+            // two paths are not independent. Both run `emit_body`, so a defect
+            // in the shared instruction emitter produces the same wrong hash on
+            // both sides and passes. What this catches is defects in the
+            // native-loop scaffolding specifically — the prologue, the
+            // per-iteration pre/post, the loop control and the register
+            // residency — which is where all the new code in MR !1 lives.
+            // (MR !1 review round 7, R7-F6.)
             // The decision itself lives in `classify_share` so every branch is
             // reachable from a test; only the expensive recomputation is here.
             let verification_applies = verify_shares && native_loop;

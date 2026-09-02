@@ -1680,7 +1680,13 @@ impl RandomXVm {
     /// Full-mode VM for a specific RandomX version. Dataset contents are
     /// version-independent (same seed -> same dataset for rx/0 and rx/2).
     pub fn new_full_versioned(key: &[u8], dataset: Arc<RandomXDataset>, version: RxVersion) -> Self {
-        let cache_memory = argon2d_cache(key);
+        // No Argon2d cache in full mode. `cache_memory` is read in exactly one
+        // place — `init_dataset_item` on the `dataset == None` arm — so a VM
+        // that owns a dataset never touches it. Building it anyway cost 256 MiB
+        // and ~0.4 s *per VM*: at 11 workers that is 2.75 GiB resident and
+        // never read. `reinit` still builds one if the VM is switched to light
+        // mode. Found by MR !1 review round 7 (R7-F1).
+        let cache_memory = Vec::new();
         let mut generator = Blake2Generator::new(key, 0);
         let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         RandomXVm {
@@ -1701,7 +1707,13 @@ impl RandomXVm {
 
     /// Reinitialize for a new key. Pass `Some(dataset)` for full mode, `None` for light mode.
     pub fn reinit(&mut self, key: &[u8], dataset: Option<Arc<RandomXDataset>>) {
-        self.cache_memory = argon2d_cache(key);
+        // Only light mode reads the cache; see `new_full_versioned`. Dropping
+        // any existing one keeps a VM that was light and is now full from
+        // holding 256 MiB it will never read again.
+        self.cache_memory = match dataset {
+            Some(_) => Vec::new(),
+            None => argon2d_cache(key),
+        };
         let mut generator = Blake2Generator::new(key, 0);
         self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         self.dataset = dataset;

@@ -481,6 +481,30 @@ mod full_hash_tests {
         );
     }
 
+    /// Full mode must not build an Argon2d cache. `cache_memory` is read in
+    /// exactly one place — `init_dataset_item`, on the `dataset == None` arm —
+    /// so a VM that owns a dataset never touches it, and building one cost
+    /// 256 MiB and ~0.4 s per VM. At 11 workers plus 11 verifiers that was
+    /// 5.5 GiB resident and never read. (MR !1 review round 7, R7-F1.)
+    #[test]
+    fn full_mode_vm_allocates_no_argon2d_cache() {
+        let vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        assert!(
+            vm_full.cache_and_programs().0.is_empty(),
+            "full-mode VM built a 256 MiB cache it can never read"
+        );
+    }
+
+    /// ...but light mode still must, since it computes dataset items on the fly.
+    #[test]
+    fn light_mode_vm_still_allocates_its_cache() {
+        let vm_light = vm::RandomXVm::new(b"test key 000");
+        assert!(
+            !vm_light.cache_and_programs().0.is_empty(),
+            "light mode needs the cache to compute dataset items"
+        );
+    }
+
     /// The assumption the share verifier rests on: in the miner's exact usage
     /// pattern, `calculate_hash_pipelined(next)` returns the hash of the
     /// *current* blob, so recomputing `job_blob_current` with `calculate_hash`

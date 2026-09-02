@@ -53,7 +53,7 @@ fn main() {
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
     let native_loop = parse_native_loop(&args);
-    let verify_shares = parse_switch(&args, "--verify-shares", "MINERTIM_VERIFY_SHARES", true);
+    let verify_shares = parse_verify_shares(&args);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 
@@ -220,38 +220,44 @@ fn parse_donate_level(args: &[String]) -> u8 {
     donate::clamp_level(level)
 }
 
-/// Resolve the native-loop switch: `--native-loop <v>` / `--native-loop=<v>`
-/// beats `MINERTIM_NATIVE_LOOP`, which beats the default (on).
-///
-/// Accepts on/off, true/false, yes/no, 1/0, case-insensitively.
-///
-/// # Malformed input fails SAFE, not to the default
-///
-/// A bad value never aborts startup — this is the switch someone reaches for
-/// while shares are being rejected, and refusing to boot over a typo would be
-/// the wrong failure mode. But it resolves to **off**, not to the default.
-///
-/// The two outcomes are asymmetric. If the value could not be parsed we already
-/// know the operator was trying to *change* the setting, so resolving to `on` is
-/// the one answer we can be confident they did not want — and its cost is
-/// continued rejected shares, i.e. money, until they notice. Resolving to `off`
-/// costs at most ~7% hashrate if they actually meant "on", and never leaves a
-/// suspected-bad JIT running while someone is trying to disable it.
 /// Resolve an `--flag on|off` switch with an environment-variable fallback.
 ///
-/// Same fail-safe policy as [`parse_native_loop`]: a malformed value never
-/// aborts startup, but resolves to `false` rather than to `default_on`. If the
-/// value could not be parsed we know the operator meant to change something,
-/// and for both switches here `false` is the conservative direction — slower,
-/// or noisier, but never "keep doing the thing they were trying to stop".
-fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool) -> bool {
+/// Precedence: the flag beats `env`, which beats `default_on`. Values are
+/// `on/off`, `true/false`, `yes/no`, `1/0`, case-insensitively. The last
+/// occurrence of the flag wins, so a wrapper script can append an override.
+///
+/// # Malformed input resolves to `fail_safe`, never aborts
+///
+/// A bad value must not stop the miner booting — these are the switches someone
+/// reaches for during an incident, and refusing to start over a typo would be
+/// the wrong failure mode. But it must not resolve to `default_on` either: if
+/// the value failed to parse, we already know the operator was trying to
+/// *change* something, so the default is the one answer they probably did not
+/// want.
+///
+/// `fail_safe` is per-switch because the conservative direction differs, and
+/// getting this backwards is easy — it was, until review round 7 (R7-F2):
+///
+/// * `--native-loop` -> `false`. Off is slower but cannot mine wrong hashes.
+/// * `--verify-shares` -> `true`. This one is a *safety net*, so off is the
+///   dangerous direction; a malformed value must leave the net in place.
+///
+/// The "no value at all" case (`--flag` as the final argument, or a script
+/// writing `--flag $VAR` with `$VAR` unset) is treated the same way, and warns.
+/// Previously it was silently ignored, which was the one shape that could leave
+/// an operator believing they had changed a setting when they had not.
+fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_safe: bool) -> bool {
+    let word = if fail_safe { "ON" } else { "OFF" };
     let as_bool = |v: &str| -> Option<bool> {
         match v.trim().to_ascii_lowercase().as_str() {
             "on" | "true" | "yes" | "1" => Some(true),
             "off" | "false" | "no" | "0" => Some(false),
             _ => {
-                eprintln!("warning: unrecognised {flag} value {v:?} - assuming OFF; use on|off");
-                Some(false)
+                eprintln!(
+                    "warning: unrecognised {flag} value {v:?} - assuming {word} \
+                     (the safe direction); use on|off"
+                );
+                Some(fail_safe)
             }
         }
     };
@@ -267,8 +273,11 @@ fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool) -> boo
             match args.get(i + 1) {
                 Some(v) => value = as_bool(v),
                 None => {
-                    eprintln!("warning: {flag} given with no value - assuming OFF; use on|off");
-                    value = Some(false);
+                    eprintln!(
+                        "warning: {flag} given with no value - assuming {word} \
+                         (the safe direction); use on|off"
+                    );
+                    value = Some(fail_safe);
                 }
             }
             i += 1;
@@ -279,53 +288,18 @@ fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool) -> boo
     value.unwrap_or(default_on)
 }
 
+/// The native-loop JIT switch. Malformed input falls back to **off**: slower,
+/// but it cannot mine wrong hashes.
 fn parse_native_loop(args: &[String]) -> bool {
-    fn as_bool(v: &str) -> Option<bool> {
-        match v.trim().to_ascii_lowercase().as_str() {
-            "on" | "true" | "yes" | "1" => Some(true),
-            "off" | "false" | "no" | "0" => Some(false),
-            _ => {
-                eprintln!(
-                    "warning: unrecognised native-loop value {v:?} - assuming OFF \
-                     (the safe direction); use on|off"
-                );
-                Some(false)
-            }
-        }
-    }
-
-    let mut value = std::env::var("MINERTIM_NATIVE_LOOP")
-        .ok()
-        .and_then(|v| as_bool(&v));
-
-    let mut i = 0;
-    while i < args.len() {
-        if let Some(v) = args[i].strip_prefix("--native-loop=") {
-            value = as_bool(v);
-        } else if args[i] == "--native-loop" {
-            match args.get(i + 1) {
-                Some(v) => value = as_bool(v),
-                // Bare `--native-loop` with nothing after it. This previously
-                // did nothing at all - no warning, no change - which was the one
-                // input shape that silently left the JIT ON while the operator
-                // believed they had turned it off. Two realistic ways to reach
-                // it: typing it as though it were a boolean flag, or a wrapper
-                // script writing `--native-loop $NL` with $NL unset.
-                None => {
-                    eprintln!(
-                        "warning: --native-loop given with no value - assuming OFF \
-                         (the safe direction); use on|off"
-                    );
-                    value = Some(false);
-                }
-            }
-            i += 1;
-        }
-        i += 1;
-    }
-
-    value.unwrap_or(true)
+    parse_switch(args, "--native-loop", "MINERTIM_NATIVE_LOOP", true, false)
 }
+
+/// The share-verification switch. Malformed input falls back to **on**: this is
+/// a safety net, so leaving it in place is the conservative direction.
+fn parse_verify_shares(args: &[String]) -> bool {
+    parse_switch(args, "--verify-shares", "MINERTIM_VERIFY_SHARES", true, true)
+}
+
 
 fn format_duration(secs: f64) -> String {
     let secs = secs.max(0.0) as u64;
@@ -340,7 +314,7 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_native_loop, parse_switch};
+    use super::{parse_native_loop, parse_switch, parse_verify_shares};
 
     fn args(extra: &[&str]) -> Vec<String> {
         let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
@@ -399,27 +373,32 @@ mod tests {
         const VAR: &str = "MINERTIM_SWITCH_ENV_BRANCH_TEST";
         // SAFETY: a name unique to this test; no other thread reads it.
         unsafe { std::env::set_var(VAR, "off") };
-        assert!(!parse_switch(&args(&[]), "--x", VAR, true), "env should win over default");
-        assert!(parse_switch(&args(&["--x", "on"]), "--x", VAR, true), "flag should beat env");
+        assert!(!parse_switch(&args(&[]), "--x", VAR, true, false), "env beats default");
+        assert!(parse_switch(&args(&["--x", "on"]), "--x", VAR, true, false), "flag beats env");
 
-        // An unparseable env value also fails safe rather than falling through
-        // to the default.
+        // An unparseable env value takes the switch's fail-safe direction, not
+        // the default — and that direction is per-switch (R7-F2). An empty
+        // MINERTIM_VERIFY_SHARES= reaches this path with no typo at all.
         unsafe { std::env::set_var(VAR, "wat") };
-        assert!(!parse_switch(&args(&[]), "--x", VAR, true));
+        assert!(!parse_switch(&args(&[]), "--x", VAR, true, false));
+        assert!(parse_switch(&args(&[]), "--x", VAR, true, true));
+        unsafe { std::env::set_var(VAR, "") };
+        assert!(parse_switch(&args(&[]), "--x", VAR, true, true), "empty env must not disarm");
 
         unsafe { std::env::remove_var(VAR) };
-        assert!(parse_switch(&args(&[]), "--x", VAR, true), "default applies once unset");
+        assert!(parse_switch(&args(&[]), "--x", VAR, true, false), "default applies once unset");
     }
 
     #[test]
-    fn verify_shares_defaults_on_and_shares_the_fail_safe_policy() {
-        let f = |extra: &[&str]| {
-            parse_switch(&args(extra), "--verify-shares", "MINERTIM_VERIFY_SHARES_TEST", true)
-        };
-        assert!(f(&[]));
-        assert!(!f(&["--verify-shares", "off"]));
-        assert!(f(&["--verify-shares=yes"]));
-        assert!(!f(&["--verify-shares", "nonsense"]));
-        assert!(!f(&["--verify-shares"]));
+    fn verify_shares_fails_safe_on_because_it_is_a_safety_net() {
+        // Real switch, real fail-safe direction: ON, because it is a safety net.
+        assert!(parse_verify_shares(&args(&[])));
+        assert!(!parse_verify_shares(&args(&["--verify-shares", "off"])));
+        assert!(parse_verify_shares(&args(&["--verify-shares=yes"])));
+        // R7-F2: a typo must NOT switch the safety net off.
+        assert!(parse_verify_shares(&args(&["--verify-shares", "nonsense"])));
+        assert!(parse_verify_shares(&args(&["--verify-shares"])));
+        // ...whereas the native-loop switch fails safe the other way.
+        assert!(!parse_native_loop(&args(&["--native-loop", "nonsense"])));
     }
 }

@@ -1905,3 +1905,66 @@ which is a refactor worth its own MR rather than a rider on this one.
 
 ### Verification
 117 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-02 - Review round 7 applied: 5.5 GiB of dead memory removed
+
+Round 7 reviewed the verify-before-submit feature. **No blockers**, and it
+answered the three questions put to it: no off-by-one (proved by replicating
+`worker_loop`'s call pattern — 24 comparisons, 0 mismatches), no constructible
+false positive, and the counter does reach the operator by three independent
+signals. But it found one MAJOR and several minors, all applied here.
+
+### R7-F1 (MAJOR): the verifier cost ~100x what its own comment claimed
+The comment said a worker that never finds a share "never pays the 2 MiB
+scratchpad". True but irrelevant: `RandomXVm::new_full` opens with
+`argon2d_cache(key)` — a 256 MiB, 3-pass Argon2d fill. Measured at
+**0.37-0.43 s and 256 MiB per verifier**, appearing gradually as each worker
+found its first share, so it would have looked like a leak.
+
+**The root cause is not the verifier.** `cache_memory` is read in exactly one
+place — `init_dataset_item`, on the `dataset == None` arm — so a VM that owns a
+dataset never touches it. Every full-mode VM has been building and holding
+256 MiB it can never read, since long before this MR. At 11 workers that is
+**2.75 GiB**, and the verifiers would have doubled it to 5.5 GiB.
+
+Fixed at the source: `new_full_versioned` allocates no cache, and `reinit` only
+builds one when switching to light mode. Two tests pin both directions
+(`full_mode_vm_allocates_no_argon2d_cache`,
+`light_mode_vm_still_allocates_its_cache`). This also removes ~0.4 s of startup
+per worker.
+
+### R7-F2: the fail-safe direction was inverted for `--verify-shares`
+Round 6 established that a malformed switch value should resolve to the
+conservative direction rather than the default. Round 7 caught that the generic
+`parse_switch` applied `false` to *both* switches, and `false` is not
+conservative for a safety net — it disarms it. `MINERTIM_VERIFY_SHARES=` (empty)
+reaches that path with no typo at all.
+
+`fail_safe` is now a per-switch parameter, documented with the reasoning:
+- `--native-loop` -> `false`: off is slower but cannot mine wrong hashes.
+- `--verify-shares` -> `true`: off is the dangerous direction.
+
+Confirmed on the shipped binary: a typo or a bare `--verify-shares` now prints
+"assuming ON (the safe direction)" and leaves verification armed, while
+`--native-loop nonsense` still disables the JIT.
+
+### R7-F3 / R7-F4: parser duplication and a re-parented doc block
+Adding `parse_switch` had left `parse_native_loop`'s doc comment attached to the
+wrong function and the two parsers byte-identical. `parse_native_loop` and the
+new `parse_verify_shares` are now one-line wrappers over `parse_switch`, and the
+policy is documented once, where it is implemented.
+
+### R7-F6: the reference path is NOT independent — recorded as a limit
+Both paths run `emit_body`, so a defect in the shared instruction emitter
+produces the same wrong hash on both sides and passes verification. What this
+catches is defects in the **native-loop scaffolding** — prologue, per-iteration
+pre/post, loop control, register residency — which is where all the new code in
+this MR lives. Now stated in the code comment so nobody mistakes it for a
+general correctness net.
+
+### Verification
+119 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64; all
+four switch behaviours re-confirmed against a freshly built binary (the first
+smoke run was against a stale one and would have reported a false pass).

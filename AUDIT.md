@@ -1786,7 +1786,9 @@ the miner now checks its own work before submitting. On finding a share, the
 worker recomputes that one hash on a reference-path VM (`set_native_loop(false)`)
 and compares. Mismatch => the share is **withheld**, a loud error names both
 hashes and tells the operator to restart with `--native-loop off`, and a counter
-is surfaced in the periodic stats line so it cannot be missed.
+is reported on every stats tick — as its own `log::error!` immediately before
+the stats line rather than appended to it, which is louder than "surfaced in the
+stats line" as an earlier draft of this entry described it (R7-F5).
 
 Cost: one extra hash per share found. At 5,077 H/s and pool difficulties of
 10k-100k that is a share every ~2-20 s, so ~0.0008%-0.008% of mining time —
@@ -1968,3 +1970,61 @@ general correctness net.
 119 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64; all
 four switch behaviours re-confirmed against a freshly built binary (the first
 smoke run was against a stale one and would have reported a false pass).
+
+---
+
+## 2026-09-02 - Remaining round 5/7 items closed; open items listed explicitly
+
+Answering "have we addressed all reviewer concerns?" — **not all, and the
+remainder is listed below rather than left implicit.**
+
+### Closed in this batch
+- **R7-F5(a)** — AUDIT claimed the verify-failure counter is "surfaced in the
+  periodic stats line". It is its own `log::error!` immediately *before* that
+  line. Functionally louder than described; wording corrected.
+- **R7-F5(b)** — the design's stage-D table recorded the 1-thread run 2 as `—`.
+  The reviewer's independent run did produce one: **+6.45%** against run 1's
+  +6.12%. That makes the 1-thread row the *stronger* replication of the two (the
+  two baselines agreed to within 0.03%), and leaving it blank understated the
+  evidence. Row now reads `+6.12% | +6.45% | +6.1% to +6.5%`.
+- **R7-Q1 (framing)** — user-visible text described this as catching "a JIT
+  defect", which is broader than the mechanism. The reference path is itself
+  JIT-emitted and shares `emit_body`, so the check detects divergence in the
+  **native-loop machinery** and is blind to a fault common to both paths.
+  Corrected in `mining.conf.example`, the `--help` text and the runtime warning.
+- **R7-Q1 (option 2)** — the reviewer's sharper point was that nothing proved
+  the comparison is wired up at all: if the decision were refactored to
+  unconditionally submit, every test would still pass and the feature would be a
+  silent no-op. `verifier_withholds_a_hash_that_does_not_match_the_reference`
+  drives the withhold path with two *genuine* RandomX hashes for adjacent
+  nonces — the realistic shape of a divergence — rather than synthetic bytes.
+- **Round 5 "remaining work" (b)** — the C1 memory-safety worst case was, in the
+  reviewer's words, "only argued, never executed". It is now executed:
+  `native_loop_at_the_c1_worst_case_dataset_address` forces `entropy(13)` to the
+  maximum `dataset_offset` and `entropy(8)` so `ma` masks to `0x7FFF_FFC0`, then
+  runs the full differential comparison at that address. A seed reaches this
+  case roughly once in 524,288, so it would never have been hit by chance. The
+  differential helper was split so a test can pin entropy words rather than hope
+  a seed lands where it wants.
+
+### STILL OPEN — deliberately, with reasons
+- **R5-F2** — `make test` runs `cargo test` (debug) while every verification in
+  this log was done in release, so the `debug_assert!` guards added for the
+  native loop never execute in the profile that gets verified. No live bug, but
+  the gap is real. Folded into issue #2's interim mitigations.
+- **R5-F4** — two 2 GiB `LazyLock` datasets (different keys) can be resident at
+  once, ~4.5 GiB peak in the test binary. Test-only.
+- **R5-F6 / R7 open** — the 11-thread benchmark phase has no barrier, so "round
+  i is concurrent across threads" is assumed rather than enforced. Dilutes the
+  measured effect rather than inflating it, so it cannot have manufactured the
+  result.
+- **R5-F7** — 8 redundant FMOVs per iteration in the f-load path. Filed as
+  **issue #1**; changes emitted ARM64, so it needs its own review round.
+- **CI cannot validate any of this** — filed as **issue #2**.
+- **`worker_loop` remains untestable** — the verifier's lazy construction and
+  seed-rotation reset are reviewed by eye (round 7 traced them and found them
+  correct) but not tested. Closing this means a fake-pool seam, which deserves
+  its own MR.
+
+### Verification
+121 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.

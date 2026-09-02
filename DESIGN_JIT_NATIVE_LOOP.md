@@ -321,10 +321,12 @@ now `true`. Measured via `benches/nativeloop_ab.rs`:
 
 | Phase | run 1 | run 2 (independent reviewer) | claim |
 |---|---|---|---|
-| 1 thread | +6.12% | — | ~+6% |
+| 1 thread | +6.12% | +6.45% | **+6.1% to +6.5%** |
 | 11 threads | +6.76% | +7.42% | **+6.8% to +7.4%** |
 
-96 of 96 paired rounds positive across both runs. Each run reports a much
+96 of 96 paired rounds positive across both runs. The 1-thread row is the
+*stronger* replication of the two — the independent baselines agreed to within
+0.03% — and was previously left blank, which understated the evidence (R7-F5). Each run reports a much
 tighter interval than the gap between the runs, so **the per-run CI does not
 describe reproducibility** — quote the range, not an interval. See AUDIT.md
 2026-09-02.

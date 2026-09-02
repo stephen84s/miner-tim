@@ -41,7 +41,9 @@ fn main() {
         eprintln!("  --verify-shares on|off  Re-check every candidate share on the reference");
         eprintln!("                    path before submitting, and withhold any the two paths");
         eprintln!("                    disagree on (default: on). Costs ~0.005% of mining time");
-        eprintln!("                    because shares are rare. Also MINERTIM_VERIFY_SHARES.");
+        eprintln!("                    because shares are rare. Catches faults in the native-loop");
+        eprintln!("                    machinery; both paths share an instruction generator, so a");
+        eprintln!("                    fault common to both would pass. Also MINERTIM_VERIFY_SHARES.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -74,9 +76,10 @@ fn main() {
     miner.set_verify_shares(verify_shares);
     if !verify_shares && native_loop {
         log::warn!(
-            "Share verification DISABLED while the native-loop JIT is on. A JIT \
-             defect would now be submitted to the pool as a wrong share instead \
-             of being withheld, and the only symptom would be rejects."
+            "Share verification DISABLED while the native-loop JIT is on. A \
+             native-loop defect would now be submitted to the pool as a wrong \
+             share instead of being withheld, and the only symptom would be \
+             rejects climbing on the pool side."
         );
     }
     if !native_loop {

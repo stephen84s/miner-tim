@@ -20,9 +20,14 @@ DONATE_LEVEL=5
 # Equivalent to `--native-loop off`, or MINERTIM_NATIVE_LOOP=0 in the environment.
 NATIVE_LOOP=
 # VERIFY_SHARES: "on" (default) or "off". Before submitting a share, recompute it
-# with the older, slower, well-tested code and compare. If they disagree the share
-# is withheld and a loud error is logged, so a JIT fault is caught here instead of
+# with the older, well-tested code path and compare. If they disagree the share is
+# withheld and a loud error is logged, so the fault is caught here instead of
 # showing up days later as rejected shares on the pool.
+#
+# What it does and does not cover: both paths share the same instruction
+# generator, so this detects faults in the NEW native-loop machinery (which is
+# where the recent changes are) and would not detect a fault in code common to
+# both. It is a targeted check, not a general guarantee.
 #
 # Costs about 0.005% of mining time: only the rare hashes good enough to submit
 # are re-checked, not the hundreds per second that are discarded. Leave it on.

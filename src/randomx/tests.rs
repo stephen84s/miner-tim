@@ -555,6 +555,43 @@ mod full_hash_tests {
         }
     }
 
+    /// The share verifier's withhold path, driven by two *genuine* RandomX
+    /// hashes rather than synthetic byte patterns.
+    ///
+    /// Review round 7 (R7-Q1) argued the important gap was not "the mismatch
+    /// branch never runs" but "nothing proves the comparison is wired up at
+    /// all" — if the decision were refactored to be unconditionally submit,
+    /// every other test would still pass and the feature would be a silent
+    /// no-op. Hashes for adjacent nonces are the realistic shape of a
+    /// divergence, so this feeds one in and asserts the share is withheld.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn verifier_withholds_a_hash_that_does_not_match_the_reference() {
+        use crate::miner::{classify_share, ShareVerdict};
+
+        let mut vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        let blob = |nonce: u32| {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b[39..43].copy_from_slice(&nonce.to_le_bytes());
+            b
+        };
+        let h0 = vm_full.calculate_hash(&blob(0));
+        let h1 = vm_full.calculate_hash(&blob(1));
+        assert_ne!(h0, h1, "adjacent nonces produced the same hash");
+
+        assert_eq!(
+            classify_share(true, &h0, Some(&h0)),
+            ShareVerdict::SubmitVerified,
+            "a matching reference must submit"
+        );
+        assert_eq!(
+            classify_share(true, &h0, Some(&h1)),
+            ShareVerdict::Withhold,
+            "a genuine divergence must withhold the share"
+        );
+    }
+
     /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
     /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
     #[test]
@@ -881,13 +918,25 @@ mod native_loop_diff_tests {
     /// the register file, scratchpad and loop-carried state all match exactly.
     fn assert_paths_agree(seed: u8, iters: usize, dataset: &Arc<RandomXDataset>) {
         let program_bytes = make_program_bytes(seed);
-        let (config, ma, mx, dataset_offset) = vm::derive_program_params(&program_bytes);
+        assert_paths_agree_with(&program_bytes, seed, iters, dataset);
+    }
+
+    /// As `assert_paths_agree`, but on caller-supplied program bytes, so a test
+    /// can pin specific entropy words rather than hoping a seed lands on the
+    /// case it wants.
+    fn assert_paths_agree_with(
+        program_bytes: &[u8],
+        sp_seed: u8,
+        iters: usize,
+        dataset: &Arc<RandomXDataset>,
+    ) {
+        let (config, ma, mx, dataset_offset) = vm::derive_program_params(program_bytes);
 
         let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
             Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
         let mut register_usage = [0i32; 8];
         vm::compile_program(
-            &program_bytes,
+            program_bytes,
             &mut register_usage,
             &mut bytecode,
             RANDOMX_PROGRAM_SIZE,
@@ -900,14 +949,14 @@ mod native_loop_diff_tests {
         // final mode and FP results differ by 1 ULP.
         vm::reset_rounding_mode_for_test();
         let mut ref_nreg = NativeRegisterFile::new();
-        let mut ref_sp = make_scratchpad(seed);
+        let mut ref_sp = make_scratchpad(sp_seed);
         let mut ref_bc: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
             Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
         let mut ref_jit = JitCompiler::new().expect("jit");
         let ref_state = vm::execute_vm_for_test(
             &mut ref_nreg,
             &mut ref_sp,
-            &program_bytes,
+            program_bytes,
             Some(dataset),
             &mut ref_bc,
             Some(&mut ref_jit),
@@ -930,8 +979,8 @@ mod native_loop_diff_tests {
         let mut new_nreg = NativeRegisterFile::new();
         // a-registers are the loop's only live input besides r; seed them the
         // same way execute_vm_inner does, from the program entropy.
-        vm::init_registers_from_entropy_for_test(&mut new_nreg, &program_bytes);
-        let mut new_sp = make_scratchpad(seed);
+        vm::init_registers_from_entropy_for_test(&mut new_nreg, program_bytes);
+        let mut new_sp = make_scratchpad(sp_seed);
         let mut out = [0u64; 4];
         unsafe {
             let f = jit.get_loop_fn();
@@ -948,23 +997,23 @@ mod native_loop_diff_tests {
         // ---- compare ----
         assert_eq!(
             new_nreg.r, ref_nreg.r,
-            "seed {seed}, {iters} iters: r-registers diverged"
+            "seed {sp_seed}, {iters} iters: r-registers diverged"
         );
         for i in 0..4 {
             assert_eq!(
                 (new_nreg.f[i].0.to_bits(), new_nreg.f[i].1.to_bits()),
                 (ref_nreg.f[i].0.to_bits(), ref_nreg.f[i].1.to_bits()),
-                "seed {seed}, {iters} iters: f[{i}] diverged"
+                "seed {sp_seed}, {iters} iters: f[{i}] diverged"
             );
             assert_eq!(
                 (new_nreg.e[i].0.to_bits(), new_nreg.e[i].1.to_bits()),
                 (ref_nreg.e[i].0.to_bits(), ref_nreg.e[i].1.to_bits()),
-                "seed {seed}, {iters} iters: e[{i}] diverged"
+                "seed {sp_seed}, {iters} iters: e[{i}] diverged"
             );
         }
         assert!(
             new_sp == ref_sp,
-            "seed {seed}, {iters} iters: scratchpad diverged"
+            "seed {sp_seed}, {iters} iters: scratchpad diverged"
         );
         // D2: ma/mx are not consumed until the *following* iteration, so
         // comparing only nreg+scratchpad cannot detect an ordering error. These
@@ -985,14 +1034,14 @@ mod native_loop_diff_tests {
                 ref_state.sp_addr0 as u64,
                 ref_state.sp_addr1 as u64
             ),
-            "seed {seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
+            "seed {sp_seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
         );
         // The rounding mode must evolve identically. An epilogue that saved and
         // restored FPCR — the C3 violation the design warns about — would pass
         // every assertion above and only surface as a wrong hash across chains.
         assert_eq!(
             native_fpcr, ref_fpcr,
-            "seed {seed}, {iters} iters: final FP rounding mode diverged"
+            "seed {sp_seed}, {iters} iters: final FP rounding mode diverged"
         );
     }
 
@@ -1006,6 +1055,43 @@ mod native_loop_diff_tests {
             Arc::new(RandomXDataset::generate(cache, programs, 8))
         });
         DS.clone()
+    }
+
+    /// The C1 memory-safety worst case, executed rather than argued.
+    ///
+    /// The emitted dataset read is `base + dataset_offset + (ma & 0x7FFF_FFC0)`
+    /// with **no runtime bounds check**, and the safety argument is that the
+    /// largest reachable address still lands inside the allocation with 64
+    /// bytes to spare. Until now that was only ever argued on paper and pinned
+    /// by a `const` assert — no test had actually driven the emitted code at
+    /// that address, and a seed lands there roughly once in 524,288.
+    ///
+    /// Both entropy words are forced to their extremes: `entropy(13)` to the
+    /// maximum `dataset_offset`, and `entropy(8)` so `ma` masks to the largest
+    /// possible value. If the address arithmetic is wrong at the top of the
+    /// range this reads out of bounds, which under a test harness means a
+    /// segfault or a mismatch rather than a silent wrong hash in production.
+    #[test]
+    fn native_loop_at_the_c1_worst_case_dataset_address() {
+        let ds = test_dataset();
+        let mut pb = make_program_bytes(3);
+
+        // entropy(13) -> dataset_offset = (e % (DATASET_EXTRA_ITEMS + 1)) * 64.
+        pb[13 * 8..13 * 8 + 8].copy_from_slice(&vm::DATASET_EXTRA_ITEMS.to_le_bytes());
+        // entropy(8) -> ma = (e as u32) & CACHE_LINE_ALIGN_MASK.
+        pb[8 * 8..8 * 8 + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        let (_, ma, _, dataset_offset) = vm::derive_program_params(&pb);
+        assert_eq!(ma, 0x7FFF_FFC0, "ma is not at its maximum");
+        assert_eq!(
+            dataset_offset,
+            vm::DATASET_EXTRA_ITEMS * 64,
+            "dataset_offset is not at its maximum"
+        );
+
+        // Several iterations: `ma` is XORed each pass, so only the first read
+        // is at the pinned extreme, but the bound applies to every one.
+        assert_paths_agree_with(&pb, 3, 4, &ds);
     }
 
     /// The headline gate. N=1 cannot catch an mx-ordering error (design D2), so

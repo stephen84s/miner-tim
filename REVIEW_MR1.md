@@ -1211,3 +1211,54 @@ round 7 as "needs its own round", so I am reviewing all three.
 | Deferred-item merge judgement | AUDIT.md | NOT STARTED | |
 
 ## Round 8 findings
+
+### R8-VC1 — P3: the "no Argon2d cache in full mode" reasoning is SOUND. I tried to break it and could not.
+I enumerated every reader of `cache_memory` in the crate rather than trusting
+the claim:
+- `vm.rs:1321` — `init_dataset_item(cache_memory, ...)`, reachable **only** from
+  the `None` arm of `match dataset`. A full-mode VM has `dataset: Some(_)`, so
+  this arm is unreachable for it.
+- `vm.rs:1733` — `cache_and_programs()`, the public accessor.
+- `dataset.rs:64` / `dataset.rs:103` — both take the cache as a *parameter*;
+  they never reach into a `RandomXVm`.
+- `vm.rs:1533/1576` — the free function `calculate_hash_versioned` builds its
+  own local cache and is untouched by this change.
+- `vm.rs:1766/1831/1947` — the three `execute_vm` call sites pass
+  `&self.cache_memory`, but each is on a VM whose `dataset` decides the arm.
+
+The load-bearing question is whether `dataset` can become `None` on a VM that
+has no cache. **It cannot:** `grep -n "self.dataset = "` finds exactly **one**
+assignment in the whole file (`vm.rs:1719`), and it is inside `reinit`, which
+rebuilds the cache on the `None` branch in the same statement. There is no
+`set_dataset`, no `pub` field, and `cache_memory`/`dataset` are private. So the
+invariant "cache is empty ⟹ dataset is Some" is established at both
+constructors and preserved by the only mutator.
+
+`new_versioned` (light) still builds the cache, so light mode is unaffected.
+The change is also correct for rx/2: `new_full_versioned` covers both versions
+and neither reads the cache when a dataset is present.
+
+### R8-F1 — The new invariant is load-bearing for a *public* accessor but is documented only inside the constructor body  [MINOR]
+**Where:** `src/randomx/vm.rs:1731-1734`
+**Claim:** `cache_and_programs()` is `pub`, and its doc comment is unchanged:
+`/// Get references to cache and programs (for dataset generation).` It now
+returns an **empty** cache slice for any full-mode VM. The reason is explained
+only in a body comment inside `new_full_versioned`, which a caller reading the
+accessor will not see.
+**Failure scenario:** a future caller writes the natural-looking
+`let vm = RandomXVm::new_full(key, ds); let (c, p) = vm.cache_and_programs();
+RandomXDataset::generate(c, p, n)` and gets an empty slice. `load64_native`
+(`dataset.rs:33`) then indexes `memory[offset..offset+8]` on a zero-length
+slice, so this **panics** rather than producing a wrong dataset — the safe
+failure — but it panics inside `RandomXDataset::generate`'s worker threads,
+which is a confusing place to land. No current caller does this: all five
+in-tree callers (`miner.rs:671`, `tests.rs:34`, `tests.rs:1054`,
+`benches/fullmode.rs:39`, `benches/nativeloop_ab.rs:208`) construct a **light**
+VM with `RandomXVm::new` first, exactly as the coordinator believed.
+**Suggested (not a fix):** say it on the accessor — "the cache is empty for
+full-mode VMs; build a light VM if you need it for dataset generation" — or,
+better, return `Option<&[u8]>` so the emptiness is in the type. `minertim` is a
+lib crate with these items `pub`, so this is an API contract, not just an
+internal note.
+**Confidence:** HIGH — enumerated every caller; confirmed the doc comment is
+unchanged by reading the file.

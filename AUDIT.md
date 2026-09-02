@@ -2109,3 +2109,38 @@ not be able to run the mandatory local gate at all.
 ### Verdict
 **Mergeable.** 122 lib + 7 bin tests pass in release; clippy clean on aarch64
 and x86_64.
+
+---
+
+## 2026-09-03 - Follow-up: a mangled panic message, and how it got there
+
+The reviewer's polling job surfaced a cosmetic defect in the round-8 fix
+*while it was still uncommitted*, and it is worth recording because of the
+mechanism rather than the severity.
+
+`dataset.rs`'s new precondition message rendered as:
+
+    ... Argon2d cache; got an              empty one ...
+
+**Cause:** the edit was applied with a Python script using a triple-quoted
+string containing a Rust `\`-newline continuation. Python treats a trailing
+backslash inside a triple-quoted literal as *its own* line continuation, so it
+consumed the backslash, joined the lines, and kept the source indentation as
+14 literal spaces. The Rust literal was then valid and compiled cleanly.
+
+**Why it matters more than it looks:** this is the text an operator reads at the
+moment something has already gone wrong, and nothing catches it — not the
+compiler, not clippy, not the `should_panic` test, whose expected substring sits
+before the damage.
+
+Fixed, and the branch was swept for the same pattern
+(`git diff main...HEAD` over `*.rs`, looking for runs of 3+ spaces inside string
+literals). One instance only; every other hit is intentional column alignment in
+`println!` output.
+
+**Process note:** earlier edits in this session escaped the backslash (`\\` in
+the Python source) and were unaffected. The single-backslash form is the trap.
+Prefer a heredoc written straight to the file, or verify the rendered literal
+after any scripted edit that contains one.
+
+122 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.

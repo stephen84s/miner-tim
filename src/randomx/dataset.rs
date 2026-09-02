@@ -94,7 +94,8 @@ impl RandomXDataset {
         // they pass one instead of a light-mode VM.
         assert!(
             !cache_memory.is_empty(),
-            "dataset generation needs a light-mode VM's Argon2d cache; got an              empty one (a full-mode VM does not build one)"
+            "dataset generation needs a light-mode VM's Argon2d cache; got an empty \
+             one (a full-mode VM does not build one)"
         );
         let mut items = vec![[0u64; 8]; DATASET_ITEM_COUNT];
         let num_threads = num_threads.max(1);

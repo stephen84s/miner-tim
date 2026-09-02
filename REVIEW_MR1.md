@@ -2,7 +2,7 @@
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-ROUNDS 5-6 COMPLETE — ROUND 7 (delta bbecd15..HEAD) IN PROGRESS
+COMPLETE — rounds 5, 6 and 7 all finished (round 7 = delta bbecd15..faa4131)
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -1144,8 +1144,49 @@ became unconditionally `true`, no existing test would notice. Extract the
 decision and unit-test both branches; injecting a JIT fault is the hard way to
 get there (R7-Q1).
 
+**R7-VC10 — the six native-loop tests still pass in release on the committed
+HEAD.** Run against the clean `git archive faa4131` export, single-threaded:
+```
+running 6 tests
+test randomx::jit::compiler::tests::native_loop_emitted_instruction_accounting ... ok
+test randomx::tests::full_hash_tests::test_native_loop_known_answer ... ok
+test randomx::tests::full_hash_tests::test_native_loop_known_answer_pipelined ... ok
+test randomx::tests::native_loop_diff_tests::native_loop_matches_interpreter ... ok
+test randomx::tests::native_loop_diff_tests::native_loop_matches_interpreter_full_program ... ok
+test randomx::tests::native_loop_diff_tests::native_loop_zero_iterations_terminates ... ok
+test result: ok. 6 passed; 0 failed; finished in 114.20s
+```
+The round-6 JIT change (`1 << 19` -> `1 << 18`) is a `debug_assert!` and so is
+inert in this profile, but the known-answer and differential gates confirm the
+emitted loop is unchanged in behaviour.
+
 **R7-VC9 — clippy is clean on the committed HEAD for both targets.** Run against
 the clean `git archive faa4131` export, so unaffected by the working-tree edits:
 `cargo clippy --all-targets -- -D warnings` and the same with
 `--target x86_64-apple-darwin` both finish with no diagnostics. The six CLI
 parser tests pass (R7-VC8).
+
+
+## Remaining work if this review is interrupted
+- **Round 7 is complete.** All four priority questions answered, all six
+  round-7 findings written up, all five round-6 fixes verified against the
+  files, and the committed HEAD independently built, linted and tested from a
+  clean export.
+- **Not reviewed, deliberately out of scope:** the uncommitted working-tree
+  changes present while I was reviewing (`src/miner.rs` `ShareVerdict` /
+  `classify_share`, `src/bin/minertim.rs` env-branch test,
+  `src/randomx/jit/compiler.rs`). They implement R7-Q1 option 1 and appear to
+  improve on it, but they were changing under me and are not in `faa4131`.
+  **They need their own round**, particularly: whether `classify_share` preserves
+  the fail-open behaviour on `SubmitVerifierUnavailable`, and whether the
+  extracted call site still reaches the counter.
+- **Highest-value follow-ups, in order:**
+  1. R7-F1 — stop the verifier building a 256 MiB Argon2d cache it never reads.
+     (A full-mode `RandomXVm` constructor that skips `argon2d_cache` would fix
+     this for the *mining* VMs too, halving an existing ~2.75 GiB of waste.)
+  2. R7-F2 — make the fail-safe target per-switch; `--verify-shares` should fail
+     to `true`.
+  3. R7-F4/R7-F3 — collapse `parse_native_loop` into `parse_switch` and repair
+     the doc block, which also removes the divergence that produced R7-F2.
+  4. R6-F7 (still open from round 5) — the 8 redundant FMOVs per iteration in
+     the f-load path.

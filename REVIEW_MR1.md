@@ -772,7 +772,7 @@ rounds 1-6 is re-reviewed except to confirm those fixes landed.
 | P2 — false positives | src/miner.rs, src/randomx/vm.rs | DONE | R7-VC2/VC3/VC4 |
 | P3 — counter reaches the operator | src/miner.rs, src/bin/minertim.rs | DONE | R7-VC5; wiring is sound |
 | P4 — cost | src/miner.rs, src/randomx/vm.rs | DONE | R7-F1: cost mis-stated by ~2 orders of magnitude |
-| Round-6 fixes landed | compiler.rs, bench, minertim.rs | NOT STARTED | |
+| Round-6 fixes landed | compiler.rs, bench, minertim.rs, docs | DONE | R7-VC6: all five verified, not trusted |
 | Fault-injection test question | — | DONE | R7-Q1: yes, but not by injecting a JIT fault |
 
 ## Round 7 findings
@@ -966,3 +966,57 @@ emitter**, which would produce identical wrong hashes on both sides. A fully
 independent reference would be the interpreter. That is not an argument against
 the feature; it is an argument for describing it as "native-loop scaffolding
 verification" rather than "JIT verification".
+
+**R7-VC5 — the verify-failure counter really does reach the operator.** Traced
+end to end: `MiningStats.verify_failures` is incremented with
+`fetch_add(1, Relaxed)` in the mismatch arm; the `Arc<MiningStats>` handed to
+each worker is the same one stored as `self.stats = Some(stats)`
+(`miner.rs:263`), so `Miner::get_verify_failures()` reads the workers' counter
+rather than a detached copy; and the 10-second stats loop in `main` reads it
+every tick and emits `log::error!` whenever it is non-zero. Three independent
+signals would fire on a real mismatch: the per-share `log::error!` in the worker
+(with both hashes, job_id and nonce — genuinely useful for a bug report), the
+recurring stats-loop error every 10 s, and the share simply never being
+submitted. Two small inaccuracies, neither worth changing:
+- The comment says the counter is *"appended to the normal stats line"*; it is
+  actually emitted as a separate `log::error!` line immediately before it.
+- The `log::error!` repeats every 10 s forever once non-zero. For a persistent
+  correctness fault I think that is right, and I would not change it.
+
+**R7-VC6 — all five round-6 fixes landed, checked against the files rather than
+the summary.**
+- **R6-F1**: `compiler.rs:828` now reads `skip < (1 << 18)` with the message
+  "CBZ zero-iteration guard offset out of **signed** imm19 range", and the
+  comment above it explains that imm19 is sign-extended and shifted left 2.
+  Correct, and it now genuinely matches the back-branch's `(-(1<<18)..(1<<18))`.
+- **R6-F2**: `nativeloop_ab.rs:87` now reads
+  `20..=29 => 2.086, 30..=59 => 2.042, _ => 2.000` — the *lowest* df in each
+  bucket, i.e. conservative in the right direction. At the default n=24 (df=23)
+  it now returns 2.086 against a true 2.069, so the interval is slightly wide
+  rather than slightly narrow. Correct.
+- **R6-F3**: verified on the shipped binary —
+  `--native-loop` (bare) now prints
+  `warning: --native-loop given with no value - assuming OFF (the safe
+  direction); use on|off` followed by the DISABLED warn. The silent shape is
+  gone.
+- **R6-Q1**: `--native-loop maybe` now resolves to off, with a warning, and
+  never aborts. Two new unit tests pin both shapes.
+- **R6-F4**: the claim is a **range** in all four places I named —
+  `DESIGN_JIT_NATIVE_LOOP.md:325` (a table showing both runs and the range),
+  `CLAUDE.md:33`, `src/randomx/vm.rs:1639-1641`, and the AUDIT entry — each also
+  stating that the per-run CIs do not describe reproducibility. AUDIT.md:1774
+  carries the standing rule. The +9.01% retraction is preserved rather than
+  erased. This is a better outcome than I asked for.
+
+**R7-VC7 — cost arithmetic (P4), recurring component.** The claimed
+"0.0008%-0.008% of mining time at difficulty 10k-100k" is the right order of
+magnitude but ~25% optimistic. One verification hash per share, one share per
+`D` hashes, gives overhead `= 1/D` at minimum: **0.010% at D=10,000 and 0.0010%
+at D=100,000**. `calculate_hash` is unpipelined, so it costs somewhat more than
+one mining hash (it re-fills the scratchpad rather than overlapping the fill),
+pushing it to roughly 0.012% / 0.0012%. The `set_verify_shares` doc comment's
+"roughly 0.005% of mining time" sits inside that band and is fine as an order of
+magnitude. **None of this matters in absolute terms** — the recurring cost is
+genuinely negligible, which is the point the claim is making. The cost that is
+*not* negligible and is missing from every one of these statements is the one-off
+verifier construction (R7-F1).

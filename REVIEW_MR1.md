@@ -770,10 +770,10 @@ rounds 1-6 is re-reviewed except to confirm those fixes landed.
 |---|---|---|---|
 | P1 — verification soundness / off-by-one | src/miner.rs | DONE | R7-VC1 + R7-VC2: proved by reading AND empirically |
 | P2 — false positives | src/miner.rs, src/randomx/vm.rs | DONE | R7-VC2/VC3/VC4 |
-| P3 — counter reaches the operator | src/miner.rs, src/bin/minertim.rs | NOT STARTED | |
+| P3 — counter reaches the operator | src/miner.rs, src/bin/minertim.rs | DONE | R7-VC5; wiring is sound |
 | P4 — cost | src/miner.rs, src/randomx/vm.rs | DONE | R7-F1: cost mis-stated by ~2 orders of magnitude |
 | Round-6 fixes landed | compiler.rs, bench, minertim.rs | NOT STARTED | |
-| Fault-injection test question | — | NOT STARTED | |
+| Fault-injection test question | — | DONE | R7-Q1: yes, but not by injecting a JIT fault |
 
 ## Round 7 findings
 
@@ -876,3 +876,93 @@ same block that creates or re-inits the VM, and that block runs before the first
 hash because `vm.is_none()` forces it), and choosing to **submit** rather than
 withhold on that impossible path is the right call — it fails toward not
 discarding real revenue.
+
+### R7-F2 — The new fail-safe policy is correct for `--native-loop` but **inverted** for `--verify-shares`: malformed input silently disables the safety net  [MINOR]
+**Where:** `src/bin/minertim.rs` `parse_switch`, called as
+`parse_switch(&args, "--verify-shares", "MINERTIM_VERIFY_SHARES", true)`
+**Claim:** You generalised my R6-Q1 pushback into `parse_switch` and applied it
+to both switches, with the doc asserting "for both switches here `false` is the
+conservative direction". That is true for `--native-loop` (off = slower but
+provably correct) and false for `--verify-shares` (off = **remove the check**).
+For a safety net the conservative resolution of an unparseable value is *on*.
+**Evidence:** `as_bool` now returns `Some(false)` for anything unrecognised, and
+the no-value arm sets `Some(false)`. Three reachable shapes therefore disable
+verification:
+- `--verify-shares maybe` (typo)
+- `--verify-shares` with no value
+- **`MINERTIM_VERIFY_SHARES=` set but empty** — `std::env::var` returns `Ok("")`,
+  `as_bool("")` hits the `_` arm. This needs no typo at all: a launchd/systemd
+  unit or wrapper doing `MINERTIM_VERIFY_SHARES="$SOMETHING_UNSET"` reaches it.
+**Failure scenario:** the operator believes shares are being verified; they are
+not. The consequence is bounded — it removes defence-in-depth rather than
+producing wrong hashes — and it is *not* silent: `parse_switch` prints a
+`warning:` line and `main` additionally emits
+`log::warn!("Share verification DISABLED while the native-loop JIT is on...")`.
+Those two signals are why I am calling this MINOR rather than MAJOR. But it is
+structurally the same "believes it is on while it is off" shape as R6-F3, now
+reintroduced on the new switch by the fix for R6-F3.
+**Suggested direction (not a fix):** make the fail-safe target a parameter —
+`--native-loop` fails to `false`, `--verify-shares` fails to `true`. The rule is
+not "fail to false", it is "fail to whichever value cannot lose money".
+**Confidence:** HIGH on the behaviour (read, and it follows directly from
+`as_bool` never returning `None`).
+
+### R7-F3 — `parse_native_loop`'s doc comment has been re-parented onto `parse_switch`, leaving one function undocumented and the other documented as something it is not  [MINOR]
+**Where:** `src/bin/minertim.rs:223-247`
+**Claim:** The edit merged two doc blocks. The comment now attached to
+`parse_switch` opens with *"Resolve the native-loop switch: `--native-loop <v>` /
+`--native-loop=<v>` beats `MINERTIM_NATIVE_LOOP`..."* and runs for fifteen lines
+about the native-loop switch specifically before the intended
+`parse_switch` text begins mid-block at *"Resolve an `--flag on|off` switch..."*.
+`parse_native_loop` itself now has **no doc comment at all**. The block also
+contains a rustdoc intra-doc link `[`parse_native_loop`]` inside what is now
+`parse_switch`'s own documentation, i.e. it points at a sibling from a doc that
+claims to describe that sibling.
+**Evidence:** read from the file at `src/bin/minertim.rs:223-247`, not from the
+diff — the two `///` runs are contiguous with no blank line or item between them.
+**Failure scenario:** documentation only; `cargo doc` would render the
+native-loop policy as `parse_switch`'s contract. No runtime effect.
+**Confidence:** HIGH.
+
+### R7-F4 — `parse_native_loop` is now behaviourally identical to `parse_switch` and should not exist twice  [MINOR]
+**Where:** `src/bin/minertim.rs` — `parse_switch` and `parse_native_loop`
+**Claim:** After this commit the two functions implement the same algorithm:
+same eight accepted spellings, same `=`-form and space-form handling, same
+last-flag-wins, same `Some(false)` on garbage, same `Some(false)` on a missing
+value, same env fallback, same `unwrap_or(default)`. `parse_native_loop(args)` is
+exactly `parse_switch(args, "--native-loop", "MINERTIM_NATIVE_LOOP", true)`. The
+only differences are the wording of two `eprintln!` strings.
+**Failure scenario:** no current bug; the risk is divergence. Two copies of a
+security-relevant parser drift, and the next fix will land in one of them. Note
+this is also what let R7-F2 through: the policy was centralised into
+`parse_switch` without noticing that "fail to false" is switch-specific.
+**Confidence:** HIGH — compared the two bodies line by line.
+
+### R7-Q1 — Yes, a test is warranted for the mismatch branch, but not by injecting a JIT fault  [QUESTION / recommendation]
+You flagged that the mismatch branch has never executed. I think the more
+important gap is one step earlier: **nothing tests that the verification is
+wired up at all.** If `verified` were refactored to be unconditionally `true`,
+every existing test would still pass, the feature would be a silent no-op, and
+the only symptom would be the absence of a symptom.
+Injecting a JIT fault is the hard way to close that. Two cheaper options:
+1. **Extract the decision.** Pull the compare-and-log out of the 200-line
+   `worker_loop` into something like
+   `fn verify_share(reference: &[u8; 32], mined: &[u8; 32], stats: &MiningStats, ...) -> bool`
+   and unit-test both branches directly. That covers the inverted-comparison and
+   counter-not-incremented failure modes, needs no dataset, and runs in
+   microseconds.
+2. **Inject at the input, not the JIT.** A test can feed the verifier a blob one
+   nonce off and assert the share is withheld and `verify_failures` incremented.
+   This exercises the real branch end to end without needing a broken JIT.
+Either is worth having before merge; option 1 is the one I would do, because it
+also creates the seam that makes option 2 trivial.
+**Note on what this check can and cannot catch** — worth stating in AUDIT.md,
+because the current framing ("a JIT defect") is broader than the mechanism:
+the reference VM runs `set_native_loop(false)`, which is still **JIT-emitted
+ARM64 sharing the same `emit_body`**. So the check detects divergence between
+the native-loop scaffolding and the body-JIT path — exactly the class the
+differential tests cover — and is **blind to any defect in a shared body
+emitter**, which would produce identical wrong hashes on both sides. A fully
+independent reference would be the interpreter. That is not an argument against
+the feature; it is an argument for describing it as "native-loop scaffolding
+verification" rather than "JIT verification".

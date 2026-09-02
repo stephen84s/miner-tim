@@ -1052,3 +1052,32 @@ option 1 from R7-Q1, and from the fragment I saw it also makes the
 implicit `None => true`, which is the right call and better than what I
 suggested. I have **not** reviewed it — it is outside the `bbecd15..HEAD` scope I
 was given and it was changing under me. It should get its own round.
+
+### R7-F5 — Two small documentation inaccuracies carried into user-visible text  [MINOR]
+**Where:** AUDIT.md verify-before-submit entry; `DESIGN_JIT_NATIVE_LOOP.md:323`
+1. AUDIT says the counter is *"surfaced in the periodic stats line"*. It is
+   emitted as its own `log::error!` immediately before the stats line, not
+   appended to it. Functionally better than described; just not what it says.
+2. The design table's 1-thread row records run 2 as `—`. My independent run did
+   produce a 1-thread figure: **+6.45%**, against run 1's +6.12%. That row could
+   read `+6.12% | +6.45% | ~+6.1% to +6.5%` and would then be the *strongest*
+   replication in the table (the two baselines agreed to 0.03%). Leaving it blank
+   understates the evidence.
+**Confidence:** HIGH.
+
+### R7-F6 — The "deliberate limits" list omits the one that matters most: the reference path is not independent  [MINOR]
+**Where:** AUDIT.md, verify-before-submit entry, "Deliberate limits" list
+**Claim:** The list covers three limits but not the sharpest one. The reference
+VM runs `set_native_loop(false)`, which is the **body JIT** — still emitted
+ARM64, still going through the same `emit_body` and the same 28 instruction
+emitters. The check therefore detects divergence between the native-loop
+*scaffolding* and the body-JIT path, and is structurally blind to a defect in
+any shared body emitter, which would yield identical wrong hashes on both sides
+and sail through. The only fully independent reference is the interpreter.
+**Failure scenario:** none directly; the risk is that the feature is trusted
+more broadly than it can bear — e.g. someone concluding from a clean
+`verify_failures` counter that "the JIT is verified", when what is verified is
+one half of it.
+**Confidence:** HIGH — this follows from `execute_vm_inner`'s dispatch: with
+`use_native_loop == false` it falls through to `jit.compile(bytecode, version)`
+and the same `emit_body`.

@@ -435,7 +435,7 @@ fallback switch). Nothing from rounds 1-5 is re-reviewed.
 ## Round 6 coverage ledger
 | Area | File(s) | Status | Notes |
 |---|---|---|---|
-| F1 fix — is it real? | benches/nativeloop_ab.rs | IN PROGRESS | Line present; empirical proof pending |
+| F1 fix — is it real? | benches/nativeloop_ab.rs | DONE | R6-VC3: proved empirically by instrumented counters |
 | F3 fix — CBZ range assert | src/randomx/jit/compiler.rs | DONE | R6-F1: bound is 2x too loose |
 | F5 fix — t-table | benches/nativeloop_ab.rs | DONE | R6-F2: buckets anti-conservative |
 | Measurement trustworthiness | AUDIT.md, bench | NOT STARTED | |
@@ -513,3 +513,45 @@ example file ships `NATIVE_LOOP=` (empty), which yields no flag and therefore
 the built-in default — the same convention already used for `THREADS` and
 `DONATE_LEVEL`. `make run NATIVE_LOOP=off` also works (command-line variables
 outrank `-include`).
+
+**R6-VC3 — F1 is genuinely fixed. Proved empirically, not by reading.**
+I did not trust the presence of `base_vm.set_native_loop(false)`. I exported the
+tree at HEAD to a scratch directory (`git archive HEAD | tar -x`), instrumented
+**only** `execute_vm_inner` with two atomic counters — one incremented at the
+`compile_native_loop` dispatch, one at the body-JIT `jit.compile` dispatch — and
+added a purely additive print of the counter deltas around the two warm-up
+rounds in `ab_phase`. Neither arm's flag handling was touched. Running the
+result (`nativeloop_ab 1 1 8`, i.e. 8 hashes = 8 chains x 8 hashes = 64 chain
+executions per arm):
+
+```
+PROBE BASE arm (set_native_loop(false)): native_loop_chains=0  body_jit_chains=64
+PROBE NAT  arm (set_native_loop(true)):  native_loop_chains=64 body_jit_chains=0
+```
+
+Exactly 64 each, perfectly disjoint. The two arms genuinely execute different
+emitted code at runtime. The Round-5 F1 defect is closed, not papered over.
+(The repo itself was never modified; the instrumented copy lives only in the
+scratch directory.)
+
+**R6-VC4 — the per-round hash-equality assertion pairs the correct rounds, and
+is now load-bearing for the first time.** Execution order within a pair is
+A(base) B(nat) C(nat) D(base); `base_rates` receives `[h/ta, h/td]` and
+`nat_rates` receives `[h/tb, h/tc]`, so `report` zips (A,B) and (D,C) — each
+pair adjacent in time, mirror-ordered, which is what makes A-B-B-A cancel linear
+drift. The checksums line up the same way: both arms start from nonce 0, take an
+identical warm-up of `hashes.min(32)`, and thereafter advance by `hashes` per
+round, so within pair k the base arm's round A and the nat arm's round B cover
+the *same* nonce range, as do D and C. `assert_eq!((ca, cc), (cb, cd))` therefore
+asserts A==B and D==C — the correct comparisons. In Round 5 this was vacuous
+because both arms ran the same code; my probe run above executed it with the
+arms genuinely on different paths and it passed (32 hashes), so the assertion is
+now doing real work.
+
+**R6-VC5 — the F5 t-table fix demonstrably changes behaviour in the right
+direction.** My probe run produced n=2 (df=1), where the new table returns
+t=12.706 and the harness correctly reported
+`+66.75% (95% CI -1324.25% .. +1457.75%)` -> "NO MEASURABLE DIFFERENCE". Under
+the old hardcoded 2.09 the same data would have reported a CI of roughly
++/-218%, still including zero here, but the mechanism is visibly live. See R6-F2
+for the residual inaccuracy.

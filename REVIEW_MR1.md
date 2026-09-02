@@ -1020,3 +1020,35 @@ magnitude. **None of this matters in absolute terms** — the recurring cost is
 genuinely negligible, which is the point the claim is making. The cost that is
 *not* negligible and is missing from every one of these statements is the one-off
 verifier construction (R7-F1).
+
+**R7-VC8 — the committed HEAD (`faa4131`) compiles and its CLI tests pass.**
+I hit a compile error while running the suite (`parse_switch` not found in the
+test module) and traced it to the *working tree*, not to the commit: `git status`
+shows uncommitted modifications to `src/bin/minertim.rs`, `src/miner.rs` and
+`src/randomx/jit/compiler.rs`, and I caught them mid-edit. Verified by exporting
+the commit cleanly (`git archive faa4131 | tar -x`) into a scratch directory and
+building there:
+```
+running 6 tests
+test tests::native_loop_with_no_value_fails_safe_to_off ... ok
+test tests::native_loop_defaults_on ... ok
+test tests::native_loop_last_flag_wins ... ok
+test tests::native_loop_unrecognised_value_fails_safe_to_off ... ok
+test tests::native_loop_accepts_the_documented_spellings ... ok
+test tests::verify_shares_defaults_on_and_shares_the_fail_safe_policy ... ok
+test result: ok. 6 passed; 0 failed
+```
+**Not a finding against the reviewed commit.** Flagging it only so nobody later
+reads a broken build into `faa4131`. All timing and behavioural results reported
+in Round 7 were taken either from that clean export or from a release binary
+built before the edits began.
+
+**Note — R7-Q1 is already in flight.** The uncommitted work in the tree
+introduces `ShareVerdict` (`SubmitUnverified` / `SubmitVerified` /
+`SubmitVerifierUnavailable` / `Withhold`) and a `classify_share` function
+extracted from `worker_loop`, plus an env-branch test for `parse_switch`. That is
+option 1 from R7-Q1, and from the fragment I saw it also makes the
+"verifier unavailable" case an explicit *fail-open* verdict rather than an
+implicit `None => true`, which is the right call and better than what I
+suggested. I have **not** reviewed it — it is outside the `bbecd15..HEAD` scope I
+was given and it was changing under me. It should get its own round.

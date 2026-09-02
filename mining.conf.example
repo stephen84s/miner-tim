@@ -9,3 +9,13 @@ THREADS=
 # DONATE_LEVEL: percent of mining time donated (default 5, minimum 1), split
 # 50/50 between the MinerTim author and XMRig. See README.
 DONATE_LEVEL=5
+# NATIVE_LOOP: "on" (default) or "off". Fallback switch for the native-loop JIT,
+# which emits the whole 2048-iteration RandomX loop as ARM64 and is worth roughly
+# 7% hashrate (aarch64, rx/0, full mode only — ignored elsewhere).
+#
+# Turn it OFF if the pool starts rejecting shares. A JIT defect does not crash
+# the miner: it produces a wrong-but-plausible hash, so the hashrate still looks
+# healthy and the only symptom is rejects climbing on the pool dashboard. This
+# switch lets you rule the JIT in or out by restarting instead of rebuilding.
+# Equivalent to `--native-loop off`, or MINERTIM_NATIVE_LOOP=0 in the environment.
+NATIVE_LOOP=

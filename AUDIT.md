@@ -1653,3 +1653,68 @@ untouched), C3 FPCR containment, and all six new encoders bit-compared against
 ### Verification
 - Corrected benchmark run above; 6/6 native-loop tests pass in release.
 - `cargo clippy --all-targets -- -D warnings` clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-02 - Runtime fallback switch for the native-loop JIT
+
+### Request / goal
+Before merging MR !1, give operators a way to turn the native loop off **without
+rebuilding**. Until now the path was chosen purely by a compiled-in default:
+`miner.rs` called `RandomXVm::new_full` and never touched `set_native_loop`.
+
+### Why this is worth a config key rather than a rebuild
+The failure mode is silent and costs money. A JIT defect here does not panic and
+does not corrupt memory — it produces a wrong-but-plausible hash. The miner keeps
+running, reports a healthy hashrate, submits shares, and the pool rejects them.
+The only symptom is the reject rate on a pool dashboard, which nothing in the
+miner surfaces. So the operator needs to be able to *bisect the miner against the
+pool* in one restart, not a toolchain install and a build.
+
+Residual risks that motivate it, none of them known defects:
+1. **Program-space coverage is finite.** ~147,000 hashes verified identical is
+   thousands of distinct RandomX programs, against an astronomically larger
+   space. Inherently unfalsifiable by testing; only field exposure closes it.
+2. **Nothing outside one machine has run this code.** CI cannot (see issue #2);
+   every correctness claim traces to a single M2 Max. No other Apple Silicon
+   generation has executed a single instruction of the emitted loop.
+3. **FPCR carry-over is deliberately not ABI-clean.** `emit_loop_epilogue` leaves
+   the rounding mode modified because RandomX requires it to persist across
+   chains; containment rests entirely on the save/restore pair at the outer hash
+   boundary. Correct today and verified in review round 5, but exactly the kind
+   of invariant a future change to calling code could quietly break.
+4. **`compile_native_loop` asserts in release.** C1 is unreachable by
+   construction, but a future change to `derive_program_params` would turn that
+   into a panicking worker mid-hash rather than a graceful degrade.
+
+### Files changed
+- `src/miner.rs` — `Miner::set_native_loop()`; the value is captured per worker
+  at spawn and applied to each `RandomXVm` on first construction (`reinit` keeps
+  the flag, so it is not re-applied on seed change).
+- `src/bin/minertim.rs` — `--native-loop on|off` and `MINERTIM_NATIVE_LOOP`,
+  plus four unit tests for the parser.
+- `Makefile` — passes `--native-loop` through when `NATIVE_LOOP` is set.
+- `mining.conf.example` — documents `NATIVE_LOOP` and, importantly, *when to
+  reach for it*: shares being rejected while hashrate still looks fine.
+
+### Behaviour
+- Precedence: `--native-loop` > `MINERTIM_NATIVE_LOOP` > default (on). Last flag
+  wins, so a wrapper script can append an override.
+- Accepts `on/off`, `true/false`, `yes/no`, `1/0`, case-insensitively.
+- **An unrecognised value warns and is ignored rather than being fatal.** This is
+  the switch someone reaches for during an incident; refusing to boot over a typo
+  would be the wrong failure mode.
+- Disabling logs at **warn**, not info: it silently forfeits ~7% hashrate, and
+  someone who set it during an incident should not rediscover it months later by
+  reading a config file.
+
+### Verification
+- Smoke-tested all four paths against the real binary: flag off, env off, flag
+  overriding env, and the silent default; plus a typo warning without refusing to
+  boot.
+- 106 lib tests + 4 new bin tests pass; clippy clean on aarch64 and x86_64.
+
+### Not done
+No runtime *hot* toggle — the value is read once per worker at spawn, so changing
+it needs a restart. A restart is the right granularity here: mid-hash switching
+would mean tearing down a VM whose scratchpad is live.

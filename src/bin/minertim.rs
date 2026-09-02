@@ -16,7 +16,7 @@ fn main() {
     if args.len() < 3 || args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
-        eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N]", args[0]);
+        eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]", args[0]);
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} pool.supportxmr.com:443 4...address 4", args[0]);
@@ -33,6 +33,11 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
+        eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
+        eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
+        eprintln!("                    if shares start being rejected, turn it off and restart to");
+        eprintln!("                    rule the JIT out without rebuilding. aarch64 rx/0 full mode");
+        eprintln!("                    only; ignored everywhere else.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -43,6 +48,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
+    let native_loop = parse_native_loop(&args);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 
@@ -59,6 +65,17 @@ fn main() {
     .expect("Failed to set Ctrl+C handler");
 
     let mut miner = Miner::new(mining_active.clone());
+    miner.set_native_loop(native_loop);
+    if !native_loop {
+        // Logged at warn, not info: this halves nothing and breaks nothing, but
+        // it silently gives up ~7% hashrate, and someone who set it during an
+        // incident should not discover it months later in a config file.
+        log::warn!(
+            "Native-loop JIT DISABLED — running the per-iteration body JIT. \
+             Expect roughly 7% lower hashrate. Unset --native-loop / \
+             MINERTIM_NATIVE_LOOP to restore it."
+        );
+    }
 
     log::info!(
         "Donation: donate-level {}% of mining time, split 50/50 between the MinerTim \
@@ -178,6 +195,45 @@ fn parse_donate_level(args: &[String]) -> u8 {
     donate::clamp_level(level)
 }
 
+/// Resolve the native-loop switch: `--native-loop <v>` / `--native-loop=<v>`
+/// beats `MINERTIM_NATIVE_LOOP`, which beats the default (on).
+///
+/// Accepts on/off, true/false, yes/no, 1/0, case-insensitively. An
+/// unrecognised value is ignored rather than fatal — this is the switch someone
+/// reaches for while shares are being rejected, and refusing to boot over a
+/// typo would be the wrong failure mode.
+fn parse_native_loop(args: &[String]) -> bool {
+    fn as_bool(v: &str) -> Option<bool> {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" => Some(true),
+            "off" | "false" | "no" | "0" => Some(false),
+            _ => {
+                eprintln!("warning: unrecognised native-loop value {v:?}; ignoring");
+                None
+            }
+        }
+    }
+
+    let mut value = std::env::var("MINERTIM_NATIVE_LOOP")
+        .ok()
+        .and_then(|v| as_bool(&v));
+
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix("--native-loop=") {
+            value = as_bool(v).or(value);
+        } else if args[i] == "--native-loop" {
+            if let Some(v) = args.get(i + 1) {
+                value = as_bool(v).or(value);
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+
+    value.unwrap_or(true)
+}
+
 fn format_duration(secs: f64) -> String {
     let secs = secs.max(0.0) as u64;
     if secs < 60 {
@@ -186,5 +242,49 @@ fn format_duration(secs: f64) -> String {
         format!("{}m{}s", secs / 60, secs % 60)
     } else {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_native_loop;
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn native_loop_defaults_on() {
+        assert!(parse_native_loop(&args(&[])));
+    }
+
+    #[test]
+    fn native_loop_accepts_the_documented_spellings() {
+        for off in ["off", "OFF", "false", "no", "0"] {
+            assert!(!parse_native_loop(&args(&["--native-loop", off])), "{off}");
+            assert!(
+                !parse_native_loop(&args(&[&format!("--native-loop={off}")])),
+                "{off} (= form)"
+            );
+        }
+        for on in ["on", "true", "yes", "1"] {
+            assert!(parse_native_loop(&args(&["--native-loop", on])), "{on}");
+        }
+    }
+
+    /// A typo must not disable the switch or refuse to boot: this is what
+    /// someone reaches for while shares are being rejected.
+    #[test]
+    fn native_loop_ignores_an_unrecognised_value() {
+        assert!(parse_native_loop(&args(&["--native-loop", "maybe"])));
+    }
+
+    /// Last flag wins, so a wrapper script can append an override.
+    #[test]
+    fn native_loop_last_flag_wins() {
+        assert!(parse_native_loop(&args(&["--native-loop", "off", "--native-loop", "on"])));
+        assert!(!parse_native_loop(&args(&["--native-loop=on", "--native-loop=off"])));
     }
 }

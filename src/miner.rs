@@ -99,6 +99,11 @@ pub struct ShareStats {
 
 
 pub struct Miner {
+    /// Whether workers use the native-loop JIT. Runtime kill switch: a JIT
+    /// defect here does not crash, it silently produces wrong hashes, and the
+    /// only symptom is shares being rejected by the pool. Being able to fall
+    /// back without a rebuild is the point. See `RandomXVm::set_native_loop`.
+    native_loop: bool,
     pool_connection: Option<Arc<PoolConnection>>,
     workers: Vec<JoinHandle<()>>,
     thread_count: u32,
@@ -113,6 +118,7 @@ pub struct Miner {
 impl Miner {
     pub fn new(mining_active: Arc<AtomicBool>) -> Self {
         Self {
+            native_loop: true,
             pool_connection: None,
             workers: Vec::new(),
             thread_count: 2,
@@ -123,6 +129,16 @@ impl Miner {
             stats: None,
             hashrate_tracker: HashrateTracker::new(),
         }
+    }
+
+    /// Enable or disable the native-loop JIT for all workers. Must be called
+    /// before [`Miner::start`]; workers capture the value when they spawn.
+    ///
+    /// Only has an effect on aarch64 with rx/0 in full mode — every other
+    /// configuration runs the per-iteration body JIT or the interpreter
+    /// regardless.
+    pub fn set_native_loop(&mut self, enabled: bool) {
+        self.native_loop = enabled;
     }
 
     pub fn initialize(
@@ -200,6 +216,7 @@ impl Miner {
             let total_hashes = self.total_hashes.clone();
             let hashrate_bits = self.hashrate_bits.clone();
             let ds_cache = dataset_cache.clone();
+            let native_loop = self.native_loop;
 
             let stats = stats.clone();
 
@@ -215,6 +232,7 @@ impl Miner {
                         hashrate_bits,
                         ds_cache,
                         stats,
+                        native_loop,
                     );
                 })
                 .map_err(|e| format!("Failed to spawn worker {}: {}", thread_id, e))?;
@@ -329,6 +347,7 @@ fn worker_loop(
     hashrate_bits: Arc<AtomicU64>,
     dataset_cache: SharedDatasetCache,
     stats: Arc<MiningStats>,
+    native_loop: bool,
 ) {
     log::info!("Worker {} started", thread_id);
 
@@ -371,7 +390,11 @@ fn worker_loop(
             if let Some(ref mut existing_vm) = vm {
                 existing_vm.reinit(&job.seed_hash, Some(dataset));
             } else {
-                vm = Some(RandomXVm::new_full(&job.seed_hash, dataset));
+                let mut new_vm = RandomXVm::new_full(&job.seed_hash, dataset);
+                // `reinit` keeps the flag, so this only needs setting on the
+                // VM's first construction.
+                new_vm.set_native_loop(native_loop);
+                vm = Some(new_vm);
             }
             current_key = job.seed_hash.clone();
             pipeline_ready = false;

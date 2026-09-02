@@ -25,6 +25,10 @@ struct MiningStats {
     /// Epoch millis of last share found (0 = never)
     last_share_time_ms: AtomicU64,
     start_time_ms: AtomicU64,
+    /// Shares the native loop produced that the reference path disagreed with.
+    /// Must always be 0. Anything else means the JIT is miscomputing and the
+    /// share was withheld rather than submitted.
+    verify_failures: AtomicU64,
 }
 
 // ============================================================================
@@ -104,6 +108,8 @@ pub struct Miner {
     /// only symptom is shares being rejected by the pool. Being able to fall
     /// back without a rebuild is the point. See `RandomXVm::set_native_loop`.
     native_loop: bool,
+    /// Re-check every candidate share on the reference path before submitting.
+    verify_shares: bool,
     pool_connection: Option<Arc<PoolConnection>>,
     workers: Vec<JoinHandle<()>>,
     thread_count: u32,
@@ -119,6 +125,7 @@ impl Miner {
     pub fn new(mining_active: Arc<AtomicBool>) -> Self {
         Self {
             native_loop: true,
+            verify_shares: true,
             pool_connection: None,
             workers: Vec::new(),
             thread_count: 2,
@@ -139,6 +146,16 @@ impl Miner {
     /// regardless.
     pub fn set_native_loop(&mut self, enabled: bool) {
         self.native_loop = enabled;
+    }
+
+    /// Re-check every candidate share on the reference (body-JIT) path before
+    /// submitting it, and withhold any share the two paths disagree on.
+    ///
+    /// Costs one extra hash per share found — roughly 0.005% of mining time,
+    /// because shares are rare. Has no effect when the native loop is off,
+    /// since then the mining path already *is* the reference path.
+    pub fn set_verify_shares(&mut self, enabled: bool) {
+        self.verify_shares = enabled;
     }
 
     pub fn initialize(
@@ -208,6 +225,7 @@ impl Miner {
             shares_found: AtomicU64::new(0),
             last_share_time_ms: AtomicU64::new(0),
             start_time_ms: AtomicU64::new(now_ms),
+            verify_failures: AtomicU64::new(0),
         });
 
         for thread_id in 0..thread_count {
@@ -217,6 +235,7 @@ impl Miner {
             let hashrate_bits = self.hashrate_bits.clone();
             let ds_cache = dataset_cache.clone();
             let native_loop = self.native_loop;
+            let verify_shares = self.verify_shares;
 
             let stats = stats.clone();
 
@@ -233,6 +252,7 @@ impl Miner {
                         ds_cache,
                         stats,
                         native_loop,
+                        verify_shares,
                     );
                 })
                 .map_err(|e| format!("Failed to spawn worker {}: {}", thread_id, e))?;
@@ -261,6 +281,15 @@ impl Miner {
     }
 
     /// Get share timing stats for display.
+    /// Number of shares withheld because the reference path disagreed with the
+    /// native loop. Always 0 in normal operation; any other value means the JIT
+    /// is producing wrong hashes.
+    pub fn get_verify_failures(&self) -> u64 {
+        self.stats.as_ref()
+            .map(|s| s.verify_failures.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
     pub fn get_share_stats(&self) -> ShareStats {
         let stats = match &self.stats {
             Some(s) => s,
@@ -348,6 +377,7 @@ fn worker_loop(
     dataset_cache: SharedDatasetCache,
     stats: Arc<MiningStats>,
     native_loop: bool,
+    verify_shares: bool,
 ) {
     log::info!("Worker {} started", thread_id);
 
@@ -362,6 +392,10 @@ fn worker_loop(
     let start_time = Instant::now();
     let mut last_hashrate_update = Instant::now();
     let mut pipeline_ready = false;
+    // Reference-path VM for share verification, built lazily on the first share
+    // so a worker that never finds one never pays the 2 MiB scratchpad.
+    let mut verify_vm: Option<RandomXVm> = None;
+    let mut verify_dataset: Option<Arc<RandomXDataset>> = None;
 
     while mining_active.load(Ordering::Relaxed) {
         let job = match pool.get_work() {
@@ -388,14 +422,19 @@ fn worker_loop(
             let dataset = get_or_generate_dataset(&dataset_cache, &job.seed_hash, thread_id);
             log::info!("Worker {} ready with full dataset", thread_id);
             if let Some(ref mut existing_vm) = vm {
-                existing_vm.reinit(&job.seed_hash, Some(dataset));
+                existing_vm.reinit(&job.seed_hash, Some(dataset.clone()));
             } else {
-                let mut new_vm = RandomXVm::new_full(&job.seed_hash, dataset);
+                let mut new_vm = RandomXVm::new_full(&job.seed_hash, dataset.clone());
                 // `reinit` keeps the flag, so this only needs setting on the
                 // VM's first construction.
                 new_vm.set_native_loop(native_loop);
                 vm = Some(new_vm);
             }
+            // The verifier is keyed to the seed, so a seed rotation invalidates
+            // it. Dropped rather than reinitialised: it is rebuilt lazily on the
+            // next share, and most seeds never produce one on a given worker.
+            verify_vm = None;
+            verify_dataset = Some(dataset);
             current_key = job.seed_hash.clone();
             pipeline_ready = false;
         }
@@ -463,7 +502,60 @@ fn worker_loop(
                 result_hex
             );
 
-            if let Err(e) = pool.submit_share(&job.job_id, &nonce_hex, &result_hex) {
+            // Re-check the share on the reference path before submitting.
+            //
+            // A JIT defect here does not crash and does not corrupt memory — it
+            // produces a wrong-but-plausible hash, so the miner keeps reporting a
+            // healthy hashrate while the pool bins everything it sends. Shares are
+            // rare (one per ~2-20 s for the whole rig), so recomputing exactly the
+            // ones we are about to submit costs on the order of 0.005% of mining
+            // time and turns that silent failure into a loud one.
+            //
+            // Skipped when the native loop is off: the mining path is then already
+            // the reference path, so this would compare it against itself.
+            let verified = if verify_shares && native_loop {
+                let ds = verify_dataset.clone();
+                match ds {
+                    Some(ds) => {
+                        let vvm = verify_vm.get_or_insert_with(|| {
+                            let mut v = RandomXVm::new_full(&current_key, ds);
+                            v.set_native_loop(false);
+                            v
+                        });
+                        // `calculate_hash` is self-contained — it refills the
+                        // scratchpad from the blob — so it does not disturb, and is
+                        // not disturbed by, the mining VM's pipeline state.
+                        let reference = vvm.calculate_hash(&job_blob_current);
+                        if reference == hash {
+                            true
+                        } else {
+                            stats.verify_failures.fetch_add(1, Ordering::Relaxed);
+                            log::error!(
+                                "Worker {} WITHHELD a share: the native-loop JIT and the \
+                                 reference path disagree. native={} reference={} \
+                                 job_id={} nonce={}. This is a JIT correctness failure — \
+                                 restart with --native-loop off (or NATIVE_LOOP=off in \
+                                 mining.conf) and report it.",
+                                thread_id,
+                                result_hex,
+                                hex_encode(&reference),
+                                job.job_id,
+                                nonce_hex,
+                            );
+                            false
+                        }
+                    }
+                    // Should not happen: the dataset is recorded whenever the VM is
+                    // built. Submit rather than silently dropping a real share.
+                    None => true,
+                }
+            } else {
+                true
+            };
+
+            if verified
+                && let Err(e) = pool.submit_share(&job.job_id, &nonce_hex, &result_hex)
+            {
                 log::error!("Failed to submit share: {}", e);
             }
         }

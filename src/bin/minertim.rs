@@ -38,6 +38,10 @@ fn main() {
         eprintln!("                    if shares start being rejected, turn it off and restart to");
         eprintln!("                    rule the JIT out without rebuilding. aarch64 rx/0 full mode");
         eprintln!("                    only; ignored everywhere else.");
+        eprintln!("  --verify-shares on|off  Re-check every candidate share on the reference");
+        eprintln!("                    path before submitting, and withhold any the two paths");
+        eprintln!("                    disagree on (default: on). Costs ~0.005% of mining time");
+        eprintln!("                    because shares are rare. Also MINERTIM_VERIFY_SHARES.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -49,6 +53,7 @@ fn main() {
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
     let native_loop = parse_native_loop(&args);
+    let verify_shares = parse_switch(&args, "--verify-shares", "MINERTIM_VERIFY_SHARES", true);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 
@@ -66,6 +71,14 @@ fn main() {
 
     let mut miner = Miner::new(mining_active.clone());
     miner.set_native_loop(native_loop);
+    miner.set_verify_shares(verify_shares);
+    if !verify_shares && native_loop {
+        log::warn!(
+            "Share verification DISABLED while the native-loop JIT is on. A JIT \
+             defect would now be submitted to the pool as a wrong share instead \
+             of being withheld, and the only symptom would be rejects."
+        );
+    }
     if !native_loop {
         // Logged at warn, not info: this halves nothing and breaks nothing, but
         // it silently gives up ~7% hashrate, and someone who set it during an
@@ -109,6 +122,7 @@ fn main() {
         let snap = miner.snapshot_hashrates();
         let accepted = miner.get_accepted_shares();
         let rejected = miner.get_rejected_shares();
+        let verify_failures = miner.get_verify_failures();
         let difficulty = miner.get_difficulty();
         let best = miner.get_best_hash_val();
         let share_stats = miner.get_share_stats();
@@ -145,6 +159,17 @@ fn main() {
         } else {
             "waiting".to_string()
         };
+
+        // Only ever non-zero if the JIT is miscomputing. Appended to the normal
+        // stats line so it cannot be missed by someone watching the miner rather
+        // than the pool dashboard.
+        if verify_failures > 0 {
+            log::error!(
+                "{} share(s) WITHHELD so far because the native-loop JIT disagreed with \
+                 the reference path. Restart with --native-loop off and report this.",
+                verify_failures
+            );
+        }
 
         let share_label = if share_stats.total_found > 0 {
             "since last share"
@@ -198,18 +223,73 @@ fn parse_donate_level(args: &[String]) -> u8 {
 /// Resolve the native-loop switch: `--native-loop <v>` / `--native-loop=<v>`
 /// beats `MINERTIM_NATIVE_LOOP`, which beats the default (on).
 ///
-/// Accepts on/off, true/false, yes/no, 1/0, case-insensitively. An
-/// unrecognised value is ignored rather than fatal — this is the switch someone
-/// reaches for while shares are being rejected, and refusing to boot over a
-/// typo would be the wrong failure mode.
+/// Accepts on/off, true/false, yes/no, 1/0, case-insensitively.
+///
+/// # Malformed input fails SAFE, not to the default
+///
+/// A bad value never aborts startup — this is the switch someone reaches for
+/// while shares are being rejected, and refusing to boot over a typo would be
+/// the wrong failure mode. But it resolves to **off**, not to the default.
+///
+/// The two outcomes are asymmetric. If the value could not be parsed we already
+/// know the operator was trying to *change* the setting, so resolving to `on` is
+/// the one answer we can be confident they did not want — and its cost is
+/// continued rejected shares, i.e. money, until they notice. Resolving to `off`
+/// costs at most ~7% hashrate if they actually meant "on", and never leaves a
+/// suspected-bad JIT running while someone is trying to disable it.
+/// Resolve an `--flag on|off` switch with an environment-variable fallback.
+///
+/// Same fail-safe policy as [`parse_native_loop`]: a malformed value never
+/// aborts startup, but resolves to `false` rather than to `default_on`. If the
+/// value could not be parsed we know the operator meant to change something,
+/// and for both switches here `false` is the conservative direction — slower,
+/// or noisier, but never "keep doing the thing they were trying to stop".
+fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool) -> bool {
+    let as_bool = |v: &str| -> Option<bool> {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" => Some(true),
+            "off" | "false" | "no" | "0" => Some(false),
+            _ => {
+                eprintln!("warning: unrecognised {flag} value {v:?} - assuming OFF; use on|off");
+                Some(false)
+            }
+        }
+    };
+
+    let mut value = std::env::var(env).ok().and_then(|v| as_bool(&v));
+    let eq_prefix = format!("{flag}=");
+
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix(&eq_prefix) {
+            value = as_bool(v);
+        } else if args[i] == flag {
+            match args.get(i + 1) {
+                Some(v) => value = as_bool(v),
+                None => {
+                    eprintln!("warning: {flag} given with no value - assuming OFF; use on|off");
+                    value = Some(false);
+                }
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+
+    value.unwrap_or(default_on)
+}
+
 fn parse_native_loop(args: &[String]) -> bool {
     fn as_bool(v: &str) -> Option<bool> {
         match v.trim().to_ascii_lowercase().as_str() {
             "on" | "true" | "yes" | "1" => Some(true),
             "off" | "false" | "no" | "0" => Some(false),
             _ => {
-                eprintln!("warning: unrecognised native-loop value {v:?}; ignoring");
-                None
+                eprintln!(
+                    "warning: unrecognised native-loop value {v:?} - assuming OFF \
+                     (the safe direction); use on|off"
+                );
+                Some(false)
             }
         }
     }
@@ -221,10 +301,23 @@ fn parse_native_loop(args: &[String]) -> bool {
     let mut i = 0;
     while i < args.len() {
         if let Some(v) = args[i].strip_prefix("--native-loop=") {
-            value = as_bool(v).or(value);
+            value = as_bool(v);
         } else if args[i] == "--native-loop" {
-            if let Some(v) = args.get(i + 1) {
-                value = as_bool(v).or(value);
+            match args.get(i + 1) {
+                Some(v) => value = as_bool(v),
+                // Bare `--native-loop` with nothing after it. This previously
+                // did nothing at all - no warning, no change - which was the one
+                // input shape that silently left the JIT ON while the operator
+                // believed they had turned it off. Two realistic ways to reach
+                // it: typing it as though it were a boolean flag, or a wrapper
+                // script writing `--native-loop $NL` with $NL unset.
+                None => {
+                    eprintln!(
+                        "warning: --native-loop given with no value - assuming OFF \
+                         (the safe direction); use on|off"
+                    );
+                    value = Some(false);
+                }
             }
             i += 1;
         }
@@ -274,11 +367,21 @@ mod tests {
         }
     }
 
-    /// A typo must not disable the switch or refuse to boot: this is what
-    /// someone reaches for while shares are being rejected.
+    /// A typo must not refuse to boot, but it must fail SAFE — resolving to
+    /// `on` would continue the exact behaviour the operator was trying to stop.
     #[test]
-    fn native_loop_ignores_an_unrecognised_value() {
-        assert!(parse_native_loop(&args(&["--native-loop", "maybe"])));
+    fn native_loop_unrecognised_value_fails_safe_to_off() {
+        assert!(!parse_native_loop(&args(&["--native-loop", "maybe"])));
+        assert!(!parse_native_loop(&args(&["--native-loop=maybe"])));
+    }
+
+    /// Bare `--native-loop` with no value used to be silently ignored, leaving
+    /// the JIT ON with no diagnostic — the one shape that could leave an
+    /// operator believing they had turned it off. Reachable by a wrapper script
+    /// writing `--native-loop $NL` with $NL unset.
+    #[test]
+    fn native_loop_with_no_value_fails_safe_to_off() {
+        assert!(!parse_native_loop(&args(&["--native-loop"])));
     }
 
     /// Last flag wins, so a wrapper script can append an override.
@@ -286,5 +389,18 @@ mod tests {
     fn native_loop_last_flag_wins() {
         assert!(parse_native_loop(&args(&["--native-loop", "off", "--native-loop", "on"])));
         assert!(!parse_native_loop(&args(&["--native-loop=on", "--native-loop=off"])));
+    }
+
+    #[test]
+    fn verify_shares_defaults_on_and_shares_the_fail_safe_policy() {
+        use super::parse_switch;
+        let f = |extra: &[&str]| {
+            parse_switch(&args(extra), "--verify-shares", "MINERTIM_VERIFY_SHARES_TEST", true)
+        };
+        assert!(f(&[]));
+        assert!(!f(&["--verify-shares", "off"]));
+        assert!(f(&["--verify-shares=yes"]));
+        assert!(!f(&["--verify-shares", "nonsense"]));
+        assert!(!f(&["--verify-shares"]));
     }
 }

@@ -1718,3 +1718,106 @@ Residual risks that motivate it, none of them known defects:
 No runtime *hot* toggle — the value is read once per worker at spawn, so changing
 it needs a restart. A restart is the right granularity here: mid-hash switching
 would mean tearing down a VM whose scratchpad is live.
+
+---
+
+## 2026-09-02 - Review round 6 findings applied + verify-before-submit
+
+### Review round 6 (delta review of d49535a..HEAD)
+The reviewer was asked to check the fixes it had itself prompted. It found real
+defects **in those fixes** — recorded here because the pattern (a fix that looks
+right and is subtly wrong) is the argument for delta reviews existing at all.
+
+- **R6-F1** — the CBZ range assert added for round 5's F3 used `skip < (1 << 19)`
+  and claimed to be "the same imm19 range the back-branch is checked against".
+  It is not: CBZ's imm19 is **signed**, so a forward branch only reaches
+  `2^18 - 1`. A `skip` in `[2^18, 2^19)` would pass the assert, survive
+  `& 0x7FFFF` unchanged, then sign-extend to a *negative* offset and branch
+  backwards into the loop. Corrected to `1 << 18`. Unreachable today (~1.2k-word
+  blob), but the assert existed specifically to pin this bound.
+- **R6-F2** — the t-table added for round 5's F5 bucketed `20..=29 => 2.045`,
+  `30..=59 => 2.001`, `_ => 1.96`, i.e. the value for the *highest* df in each
+  bucket, so every df below the top got an interval that was too narrow —
+  including the default run (n=24, df=23, true t = 2.069). The fix for an
+  understated CI still understated it. Buckets now take the lowest df.
+- **R6-F3** — a bare `--native-loop` with no value was silently ignored: no
+  warning, no change, JIT left **on**. The one input shape that could leave an
+  operator believing they had disabled it, reachable from a wrapper script
+  writing `--native-loop $NL` with `$NL` unset. Now warns and resolves to off.
+- **R6-Q1** — the reviewer pushed back on the "unrecognised value is ignored"
+  policy and was right. **Accepted and changed.** The two outcomes are
+  asymmetric: if the value failed to parse, we already know the operator was
+  trying to *change* the setting, so resolving to `on` is the one answer we can
+  be confident they did not want, and its cost is continued rejected shares.
+  Resolving to `off` costs ~7% hashrate if they meant "on" and never leaves a
+  suspected-bad JIT running while someone is trying to stop it. Still never
+  fatal.
+
+### R6-F4 (MAJOR): the published CI did not describe the published quantity
+The reviewer independently re-ran the corrected harness on the same machine and
+got **+7.42% (CI +7.14%..+7.70%)** against the recorded **+6.76% (CI
++6.20%..+7.32%)**. The intervals barely touch and the point estimates differ by
+more than either half-width. Absolute rates moved too (baseline 4756 -> 5020),
+i.e. a level shift the paired design cancels *most* but not all of.
+
+So the interval was describing within-run round scatter of an already-smoothed
+aggregate, not the reproducibility of the number being published. **This is the
+same class of error as the round-5 retraction, one iteration later** — a
+too-confident interval quoted as fact — which is why it was raised as MAJOR
+despite the underlying decision being correct.
+
+**The claim is now a range, not an interval: +6.8% to +7.4% at 11 threads across
+two independent runs, 96 of 96 paired rounds positive.** Restated in all four
+user-visible places (this file, `DESIGN_JIT_NATIVE_LOOP.md`, `CLAUDE.md`,
+and the `use_native_loop` doc comment).
+
+**Standing rule for this repo:** do not publish a benchmark interval from a
+single run. Either replicate and publish the range, or publish the point
+estimate and say it is unreplicated.
+
+### Verify-before-submit (the substantive addition)
+Prompted by the question "so if the fast code is generating wrong hashes we will
+not know unless we check on the pool side?". Largely yes, and the local signal
+(rejected-share count in the stats line) is weak: slow, because shares are rare;
+ambiguous, because stale-job rejects look identical; and unwatched.
+
+The old path is the reference — 87 vectors validate it — and shares are rare, so
+the miner now checks its own work before submitting. On finding a share, the
+worker recomputes that one hash on a reference-path VM (`set_native_loop(false)`)
+and compares. Mismatch => the share is **withheld**, a loud error names both
+hashes and tells the operator to restart with `--native-loop off`, and a counter
+is surfaced in the periodic stats line so it cannot be missed.
+
+Cost: one extra hash per share found. At 5,077 H/s and pool difficulties of
+10k-100k that is a share every ~2-20 s, so ~0.0008%-0.008% of mining time —
+against a ~7% gain, and against losing *100%* of revenue for as long as a silent
+JIT fault goes unnoticed. The verifier VM is built lazily on the first share, so
+a worker that never finds one never pays its 2 MiB scratchpad, and it is dropped
+on seed rotation.
+
+Deliberate limits, stated so they are not mistaken for guarantees:
+- It only verifies shares actually submitted. A fault that never produced a
+  share would go unseen — but would also cost nothing, since only submitted
+  shares earn.
+- It is skipped when the native loop is off, where the mining path already *is*
+  the reference path and the check would compare it against itself.
+- `VERIFY_SHARES=off` exists for the case where verification itself misbehaves,
+  and warns loudly when set while the native loop is on.
+
+### Files changed
+`src/miner.rs` (verifier + `verify_failures` counter + `set_verify_shares`),
+`src/bin/minertim.rs` (`--verify-shares`, generic `parse_switch`, fail-safe
+parsing, stats surfacing, 6 parser tests), `src/randomx/jit/compiler.rs`
+(R6-F1), `benches/nativeloop_ab.rs` (R6-F2), `Makefile`,
+`mining.conf.example`, plus the R6-F4 restatement.
+
+### Verification
+106 lib tests + 6 bin tests pass; clippy clean on aarch64 and x86_64; all
+switch behaviours smoke-tested against the shipped binary (bare flag, typo,
+verify-off warning, silent default).
+
+### Not verified
+The verifier's mismatch branch has never executed — there is no fault to trigger
+it. It is straight-line code reached only when two hashes differ, but it is
+untested in the strict sense. A fault-injection test (force a divergence and
+assert the share is withheld and counted) would close that and is worth adding.

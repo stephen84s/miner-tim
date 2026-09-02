@@ -12,6 +12,8 @@ DONATE_LEVEL ?=
 # Set to "off" to fall back to the per-iteration body JIT without rebuilding —
 # see mining.conf.example.
 NATIVE_LOOP ?=
+# VERIFY_SHARES unset by default: the binary uses its built-in default (on).
+VERIFY_SHARES ?=
 
 VERSION   := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 DIST_NAME := minertim-$(VERSION)-macos-arm64
@@ -38,7 +40,7 @@ run: build
 ifndef WALLET
 	$(error WALLET is required. Usage: make run POOL=host:port WALLET=your_address THREADS=N)
 endif
-	./target/release/minertim $(POOL) $(WALLET) $(THREADS) $(if $(DONATE_LEVEL),--donate-level $(DONATE_LEVEL),) $(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),)
+	./target/release/minertim $(POOL) $(WALLET) $(THREADS) $(if $(DONATE_LEVEL),--donate-level $(DONATE_LEVEL),) $(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),) $(if $(VERIFY_SHARES),--verify-shares $(VERIFY_SHARES),)
 
 bench:
 	cargo bench

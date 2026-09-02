@@ -319,10 +319,15 @@ scaffolding.
 **Stage D is DONE** (2026-09-01, number corrected 2026-09-02). The default is
 now `true`. Measured via `benches/nativeloop_ab.rs`:
 
-| Phase | body JIT | native loop | paired diff | 95% CI |
-|---|---|---|---|---|
-| 1 thread | 570.0 H/s | 604.9 H/s | **+6.12%** | +6.02% .. +6.22% |
-| 11 threads | 4756.1 H/s | 5077.1 H/s | **+6.76%** | +6.20% .. +7.32% |
+| Phase | run 1 | run 2 (independent reviewer) | claim |
+|---|---|---|---|
+| 1 thread | +6.12% | — | ~+6% |
+| 11 threads | +6.76% | +7.42% | **+6.8% to +7.4%** |
+
+96 of 96 paired rounds positive across both runs. Each run reports a much
+tighter interval than the gap between the runs, so **the per-run CI does not
+describe reproducibility** — quote the range, not an interval. See AUDIT.md
+2026-09-02.
 
 An earlier run of this harness reported +9.01%. It was invalid — the baseline arm
 was silently running the native loop too — and the figure was also taken on a

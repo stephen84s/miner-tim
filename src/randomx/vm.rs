@@ -1636,8 +1636,10 @@ pub struct RandomXVm {
     #[cfg(target_arch = "aarch64")]
     jit: Option<super::jit::JitCompiler>,
     /// Whether to use the self-driving native loop. **On by default** as of
-    /// stage D: measured at +6.76% (95% CI +6.20%..+7.32%) at 11 threads and
-    /// +6.12% (+6.02%..+6.22%) single-threaded. Only takes effect on aarch64 +
+    /// stage D: **+6.8% to +7.4%** at 11 threads across two independent runs
+    /// (96 of 96 paired rounds positive). The per-run CIs are much tighter than
+    /// that spread and do NOT describe run-to-run reproducibility — see
+    /// AUDIT.md 2026-09-02. Only takes effect on aarch64 +
     /// rx/0 + full mode; `set_native_loop(false)` forces the per-iteration body
     /// JIT back on. See DESIGN_JIT_NATIVE_LOOP.md and AUDIT.md 2026-09-01.
     use_native_loop: bool,

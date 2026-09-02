@@ -80,7 +80,11 @@ fn mean_ci95(xs: &[f64]) -> (f64, f64) {
         6 => 2.447, 7 => 2.365, 8 => 2.306, 9 => 2.262, 10 => 2.228,
         11 => 2.201, 12 => 2.179, 13 => 2.160, 14 => 2.145, 15 => 2.131,
         16 => 2.120, 17 => 2.110, 18 => 2.101, 19 => 2.093,
-        20..=29 => 2.045, 30..=59 => 2.001, _ => 1.96,
+        // Buckets take the value for the LOWEST df in the range, so the
+        // interval errs wide. Taking the highest (2.045/2.001/1.96) made every
+        // df below the top of a bucket anti-conservative — including the
+        // default run, which is n=24 => df=23, where t is 2.069 not 2.045.
+        20..=29 => 2.086, 30..=59 => 2.042, _ => 2.000,
     };
     (mean, t * (var / n).sqrt())
 }

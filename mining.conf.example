@@ -19,3 +19,11 @@ DONATE_LEVEL=5
 # switch lets you rule the JIT in or out by restarting instead of rebuilding.
 # Equivalent to `--native-loop off`, or MINERTIM_NATIVE_LOOP=0 in the environment.
 NATIVE_LOOP=
+# VERIFY_SHARES: "on" (default) or "off". Before submitting a share, recompute it
+# with the older, slower, well-tested code and compare. If they disagree the share
+# is withheld and a loud error is logged, so a JIT fault is caught here instead of
+# showing up days later as rejected shares on the pool.
+#
+# Costs about 0.005% of mining time: only the rare hashes good enough to submit
+# are re-checked, not the hundreds per second that are discarded. Leave it on.
+VERIFY_SHARES=

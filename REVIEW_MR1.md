@@ -2,7 +2,7 @@
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-ROUND 5 COMPLETE — ROUND 6 (delta d49535a..HEAD) IN PROGRESS
+ROUNDS 5-6 COMPLETE — ROUND 7 (delta bbecd15..HEAD) IN PROGRESS
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -757,3 +757,63 @@ pairs and then settled to `+5.8..+6.7` for the remaining eighteen. The mean
 discarded warm-up, or reporting the median paired difference alongside the mean,
 would make the single-thread phase more robust. The 11-thread phase showed no
 such ramp (one tail outlier of +4.9% in the last pair).
+
+
+---
+
+# Round 7 — delta review (bbecd15..HEAD)
+Scope: `faa4131` — verify-before-submit, plus the round-6 fixes. Nothing from
+rounds 1-6 is re-reviewed except to confirm those fixes landed.
+
+## Round 7 coverage ledger
+| Area | File(s) | Status | Notes |
+|---|---|---|---|
+| P1 — verification soundness / off-by-one | src/miner.rs | DONE | R7-VC1: no off-by-one; invariant proved |
+| P2 — false positives | src/miner.rs, src/randomx/vm.rs | IN PROGRESS | FPCR + seed keying done; empirical run pending |
+| P3 — counter reaches the operator | src/miner.rs, src/bin/minertim.rs | NOT STARTED | |
+| P4 — cost | src/miner.rs, src/randomx/vm.rs | DONE | R7-F1: cost mis-stated by ~2 orders of magnitude |
+| Round-6 fixes landed | compiler.rs, bench, minertim.rs | NOT STARTED | |
+| Fault-injection test question | — | NOT STARTED | |
+
+## Round 7 findings
+
+### R7-F1 — The lazily-built verifier costs 256 MiB and ~0.4 s, not "the 2 MiB scratchpad"; at 11 threads it adds ~2.75 GiB of RSS that full mode never reads  [MAJOR]
+**Where:** `src/miner.rs:395-397` (the comment), `src/miner.rs:545-549` (the
+construction), `src/randomx/vm.rs` `new_full_versioned`
+**Claim:** The code says
+```rust
+// Reference-path VM for share verification, built lazily on the first share
+// so a worker that never finds one never pays the 2 MiB scratchpad.
+```
+but `RandomXVm::new_full` does far more than allocate a scratchpad. Its first
+statement is `let cache_memory = argon2d_cache(key);` — a **256 MiB, 3-pass
+Argon2d fill**. That buffer is only ever read by `init_dataset_item`, i.e. only
+in *light* mode. A full-mode VM never touches it. So every verifier allocates and
+computes a quarter-gigabyte of memory that is dead on arrival.
+**Evidence:** measured directly (release build, this machine), timing
+`RandomXVm::new` — which performs exactly the same `argon2d_cache` + 8
+superscalar programs and skips only the 2 MiB scratchpad:
+```
+RandomXVm::new  #0: 0.432 s   cache_memory = 256 MiB
+RandomXVm::new  #1: 0.374 s   cache_memory = 256 MiB
+RandomXVm::new  #2: 0.372 s   cache_memory = 256 MiB
+```
+**Failure scenario:** two distinct costs, neither of them the stated one.
+1. **Memory.** +256 MiB per worker, retained until the next seed rotation. At the
+   default 11 threads that is **+2.75 GiB**. Note the mining VMs already each
+   carry an equally-unused 256 MiB cache, so this *doubles* that dead weight to
+   ~5.5 GiB, on top of the 2 GiB dataset. On a 16 GB Mac that is a plausible
+   swap/OOM trigger, and it appears gradually (only once a worker finds its first
+   share), so it looks like a leak rather than a startup cost.
+2. **Latency, inline in the share path.** The ~0.4 s build happens *between*
+   finding the share and submitting it, once per worker per seed rotation. On its
+   own that is a small stale-share risk (0.4 s against a job lifetime of minutes,
+   for ~`threads` shares per epoch), so I would not raise it alone — but it is
+   latency deliberately inserted into the one code path the whole feature exists
+   to protect.
+**Why MAJOR and not MINOR:** the resource cost is real, it is ~100x the
+documented figure, and the documented figure is what a reader will use to decide
+whether the feature is cheap enough to leave on by default. Note also that the
+`set_verify_shares` doc comment's "roughly 0.005% of mining time" describes only
+the recurring hash, and is silent about the one-off build.
+**Confidence:** HIGH — read the constructor and measured it.

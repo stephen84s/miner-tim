@@ -692,7 +692,7 @@ for the two diffs, so the effect cancels once both are averaged — which `repor
 does. The first round of all is preceded by the discarded warm-up round on the
 same VM, so even position 1 is not anomalous.
 
-### R6-F4 — The quoted 11-thread interval (+/-0.56%) is narrower than the run-to-run reproducibility of the same measurement  [MINOR]
+### R6-F4 — The quoted 11-thread interval (+/-0.56%) is narrower than the run-to-run reproducibility of the same measurement, so it is not a valid interval for the published quantity  [MAJOR]
 **Where:** AUDIT.md 2026-09-02 table, `DESIGN_JIT_NATIVE_LOOP.md` stage-D table,
 `CLAUDE.md` JIT-01 row, `src/randomx/vm.rs:1639-1641`
 **Claim:** The 11-thread claim is stated as **+6.76% (95% CI +6.20%..+7.32%)**.
@@ -707,12 +707,20 @@ scatter of an aggregate that is already smoothed by summing 11 threads.
 (baseline 4756.1 -> 5020.0, native 5077.1 -> 5392.3, both about +5-6%), i.e. a
 level shift affecting both arms — the paired design correctly cancels most but
 evidently not all of it.
-**Failure scenario:** No technical failure; a precision overclaim in
-user-visible documentation. Anyone auditing the number later re-runs the harness,
-gets +7.4%, and finds it outside the published interval — which looks like a
-regression or a fabrication when it is neither. The defensible claim from two
-runs is "roughly +6% to +7.5% at 11 threads", or a single-threaded "+6.1% to
-+6.5%" where reproducibility is genuinely excellent.
+**Failure scenario:** No technical failure and no wrong hashes — the direction
+is settled by 96 of 96 positive paired differences across the two runs. The harm
+is that the published interval does not describe the published quantity. Anyone
+auditing the number later re-runs the harness, gets +7.4%, lands outside the
+stated CI, and cannot tell whether they have found a regression or a
+fabrication. **That is the same class of error the Round-5 retraction was
+supposed to end**, one iteration later, in the same four user-visible places
+(AUDIT table, DESIGN stage-D table, CLAUDE.md JIT-01 row, and the
+`use_native_loop` doc comment) — which is why I am calling it MAJOR rather than a
+documentation nit, despite the underlying decision being correct.
+The defensible claim from two runs is **"roughly +6% to +7.5% at 11 threads"**,
+or the single-threaded figure where reproducibility genuinely is excellent
+(+6.12% vs +6.45%, baselines agreeing to 0.03%). If a tight interval is wanted,
+it has to come from repeated *runs*, not repeated rounds within one run.
 **Related:** this is the concrete instance of my Round-5 F6 (no barrier between
 threads, so the aggregate's independence assumption is not enforced) and of the
 AUDIT's own new lesson that "a tight CI is not evidence of a quiet machine". The

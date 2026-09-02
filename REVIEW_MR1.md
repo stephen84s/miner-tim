@@ -1520,3 +1520,38 @@ that can produce a wrong share.
   then R5-F4 (the two test datasets, because it can stop a contributor running
   the mandatory local gate); then issue #1 (R5-F7, the 8 FMOVs); then the
   `worker_loop` fake-pool seam.
+
+## Round 8 postscript — verification timing, and work in flight
+
+**My round-8 verification was a clean reading of `3c281dc`, not of a torn tree.**
+This matters because I hit exactly that trap in round 7. Checked by timestamp:
+my suite+clippy run finished at `05:47:04` (mtime of the capture log), and the
+next batch of working-tree edits landed at `05:49:54`-`05:50:07`. The tree was
+clean apart from `.claude/settings.local.json` throughout the run. So
+`121 lib + 7 bin passed, clippy clean on both targets` stands as a statement
+about the reviewed commit.
+
+**Uncommitted work has since appeared and is NOT reviewed** (40 lines across
+`src/bin/minertim.rs`, `src/randomx/dataset.rs`, `src/randomx/tests.rs`,
+`src/randomx/vm.rs`). From a glance it is R8-F1 being addressed, and the
+approach is better than what I suggested: the accessor doc now states the
+asymmetry explicitly, *and* `RandomXDataset::generate` gained an
+`assert!(!cache_memory.is_empty(), ...)` so a full-mode VM's empty cache fails
+loudly at the boundary instead of as an out-of-bounds index inside the spawned
+workers. That converts my "confusing place to land" objection into a named
+programmer error at the call site.
+
+One cosmetic defect in that in-flight edit, flagged only because it is about to
+be committed and is a one-character fix — **not a round-8 finding**:
+`src/randomx/dataset.rs:97` has a **14-space run inside the panic message**,
+between `got an` and `empty one`:
+```
+"dataset generation needs a light-mode VM's Argon2d cache; got an              empty one (a full-mode VM does not build one)"
+```
+It reads like a lost `\` line-continuation when the literal was reflowed onto a
+single line. Harmless, but it is the text an operator sees at the moment
+something has gone wrong.
+
+Nothing in that batch changes any round-8 conclusion: it touches documentation,
+a new precondition assert, and tests — not the emitted loop, the C1 arithmetic,
+or the share-verification decision.

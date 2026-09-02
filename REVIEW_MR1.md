@@ -438,7 +438,7 @@ fallback switch). Nothing from rounds 1-5 is re-reviewed.
 | F1 fix — is it real? | benches/nativeloop_ab.rs | DONE | R6-VC3: proved empirically by instrumented counters |
 | F3 fix — CBZ range assert | src/randomx/jit/compiler.rs | DONE | R6-F1: bound is 2x too loose |
 | F5 fix — t-table | benches/nativeloop_ab.rs | DONE | R6-F2: buckets anti-conservative |
-| Measurement trustworthiness | AUDIT.md, bench | NOT STARTED | |
+| Measurement trustworthiness | AUDIT.md, bench | DONE | Independently replicated; R6-F4, R6-VC8/9/10 |
 | Fallback switch — reach | src/miner.rs, vm.rs | DONE | R6-VC1: reinit claim verified |
 | Fallback switch — precedence | src/bin/minertim.rs | DONE | R6-VC6; R6-F3; R6-Q1 |
 | Makefile / mining.conf wiring | Makefile, mining.conf.example | DONE | R6-VC2 |
@@ -642,3 +642,96 @@ well-formed — it states the cost and how to undo it, which is the part most
 such messages omit. One trivial arithmetic nit, not worth changing: "roughly 7%
 lower hashrate" — if the native loop is +6.76% faster, disabling it costs
 6.76/106.76 = 6.3% of the current rate, not 7%. "Roughly" covers it.
+
+**R6-VC8 — I independently replicated the corrected measurement.** Ran the
+*unmodified* repo bench at defaults (`cargo bench --bench nativeloop_ab`, 12
+pairs x 256 hashes, threads = 11):
+
+| Phase | | body JIT | native loop | paired diff | 95% CI |
+|---|---|---|---|---|---|
+| 1 thread | coordinator | 570.0 | 604.9 | +6.12% | +6.02%..+6.22% |
+| 1 thread | **mine** | **570.2** | **606.9** | **+6.45%** | +5.83%..+7.08% |
+| 11 threads | coordinator | 4756.1 | 5077.1 | +6.76% | +6.20%..+7.32% |
+| 11 threads | **mine** | **5020.0** | **5392.3** | **+7.42%** | +7.14%..+7.70% |
+
+Single-threaded the two runs agree to a startling degree — baselines 570.0 vs
+570.2 H/s (0.03% apart) and native arms 604.9 vs 606.9 (0.3% apart). 24 of 24
+paired differences positive in both phases of my run as well, so across the two
+runs that is **96 of 96 positive**. The direction and the decision are solid.
+
+**R6-VC9 — I independently reproduced the correctness evidence.** My run
+executed the per-round `assert_eq!((ca, cc), (cb, cd))` for all 24 rounds x 256
+hashes in both phases with the arms genuinely on different code paths (proved in
+R6-VC3), and it passed throughout: ~12,288 hashes single-threaded plus ~135,168
+across 11 threads. The AUDIT's "~147,000 hashes verified identical between two
+genuinely different execution paths" is now confirmed by a second, independent
+run on a separately built binary. This is the single most valuable thing the
+corrected harness produces and it holds up.
+
+**R6-VC10 — the A-B-B-A ordering has no position confound, and I checked the
+subtle version of it.** The concatenated round sequence is
+`A | BB | AA | BB | AA | ...`, so each arm gets exactly one "switched-in" round
+and one "continuation" round per pair; neither arm systematically occupies the
+cold slot. The pairing zips (position 1, position 2) and (position 4, position
+3), which mismatches switched-in against continuation in *opposite* directions
+for the two diffs, so the effect cancels once both are averaged — which `report`
+does. The first round of all is preceded by the discarded warm-up round on the
+same VM, so even position 1 is not anomalous.
+
+### R6-F4 — The quoted 11-thread interval (+/-0.56%) is narrower than the run-to-run reproducibility of the same measurement  [MINOR]
+**Where:** AUDIT.md 2026-09-02 table, `DESIGN_JIT_NATIVE_LOOP.md` stage-D table,
+`CLAUDE.md` JIT-01 row, `src/randomx/vm.rs:1639-1641`
+**Claim:** The 11-thread claim is stated as **+6.76% (95% CI +6.20%..+7.32%)**.
+My independent re-run of the identical harness on the identical machine gives
+**+7.42% (95% CI +7.14%..+7.70%)**. The two intervals barely touch (overlap only
+in +7.14%..+7.32%) and the point estimates differ by 0.66 percentage points —
+more than either interval's half-width. So the reported CI is not describing the
+uncertainty of the quantity being claimed; it is describing within-run round
+scatter of an aggregate that is already smoothed by summing 11 threads.
+**Evidence:** Both runs above, same binary source, same machine, same defaults,
+~40 minutes apart. Note the 11-thread *absolute* rates also moved between runs
+(baseline 4756.1 -> 5020.0, native 5077.1 -> 5392.3, both about +5-6%), i.e. a
+level shift affecting both arms — the paired design correctly cancels most but
+evidently not all of it.
+**Failure scenario:** No technical failure; a precision overclaim in
+user-visible documentation. Anyone auditing the number later re-runs the harness,
+gets +7.4%, and finds it outside the published interval — which looks like a
+regression or a fabrication when it is neither. The defensible claim from two
+runs is "roughly +6% to +7.5% at 11 threads", or a single-threaded "+6.1% to
++6.5%" where reproducibility is genuinely excellent.
+**Related:** this is the concrete instance of my Round-5 F6 (no barrier between
+threads, so the aggregate's independence assumption is not enforced) and of the
+AUDIT's own new lesson that "a tight CI is not evidence of a quiet machine". The
+lesson was written about the retracted run; it applies to the replacement too.
+**Confidence:** HIGH — two direct measurements.
+
+**R6-VC11 — the 337.5 -> 570.0 baseline gap: the coordinator's "contended
+machine" attribution is adequate, and there is a stronger argument for it than
+the one recorded.** The AUDIT frames it as "a 69% difference in the *baseline
+itself*". That framing understates the case, because under the F1 bug the old run
+had **no baseline** — both arms were the native loop. The right comparison is
+old-native 358.3 H/s vs new-native 604.9 (mine: 606.9), which is the *same* ~69%
+gap. A level shift of equal size in **both** arms is the signature of machine
+state; a configuration or code-path confound would generally move one arm and
+not the other. Three independent single-thread measurements of native-loop
+throughput exist: 358.3 (old), 606.6 (my Round-5 run, taken before the fix
+existed and therefore not circular), 604.9 / 606.9 (new). Two quiet-machine
+measurements agree to 0.3%; the outlier is the old one.
+I looked for a second confound and did not find one: `KEY`, blob shape, dataset
+build, warm-up and cooldown are identical across runs, and round length is not a
+factor (my Round-5 run used 64-hash rounds and my run today used 256-hash rounds,
+both giving ~606 H/s). One concrete mechanism consistent with the old run's level
+is memory pressure from the test suite's two resident 2 GiB `LazyLock` datasets
+(my Round-5 F4) if a test binary was alive at the time — unverifiable
+retrospectively. **Adequate, but note the class of explanation is established,
+not the mechanism.** The important structural point is that a uniform level shift
+does not by itself invalidate a *paired* difference — what invalidated +9.01% was
+the identical-arms bug, not the contention.
+
+**One diagnostic worth recording for whoever runs this next:** my single-thread
+per-pair differences were `+8.9 +6.1 +5.5 +9.9 +9.4 +5.2` for the first six
+pairs and then settled to `+5.8..+6.7` for the remaining eighteen. The mean
+(+6.45%) is pulled up by that early instability; the median is ~+6.2%. A longer
+discarded warm-up, or reporting the median paired difference alongside the mean,
+would make the single-thread phase more robust. The 11-thread phase showed no
+such ramp (one tail outlier of +4.9% in the last pair).

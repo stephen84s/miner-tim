@@ -1387,3 +1387,49 @@ and the `parse_native_loop` tests read the **real** `MINERTIM_VERIFY_SHARES` /
 `MINERTIM_NATIVE_LOOP` variables, so a developer who has either exported will
 see spurious failures. Pre-existing since round 6, now on more tests.
 **Confidence:** HIGH on the mechanism; the practical risk is LOW.
+
+### R8-VC6 — R7-F5 and the framing corrections are accurate.
+Both halves of R7-F5 are fixed and the fix is correct in substance, not just in
+wording:
+- The AUDIT now says the counter is "its own `log::error!` immediately before
+  the stats line rather than appended to it", which matches
+  `src/bin/minertim.rs` exactly.
+- The stage-D table's 1-thread row reads `+6.12% | +6.45% | +6.1% to +6.5%`,
+  with a note that this is the *stronger* of the two replications. That is
+  correct — the two independent baselines were 570.0 and 570.2 H/s.
+
+The "native-loop machinery, not a JIT defect" reframing is accurate in all three
+user-visible places I checked: `mining.conf.example` ("both paths share the same
+instruction generator... a targeted check, not a general guarantee"), the
+`--help` text ("Catches faults in the native-loop machinery; both paths share an
+instruction generator, so a fault common to both would pass"), and the runtime
+warning ("A native-loop defect would now be submitted..."). Each states the
+limitation rather than merely softening the claim, which is what R7-F6 asked
+for. `src/miner.rs` carries the same limit as a comment at the call site.
+
+## Deferred items — should any block the merge?
+**No. None of the six should block, and I would not hold the MR for any of
+them.** Reasoning per item:
+- **R5-F2** (debug vs release assert gap) — the three `debug_assert!`s are all
+  invariants I proved by construction in round 5, and `e6724ce` added release
+  tests for the guards that actually matter (v1-only, the C1 bound in both
+  directions, both ABI directions). Aligning `make test` with the verified
+  profile is a one-line Makefile change whenever someone wants it.
+- **R5-F4** (two 2 GiB test datasets) — test-only. Worth noting it interacts
+  with the "CI can never run this, so the local differential tests are the
+  mandatory gate" framing: a contributor on a 16 GB machine may not be able to
+  run the mandatory gate. That is an argument for fixing it sooner than its
+  severity suggests, not for blocking.
+- **R5-F6** (no barrier in the 11-thread phase) — dilutes rather than inflates,
+  and the claim is now a *range* across two independent runs, which absorbs it.
+- **R5-F7** (8 FMOVs) — pure performance, and correctly filed as issue #1
+  because it changes emitted ARM64 and deserves its own review round.
+- **worker_loop testability** — see R8-VC4; three lines of straight-line glue,
+  named explicitly rather than papered over.
+- **CI coverage (issue #2)** — this is the only one I would flag for attention
+  rather than deferral. Not as a blocker for *this* MR (it is pre-existing: the
+  JIT has always been aarch64-gated and the runners have always been x86_64
+  Linux, and this MR adds a runtime backstop that did not exist before), but it
+  means every correctness claim about emitted ARM64 rests on one machine plus
+  the maintainer remembering to run `make test`. An ARM64 runner is the real
+  fix and should not be deferred indefinitely.

@@ -2028,3 +2028,84 @@ remainder is listed below rather than left implicit.**
 
 ### Verification
 121 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 8: no blockers, no majors. MR !1 declared mergeable.
+
+The first round in four without a major. Independent verification of the three
+previously-unreviewed commits (`e6724ce`, `3fcc388`, `3c281dc`).
+
+**Correction to my own brief:** I asked for a review of "three commits" in
+`3fcc388..3c281dc`. That range contains **one**. The reviewer spotted it,
+worked out which three I meant, and reviewed all of them — `e6724ce` had landed
+before its round-7 doc commit and so fell outside the range I gave. Recorded
+because a reviewer silently accepting a wrong scope is how a commit goes
+unreviewed while everyone believes it was covered.
+
+### What it confirmed, having been asked to attack it
+- **The C1 worst-case test genuinely reaches the worst case.** `ENTROPY_OFFSET`
+  is 0, so `pb[13*8..]` and `pb[8*8..]` are exactly the words
+  `derive_program_params` reads; neither collides with entropy 0-7, 10, 12 or
+  14/15; both writes stay inside the entropy block. The values are true maxima
+  (`0xFFFF_FFFF & 0x7FFF_FFC0 == 0x7FFF_FFC0`, `524287 % 524288 == 524287`), and
+  the extreme is executed on **iteration 1 in both arms**.
+  **But my comment credited the wrong detector.** It says a failure shows up as
+  "a segfault or a mismatch". A segfault is unlikely — 64 bytes past a 2 GiB
+  `Vec` is almost certainly mapped. The real detectors are the register
+  mismatch and the *reference* arm's bounds-checked `get_item`.
+- **The helper split changed no coverage.** Seeds 1/2/7/78 and the 2048-iteration
+  case run on byte-identical program bytes and scratchpads; every rename was in
+  an assertion message. The `str.replace` collateral I caught and reverted is
+  clean.
+- **The no-cache reasoning holds under attack.** The reviewer enumerated every
+  reader of `cache_memory` and identified the load-bearing question correctly:
+  can `dataset` become `None` on a cacheless VM? It cannot — `self.dataset` is
+  assigned in exactly one place, inside `reinit`, which rebuilds the cache on
+  that same branch. Fields are private; there is no `set_dataset`. All five
+  `cache_and_programs()` callers build a light VM first.
+  **Measured payoff:** verifier construction is now **0.6-0.8 ms and 0 bytes**,
+  against 372-432 ms and 256 MiB before — roughly 500x less latency in the share
+  submission path, and 5.5 GiB reclaimed.
+
+### R8-F1 (minor, fixed): the public accessor became a trap
+`cache_and_programs()` is `pub`, still documented as "for dataset generation",
+and now returns an empty slice for full-mode VMs — the tuple is asymmetric
+(`.0` conditionally empty, `.1` never), and the reason lived only in the
+constructor body. A future caller would get an out-of-bounds index inside
+`generate`'s spawned worker threads.
+
+Fixed at both ends: the accessor documents the asymmetry and says which VM to
+call it on, and `RandomXDataset::generate` asserts a non-empty cache with a
+message naming the mistake. `dataset_generation_rejects_a_full_mode_vms_empty_cache`
+pins it.
+
+### R8-F2 (minor, fixed): a SAFETY comment justifying the wrong invariant
+The env-var test said "a name unique to this test; no other thread reads it".
+The hazard is not name collision — it is `setenv` reallocating `environ` while
+another parallel test sits in `getenv`. A unique name avoids clobbering another
+test's value but does not make the call sound. Rewritten to state the real
+invariant and the reason it holds here (nothing else in this binary reads the
+environment: `parse_switch` is the only reader, and `env_logger` initialises in
+`main`, which tests never run), plus what would invalidate it. An incorrect
+SAFETY comment is worse than none, because it stops the next reader checking.
+
+### Residual gap the reviewer restated honestly
+Its round-7 wording was "if `verified` became unconditionally `true`, no test
+would notice". The new tests pin the *decision*; that specific mutation lives in
+three lines of `worker_loop` glue and still would not be caught. It read them
+and found them correct. Not a blocker — straight-line code in a function needing
+a live pool — and both the commit message and this log name it rather than
+implying coverage.
+
+### On the deferred items
+None should block. The reviewer singled out **issue #2 (CI cannot validate the
+JIT)** as the one to not defer indefinitely, since every ARM64 correctness claim
+rests on one machine plus a manual `make test` — while noting this MR *adds* a
+runtime backstop. It also flagged that **R5-F4 matters more than its severity
+suggests**: two 2 GiB test datasets mean a contributor on a 16 GB machine may
+not be able to run the mandatory local gate at all.
+
+### Verdict
+**Mergeable.** 122 lib + 7 bin tests pass in release; clippy clean on aarch64
+and x86_64.

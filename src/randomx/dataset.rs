@@ -88,6 +88,14 @@ impl RandomXDataset {
         programs: &[SuperscalarProgram; 8],
         num_threads: usize,
     ) -> Self {
+        // Caught here rather than as an out-of-bounds slice index inside the
+        // spawned workers. `RandomXVm::cache_and_programs()` returns an empty
+        // cache for a full-mode VM, so this is the failure a caller gets if
+        // they pass one instead of a light-mode VM.
+        assert!(
+            !cache_memory.is_empty(),
+            "dataset generation needs a light-mode VM's Argon2d cache; got an              empty one (a full-mode VM does not build one)"
+        );
         let mut items = vec![[0u64; 8]; DATASET_ITEM_COUNT];
         let num_threads = num_threads.max(1);
         let chunk_size = DATASET_ITEM_COUNT.div_ceil(num_threads);

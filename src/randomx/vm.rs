@@ -1728,7 +1728,18 @@ impl RandomXVm {
         self.use_native_loop = enabled;
     }
 
-    /// Get references to cache and programs (for dataset generation).
+    /// Get references to the Argon2d cache and the SuperscalarHash programs.
+    ///
+    /// **The cache is empty for a full-mode VM.** It is read only by
+    /// `init_dataset_item`, which full mode never calls, so `new_full` does not
+    /// build one — see `new_full_versioned`. The two halves of the tuple are
+    /// therefore not symmetric: `.1` is always populated, `.0` only in light
+    /// mode.
+    ///
+    /// Call this on a **light-mode** VM (`RandomXVm::new`) when generating a
+    /// dataset. Passing a full-mode VM's empty cache to
+    /// `RandomXDataset::generate` is a programmer error, and `generate` says so
+    /// rather than failing inside its worker threads.
     pub fn cache_and_programs(&self) -> (&[u8], &[SuperscalarProgram; 8]) {
         (&self.cache_memory, &self.ss_programs)
     }

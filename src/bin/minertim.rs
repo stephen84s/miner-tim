@@ -374,7 +374,14 @@ mod tests {
     #[test]
     fn switch_reads_the_environment_and_the_flag_overrides_it() {
         const VAR: &str = "MINERTIM_SWITCH_ENV_BRANCH_TEST";
-        // SAFETY: a name unique to this test; no other thread reads it.
+        // SAFETY: `set_var` is unsound if another thread is in `getenv` while
+        // it reallocates `environ` — the hazard is concurrency, not the name.
+        // A unique name avoids clobbering another test's value but does NOT
+        // make this sound. It is acceptable here because no other test in this
+        // binary reads the environment: `parse_switch` is the only reader and
+        // is exercised nowhere else, and `env_logger` initialises in `main`,
+        // which tests do not run. Adding an environment read elsewhere in this
+        // binary would invalidate that and make this test a flake source.
         unsafe { std::env::set_var(VAR, "off") };
         assert!(!parse_switch(&args(&[]), "--x", VAR, true, false), "env beats default");
         assert!(parse_switch(&args(&["--x", "on"]), "--x", VAR, true, false), "flag beats env");

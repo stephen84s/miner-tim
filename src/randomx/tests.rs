@@ -495,6 +495,18 @@ mod full_hash_tests {
         );
     }
 
+    /// Passing a full-mode VM's empty cache to dataset generation is a
+    /// programmer error, and must fail with a message that names the mistake
+    /// rather than as an out-of-bounds index inside a spawned worker thread
+    /// (MR !1 review round 8, R8-F1).
+    #[test]
+    #[should_panic(expected = "needs a light-mode VM's Argon2d cache")]
+    fn dataset_generation_rejects_a_full_mode_vms_empty_cache() {
+        let vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        let (cache, programs) = vm_full.cache_and_programs();
+        let _ = super::dataset::RandomXDataset::generate(cache, programs, 1);
+    }
+
     /// ...but light mode still must, since it computes dataset items on the fly.
     #[test]
     fn light_mode_vm_still_allocates_its_cache() {

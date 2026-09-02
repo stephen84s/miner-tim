@@ -1089,3 +1089,57 @@ interpreter and every share is verified against an identical computation — one
 wasted hash per share, cost `1/D`. Harmless, and this is a macOS/Apple-Silicon
 project, but it means the stated limit "skipped when the native loop is off"
 does not cover "requested but ineffective".
+
+## Round 7 verdict
+
+**Blockers: none.** The verification is sound: no off-by-one (proved by reading
+*and* empirically), no false-positive vector I could find or construct, the
+counter reaches the operator, and the committed HEAD builds clean with clippy
+clean on both targets.
+
+**Major: R7-F1** — the verifier's true cost is 256 MiB + ~0.4 s per worker, not
+"the 2 MiB scratchpad". At 11 threads that is +2.75 GiB of resident memory that
+full mode never reads (it is the Argon2d cache, used only by light mode),
+doubling the dead weight the mining VMs already carry.
+
+**Minors:** R7-F2 (fail-safe policy inverted for `--verify-shares`), R7-F3
+(doc block re-parented), R7-F4 (`parse_native_loop` duplicates `parse_switch`),
+R7-F5 (two doc inaccuracies), R7-F6 (the reference path is not independent).
+**Recommendation:** R7-Q1 (test the decision, not the JIT — already in flight in
+your working tree).
+
+## Answers to the three round-7 priority questions
+
+**1. Is the verification sound / is there an off-by-one?** No off-by-one.
+`calculate_hash_pipelined(&job_blob_next)` returns the hash of the previously
+primed scratchpad, and `job_blob_current` is written with exactly that nonce
+immediately before each call; `pipeline_ready` is reset on **both** a job_id
+change and a seed change, with the blobs re-copied, so the priming iteration
+always re-establishes the invariant. Proved by reading (R7-VC1) and then
+empirically with a harness replicating `worker_loop`'s exact pattern including a
+job change: **24 comparisons, 0 mismatches** (R7-VC2).
+
+**2. Can it produce a false positive?** I could not construct one.
+FP/rounding state is safe because both hash entry points save, zero and restore
+FPCR around themselves (R7-VC3). The two VMs share no mutable state — only the
+read-only `Arc<RandomXDataset>`. The verifier cannot be keyed to a stale seed:
+`verify_vm = None`, `verify_dataset = Some(..)` and `current_key = ..` are
+assigned together, before any hashing for the new seed (R7-VC4). The
+`verify_dataset == None` arm is unreachable and correctly fails *open*.
+
+**3. Does the counter reach the operator?** Yes — the worker increments the same
+`Arc<MiningStats>` the `Miner` stores (`self.stats = Some(stats)`), and the
+10-second loop logs an error whenever it is non-zero. Three independent signals
+on a real mismatch: the per-share error with both hashes, the recurring stats
+error, and the share not being submitted (R7-VC5).
+
+**4. Cost.** The recurring component is right to an order of magnitude but ~25%
+optimistic: it is `1/D`, i.e. 0.010% at D=10k and 0.0010% at D=100k, slightly
+more because `calculate_hash` is unpipelined (R7-VC7). Negligible, as claimed.
+The one-off construction cost is the one that is wrong, by ~100x — R7-F1.
+
+**On the fault-injection question:** yes, worth adding, but the more important
+untested property is that the verification is wired up *at all* — if `verified`
+became unconditionally `true`, no existing test would notice. Extract the
+decision and unit-test both branches; injecting a JIT fault is the hard way to
+get there (R7-Q1).

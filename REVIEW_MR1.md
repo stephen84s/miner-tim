@@ -2,7 +2,7 @@
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-COMPLETE — rounds 5, 6 and 7 all finished (round 7 = delta bbecd15..faa4131)
+COMPLETE — rounds 5, 6, 7 and 8 all finished. Round 8 (final pass, e6724ce..3c281dc): no blockers, no majors. **Mergeable.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -1203,12 +1203,12 @@ round 7 as "needs its own round", so I am reviewing all three.
 ## Round 8 coverage ledger
 | Area | Commit / file | Status | Notes |
 |---|---|---|---|
-| P3 — R7-F1 root fix: no Argon2d cache in full mode | 3fcc388 / vm.rs | IN PROGRESS | Highest production risk; attacking the reasoning first |
-| P1 — C1 worst-case test | 3c281dc / tests.rs | NOT STARTED | |
-| P2 — differential helper split | 3c281dc / tests.rs | NOT STARTED | |
-| P4 — wired-up verification test | e6724ce / miner.rs | NOT STARTED | |
-| Doc corrections (R7-F5, framing) | 3c281dc / docs | NOT STARTED | |
-| Deferred-item merge judgement | AUDIT.md | NOT STARTED | |
+| P3 — R7-F1 root fix: no Argon2d cache in full mode | 3fcc388 / vm.rs | DONE | Highest production risk; attacking the reasoning first |
+| P1 — C1 worst-case test | 3c281dc / tests.rs | DONE | |
+| P2 — differential helper split | 3c281dc / tests.rs | DONE | |
+| P4 — wired-up verification test | e6724ce / miner.rs | DONE | |
+| Doc corrections (R7-F5, framing) | 3c281dc / docs | DONE | |
+| Deferred-item merge judgement | AUDIT.md | DONE | |
 
 ## Round 8 findings
 
@@ -1442,3 +1442,81 @@ correct and the cost is negligible (microseconds, a few KB, versus 256 MiB and
 0.4 s), but it makes the tuple's two halves behave differently in a way nothing
 in the signature or the doc hints at — one is conditionally empty, the other
 never is. It strengthens the case for saying so on the accessor.
+
+### R8-VC7 — R7-F1's fix delivered, measured.
+Timed the exact sequence `worker_loop` runs to build the verifier on its first
+share (`RandomXVm::new_full(key, ds)` then `set_native_loop(false)`), release
+build, on the same machine as the round-7 measurement:
+```
+light-mode cache: 256 MiB
+verifier build #0: 0.8 ms   cache = 0 bytes
+verifier build #1: 0.7 ms   cache = 0 bytes
+verifier build #2: 0.6 ms   cache = 0 bytes
+```
+Round 7 measured the same construction at **372-432 ms and 256 MiB**. So the
+in-line latency in the share-submission path is down by roughly **500x**, to
+sub-millisecond, and the per-worker 256 MiB is gone entirely — 2.75 GiB of
+verifier memory plus the 2.75 GiB the mining VMs were already wasting. Light
+mode still gets its cache (`256 MiB`, first line), confirming the conditional
+did not over-apply.
+
+### R8-VC8 — the claimed state is real.
+Ran the full suite and both clippy targets myself on `3c281dc`:
+```
+test result: ok. 121 passed; 0 failed; 2 ignored   (lib, release, 93.28s)
+test result: ok. 7 passed; 0 failed                (bin)
+clippy --all-targets -- -D warnings                          clean (aarch64)
+clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+Matches the coordinator's stated 121 + 7 exactly.
+
+## Round 8 verdict
+
+**Blockers: none.**
+
+**Majors: none.** This is the first round in four that has not produced one.
+
+**Minors:** R8-F1 (the full-mode empty-cache invariant is load-bearing for a
+`pub` accessor but documented only in the constructor body; the tuple is now
+asymmetric), R8-F2 (the env-var test's SAFETY comment justifies name uniqueness,
+which is not the hazard; `set_var` racing `getenv` across parallel tests is).
+Neither affects the mining path.
+
+**All four priorities check out:**
+1. The C1 worst-case test really does reach the worst case — right entropy
+   words, true maxima (asserted), executed on iteration 1 in both arms — and a
+   pass means what is claimed, because the reference arm's read is
+   bounds-checked. My round-5 "only argued, never executed" note is properly
+   retired.
+2. The helper split changed nothing: seeds 1/2/7/78 and the 2048 case run on
+   byte-identical program bytes and scratchpads, and the reverted `str.replace`
+   collateral is confirmed clean.
+3. The "no Argon2d cache in full mode" reasoning survives attack. I enumerated
+   every reader of `cache_memory` and every mutator of `dataset` — there is
+   exactly one of the latter, inside `reinit`, which rebuilds the cache on the
+   light-mode branch. No full-mode path can reach a cache read.
+4. The withhold test closes the decision-logic half of R7-Q1 thoroughly; three
+   lines of `worker_loop` glue remain untested, which is acknowledged rather
+   than hidden.
+
+**Mergeable: yes.** I would merge this. The wrong-hash and memory-safety
+surface — which is what matters here — has now been examined four times: the
+emitted ARM64 disassembled instruction by instruction, the C1 bound recomputed
+independently and now executed, the ABI verified, the differential and
+known-answer gates run locally on every round, and ~147k hashes cross-checked
+between two genuinely different execution paths across two independent
+benchmark runs. Every finding I have raised across rounds 5-8 is either applied
+or explicitly deferred with a reason, and the deferred list contains nothing
+that can produce a wrong share.
+
+## Remaining work if this review is interrupted
+- **Round 8 is complete.** All four priorities answered, two minors filed, the
+  full suite and both clippy targets run independently, and R7-F1's fix measured.
+- Nothing outstanding blocks a merge. The two round-8 minors (R8-F1, R8-F2) are
+  documentation/test-hygiene and can ride in any follow-up.
+- Post-merge, in priority order: **issue #2 (an ARM64 CI runner)** — the only
+  deferred item I would not leave open indefinitely, since every ARM64
+  correctness claim currently rests on one machine plus a manual `make test`;
+  then R5-F4 (the two test datasets, because it can stop a contributor running
+  the mandatory local gate); then issue #1 (R5-F7, the 8 FMOVs); then the
+  `worker_loop` fake-pool seam.

@@ -568,6 +568,8 @@ for the residual inaccuracy.
 | `--native-loop off --native-loop on` | on | yes — last flag wins |
 | `--native-loop=on --native-loop=off` | off | yes |
 | `MINERTIM_NATIVE_LOOP=""` | on + warning | acceptable; and not reachable from the shipped `mining.conf.example`, because `NATIVE_LOOP=` there is a *Makefile* variable that `$(if ...)` suppresses rather than an env var |
+Shapes A, C, D and E of that table were additionally executed against the real
+release binary (see R6-F3 for the transcript) and behaved exactly as traced.
 All eight spellings (`on/off/true/false/yes/no/1/0`) are accepted
 case-insensitively and are covered by the four new unit tests. The
 space-separated form correctly advances `i` twice so the value token is not
@@ -600,7 +602,19 @@ This is precisely the "enabled while believing it is off" case, and it happens
 during an incident when the operator is trying to stop losing shares.
 Detectable by a careful reader (the DISABLED warning is missing), but the code's
 own stated policy — warn on anything unrecognised — is not applied here.
-**Confidence:** HIGH. Read directly; the `if let Some` has no `else`.
+**Confirmed empirically** against the real release binary (all five shapes,
+pointed at a dead pool so it fails right after the switch is resolved):
+```
+A  --native-loop off        -> WARN "Native-loop JIT DISABLED ..."        (off, correct)
+B  --native-loop            -> NO output of any kind                      (ON, silent)
+C  --native-loop of         -> warning: unrecognised native-loop value "of"; ignoring   (ON, warned)
+D  MINERTIM_NATIVE_LOOP=0   -> WARN "Native-loop JIT DISABLED ..."        (off, correct)
+E  env=0 + --native-loop on -> no warning                                 (ON, flag beat env)
+```
+Shape **B** produced not one line — no "unrecognised" warning and no "DISABLED"
+warning — which is the finding.
+**Confidence:** HIGH. Read directly (the `if let Some` has no `else`) and
+reproduced on the shipped binary.
 
 ### R6-Q1 — Judgement: an unrecognised value should fail *safe*, not fail to the default  [QUESTION — pushback requested]
 **Where:** `src/bin/minertim.rs:200-211`, and the AUDIT's stated rationale.

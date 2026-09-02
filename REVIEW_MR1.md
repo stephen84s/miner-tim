@@ -1190,3 +1190,24 @@ parser tests pass (R7-VC8).
      the doc block, which also removes the divergence that produced R7-F2.
   4. R6-F7 (still open from round 5) — the 8 redundant FMOVs per iteration in
      the f-load path.
+
+---
+
+# Round 8 — final pass
+**Scope note:** the range given was `3fcc388..3c281dc`, which contains only
+**one** commit. The three unreviewed commits described are `e6724ce`, `3fcc388`
+and `3c281dc` — `e6724ce` landed *before* my round-7 doc commit `9ab205d`, which
+is why it fell outside. It is the `ShareVerdict` work I explicitly flagged in
+round 7 as "needs its own round", so I am reviewing all three.
+
+## Round 8 coverage ledger
+| Area | Commit / file | Status | Notes |
+|---|---|---|---|
+| P3 — R7-F1 root fix: no Argon2d cache in full mode | 3fcc388 / vm.rs | IN PROGRESS | Highest production risk; attacking the reasoning first |
+| P1 — C1 worst-case test | 3c281dc / tests.rs | NOT STARTED | |
+| P2 — differential helper split | 3c281dc / tests.rs | NOT STARTED | |
+| P4 — wired-up verification test | e6724ce / miner.rs | NOT STARTED | |
+| Doc corrections (R7-F5, framing) | 3c281dc / docs | NOT STARTED | |
+| Deferred-item merge judgement | AUDIT.md | NOT STARTED | |
+
+## Round 8 findings

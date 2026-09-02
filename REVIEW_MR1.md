@@ -1081,3 +1081,11 @@ one half of it.
 **Confidence:** HIGH — this follows from `execute_vm_inner`'s dispatch: with
 `use_native_loop == false` it falls through to `jit.compile(bytecode, version)`
 and the same `emit_body`.
+**Related trivia (not worth a finding):** the gate is
+`if verify_shares && native_loop`, where `native_loop` is the *requested* flag,
+not whether the VM actually took the native path. On a non-aarch64 build the
+flag defaults to `true` but `RandomXVm` ignores it, so both VMs run the
+interpreter and every share is verified against an identical computation — one
+wasted hash per share, cost `1/D`. Harmless, and this is a macOS/Apple-Silicon
+project, but it means the stated limit "skipped when the native loop is off"
+does not cover "requested but ineffective".

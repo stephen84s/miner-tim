@@ -1768,3 +1768,52 @@ themselves is *correct* given the current callers — it prevents `dead_code`
 warnings on x86_64. If the tests were ungated the accessors should be too.
 **Confidence:** HIGH on the reasoning being wrong; MEDIUM on whether ungating is
 worth it to you, since it does add interpreter-speed full-mode hashing to CI.
+
+### R9-F5 — The rewritten SAFETY comment identifies the right hazard but then justifies it with a false claim; the R8-F2 race is still live  [MINOR]
+**Where:** `src/bin/minertim.rs`,
+`switch_reads_the_environment_and_the_flag_overrides_it`
+**Claim:** The new comment correctly replaces the name-uniqueness reasoning with
+the real hazard ("the hazard is concurrency, not the name" — exactly right).
+But it then justifies the `unsafe` with:
+> *"It is acceptable here because no other test in this binary reads the
+> environment: `parse_switch` is the only reader and is exercised nowhere else"*
+
+`parse_switch` **is** the only reader function, but it is emphatically exercised
+elsewhere — by six other tests in the same binary, each of which reaches
+`std::env::var` through a wrapper:
+
+| test | calls | reaches |
+|---|---|---|
+| `native_loop_defaults_on` | `parse_native_loop` | `env::var("MINERTIM_NATIVE_LOOP")` |
+| `native_loop_accepts_the_documented_spellings` | `parse_native_loop` | same |
+| `native_loop_unrecognised_value_fails_safe_to_off` | `parse_native_loop` | same |
+| `native_loop_with_no_value_fails_safe_to_off` | `parse_native_loop` | same |
+| `native_loop_last_flag_wins` | `parse_native_loop` | same |
+| `verify_shares_fails_safe_on_because_it_is_a_safety_net` | `parse_verify_shares` + `parse_native_loop` | `env::var("MINERTIM_VERIFY_SHARES")` |
+
+`cargo test` runs these in parallel by default, so the `set_var` in the seventh
+test can overlap a `getenv` in any of the six. The precondition the comment
+relies on does not hold, so the race I raised in R8-F2 is unchanged.
+**Failure scenario:** unchanged from R8-F2 — flaky or crashing *tests*, never a
+production issue (the miner reads the environment once, single-threaded, in
+`main`). In practice libc rarely shrinks `environ`, so this is unlikely to bite.
+**Why I am raising it again rather than letting it go:** the comment now asserts
+a specific, checkable precondition, and a future reader who adds a seventh
+env-reading test will consult that comment, find it already violated, and have
+no way to tell that it was violated on the day it was written. Either make the
+claim true (`--test-threads=1` for this binary, or a mutex around the env
+tests), or state the residual risk instead of a precondition that does not hold.
+**Confidence:** HIGH — enumerated every test in the module.
+
+### R9-F6 — AUDIT's "No behaviour change" for `5fe7eb3` is inaccurate  [MINOR]
+**Where:** AUDIT.md, `5fe7eb3` entry: *"No behaviour change: `rekey` drops the
+cached VM..."*
+Per R9-F1, one row of the truth table did change: `enabled && dataset.is_none()`
+moved from `SubmitVerifierUnavailable` (with a `log::warn!`) to
+`SubmitUnverified` (silent), and that verdict is now unreachable from
+`worker_loop` by construction. The *action* is identical in every case, and the
+changed row was already unreachable, so the claim is nearly true — but "no
+behaviour change" is exactly the kind of statement this log has been careful to
+get right elsewhere. Suggested wording: *"No change to any reachable action; one
+already-unreachable diagnostic branch became structurally unreachable."*
+**Confidence:** HIGH.

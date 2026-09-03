@@ -36,7 +36,7 @@ first row not marked DONE, and continue from there.
 Round 13 COMPLETE. No blockers, no majors. Three findings: R13-F1 (MINOR — the
 startup line and `worker_loop` disagree about share verification on non-aarch64),
 R13-F2 (MINOR — the line still over-reports when the JIT itself is unavailable on
-aarch64), R13-F3 (TRIVIAL — two `--help` clauses). Both round-12 minors verified
+aarch64), R13-F3 (TRIVIAL — three `--help`/warning wording clauses). Both round-12 minors verified
 fixed. **Mergeable as of `6765b17`.**
 
 Rounds 5–13 found nothing that can produce a wrong hash, a withheld valid share,
@@ -81,7 +81,8 @@ this file, not in the archive: R13-F1 (MINOR — report says
 verifier), R13-F2 (MINOR — line reports `Native-loop JIT: on` when
 `JitCompiler::new()` failed on aarch64; the verifier then compares the
 interpreter against itself), R13-F3 (TRIVIAL — `--help` omits `--verify-shares`
-from the synopsis and the empty-value example is flag-only).
+from the synopsis, the empty-value example is flag-only, and the native-loop
+warning gives non-actionable advice on non-aarch64).
 
 ## Standing lesson
 
@@ -218,8 +219,8 @@ access on the shipping target.
    (R13-F2, MINOR, reachable on the shipping platform).
 3. **R12-F2's fix: fully closed.** The note is a titled paragraph below both
    switches, heading at column 0 against the flags' column 2, and it names the
-   two switches in its heading — better than asked (R13-VC2). Two trivial
-   carry-overs remain (R13-F3).
+   two switches in its heading — better than asked (R13-VC2). Three trivial
+   wording carry-overs remain (R13-F3).
 4. **"Unconditional": gone from the code**, replaced by a comment that states
    the opposite and its consequence. `AUDIT.md:2401` still carries the word in
    the **round-11** entry, which is correct: the audit is append-only by project
@@ -246,8 +247,8 @@ fix needs review too" holds. R13-F2 is R12-F1(b) closed only halfway.
   effective predicate — one line, and it is the only one where the miner says
   one thing and does another), then **R13-F2** (log the discarded
   `mmap MAP_JIT failed` at `vm.rs:1681,1714` instead of `.ok()`-swallowing it,
-  and/or qualify the startup line on `jit.is_some()`), then **R13-F3** (two
-  `--help` clauses). None is required for merge.
+  and/or qualify the startup line on `jit.is_some()`), then **R13-F3** (three
+  wording clauses). None is required for merge.
 - Unchanged and still open by choice: R5-F2, R5-F4, R5-F6, issue #1 (R5-F7),
   issue #2 (ARM64 CI), `worker_loop` testability. **Issue #2 is now doubly
   earned:** R13-F1 exists precisely because no non-aarch64 build is ever run,
@@ -338,7 +339,7 @@ line, heading at column 0 where every flag entry starts at column 2, body
 indented uniformly — so it cannot be mistaken for an option. Naming the two
 switches in the heading is better than the generic "Switch values" I asked for.
 
-### R13-F3 — Two small carry-overs in `--help`, neither behavioural  [TRIVIAL]
+### R13-F3 — Three small wording carry-overs in `--help` and the warnings, none behavioural  [TRIVIAL]
 **Where:** `src/bin/minertim.rs:20` (usage synopsis) and `:47-51` (the new note).
 1. Round 12's "small content gap" is unaddressed: the example is still
    flag-only (`--native-loop "$VAR"`), while the environment variables warn and

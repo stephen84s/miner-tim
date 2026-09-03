@@ -31,13 +31,15 @@ Full transcripts of every round: **`REVIEW_MR1_ARCHIVE.md`** (~2900 lines).
 **Resume procedure:** find the last `## Round N coverage ledger` below, take the
 first row not marked DONE, and continue from there.
 
-## Status after round 12 (`309cfda..74c8186`)
+## Status after round 13 (`74c8186..6765b17`)
 
-No blockers, no majors. Two minors filed (R12-F1, R12-F2), both since fixed in
-`6765b17` — **unverified; that is round 13's job.** All four round-11 minors
-verified fixed. **Mergeable as of `74c8186`.**
+Round 13 COMPLETE. No blockers, no majors. Three findings: R13-F1 (MINOR — the
+startup line and `worker_loop` disagree about share verification on non-aarch64),
+R13-F2 (MINOR — the line still over-reports when the JIT itself is unavailable on
+aarch64), R13-F3 (TRIVIAL — two `--help` clauses). Both round-12 minors verified
+fixed. **Mergeable as of `6765b17`.**
 
-Rounds 5–12 found nothing that can produce a wrong hash, a withheld valid share,
+Rounds 5–13 found nothing that can produce a wrong hash, a withheld valid share,
 or an out-of-bounds access.
 
 ## Open items — carried, by choice
@@ -120,7 +122,7 @@ confirm rather than trust.
 | 2 | R12-F1 fix — four combinations, both targets | DONE — R13-VC1, R13-F2 |
 | 3 | R12-F2 fix — help layout | DONE — R13-VC2, R13-F3 |
 | 4 | "unconditional" removed from comments + AUDIT | DONE — R13-VC3 |
-| 5 | Test + clippy claims reproduced | TODO |
+| 5 | Test + clippy claims reproduced | DONE — R13-VC5 |
 
 ## Round 13 findings
 
@@ -164,9 +166,68 @@ and only the two sites above decide whether verification runs.
 **Confidence:** HIGH — read from both sources; `cfg!` is compile-time and
 unambiguous.
 
+## Round 13 verdict
+
+**Blockers: none. Majors: none.** Three findings, all MINOR or TRIVIAL, none of
+which can produce a wrong hash, a withheld valid share, or an out-of-bounds
+access on the shipping target.
+
+**The four brief priorities, answered:**
+
+1. **Can `verify_effective` and `worker_loop` disagree? Yes — on non-aarch64,
+   and only there.** The report computes
+   `verify_shares && native_loop && cfg!(aarch64)`; `miner.rs:549` computes
+   `verify_shares && native_loop`. With both switches on, an x86_64 build prints
+   `share verification: off` and then verifies every share. Confirmed empirically
+   against a real `x86_64-apple-darwin` build (R13-F1, R13-VC6). It is an
+   **under**claim — the miner does more than it says — and on aarch64 all three
+   expressions coincide, so the shipping target reports exactly what it does.
+   MINOR, and the honest repair is at `miner.rs:549`, not by weakening the line.
+2. **R12-F1's fix: correct in all four combinations on aarch64, and the
+   `DISABLED` warning fires in exactly the right cases** — including *not*
+   firing when the native loop is already off. Traced and then measured against
+   the built binary (R13-VC1, R13-VC4). But the fix models only one of the four
+   preconditions in `execute_vm_inner`'s guard: `jit.is_some()` is not pinned, so
+   a MAP_JIT allocation failure on aarch64 leaves the line saying
+   `Native-loop JIT: on` while the interpreter runs — and the verifier then
+   compares the interpreter against itself and reports a clean counter forever
+   (R13-F2, MINOR, reachable on the shipping platform).
+3. **R12-F2's fix: fully closed.** The note is a titled paragraph below both
+   switches, heading at column 0 against the flags' column 2, and it names the
+   two switches in its heading — better than asked (R13-VC2). Two trivial
+   carry-overs remain (R13-F3).
+4. **"Unconditional": gone from the code**, replaced by a comment that states
+   the opposite and its consequence. `AUDIT.md:2401` still carries the word in
+   the **round-11** entry, which is correct: the audit is append-only by project
+   rule and the round-12 entry corrects it 42 lines below. No defect (R13-VC3).
+
+**Mergeable: yes**, no caveat. Nothing outstanding across rounds 5-13 can
+produce a wrong hash, a withheld valid share, or an out-of-bounds access. All
+three round-13 findings are about the accuracy of what the miner *reports*, not
+what it *does* — with the caveat that R13-F2's second-order effect (a
+verification counter reading clean because both sides are the interpreter) makes
+a *reassurance* void rather than making anything wrong.
+
+**Note on the standing lesson:** for the first time since round 5, the fix for
+the previous round's finding did not introduce a regression in what the code
+*does* — but R13-F1 is a genuine defect **introduced by** `6765b17` (the
+report/behaviour split did not exist before this commit), so the pattern of "the
+fix needs review too" holds. R13-F2 is R12-F1(b) closed only halfway.
+
 ## Remaining work if this review is interrupted
 
-Round 13 not started.
+- **Round 13 is complete.** All five ledger items done; three findings filed;
+  full release suite and both clippy targets reproduced against `6765b17`.
+- Order I would take the findings: **R13-F1** (align `miner.rs:549` with the
+  effective predicate — one line, and it is the only one where the miner says
+  one thing and does another), then **R13-F2** (log the discarded
+  `mmap MAP_JIT failed` at `vm.rs:1681,1714` instead of `.ok()`-swallowing it,
+  and/or qualify the startup line on `jit.is_some()`), then **R13-F3** (two
+  `--help` clauses). None is required for merge.
+- Unchanged and still open by choice: R5-F2, R5-F4, R5-F6, issue #1 (R5-F7),
+  issue #2 (ARM64 CI), `worker_loop` testability. **Issue #2 is now doubly
+  earned:** R13-F1 exists precisely because no non-aarch64 build is ever run,
+  only linted.
 
 ### R13-VC1 — item 2: the four switch combinations are right on aarch64, and the `DISABLED` warning fires in exactly the right cases.
 On aarch64 `cfg!` is `true`, so `native_effective == native_loop` and
@@ -293,3 +354,34 @@ NL=off VS=off  Native-loop JIT: off | share verification: off   native-loop-DISA
 ```
 Identical to the table in R13-VC1. In particular no spurious verification
 warning in rows 3-4, which was the specific regression risk in R12-F1's fix.
+
+### R13-VC5 — item 5: the requester's claimed state is real, reproduced on `6765b17`'s source.
+```
+git diff 74c8186..HEAD -- src/ benches/ Cargo.toml Makefile   -> only src/bin/minertim.rs
+cargo test --release      running 127 tests; 125 passed, 0 failed, 2 ignored (92.67s)
+                          8 bin tests passed; 0 doc tests
+cargo clippy --all-targets -- -D warnings                          clean (aarch64)
+cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+125 + 8 exactly as claimed, and unchanged from rounds 11-12 — this commit adds no
+tests, consistent with it being one log-line rewrite plus a `--help` reflow. The
+2 ignored are the two ~2 GiB / 30-120 s dataset tests at `tests.rs:728,841`,
+ignored since before this MR (R5-F4's memory concern, still open by choice).
+
+**Not covered by any test, and worth stating plainly:** nothing in the suite
+exercises the startup reporting path in `main`, on either target. All four
+combinations in R13-VC4 and the x86_64 line in R13-VC6 were verified by running
+binaries, not by tests — so a future edit to `native_effective` /
+`verify_effective` would be caught only by another manual run. That is what let
+R13-F1 through.
+
+### R13-VC6 — R13-F1 confirmed empirically on a real non-aarch64 build.
+```
+$ cargo build --release --target x86_64-apple-darwin      (exit 0)
+$ RUST_LOG=info ./target/x86_64-apple-darwin/release/minertim 127.0.0.1:1 4Awallet 1 \
+      --native-loop on --verify-shares on
+Native-loop JIT: off (requested on; unavailable on this target) | share verification: off
+```
+The native half is right and its qualifier reads well. The verification half says
+`off` while `miner.rs:549` builds `ShareVerifier::new(true && true)` — enabled.
+The report/behaviour split is real, not a reading error.

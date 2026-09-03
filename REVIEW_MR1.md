@@ -2629,10 +2629,118 @@ aarch64 and x86_64.
 ## Round 12 coverage ledger
 | Area | Status | Notes |
 |---|---|---|
-| P1 — `warn_if_empty` signature change preserves composition | IN PROGRESS | |
-| P2 — `env_label` argument positions at all call sites | NOT STARTED | |
-| P3 — empty-env warning fires exactly once, right cases | NOT STARTED | |
-| P4 — startup state line: content and placement | NOT STARTED | |
-| `--help` wording; AUDIT accuracy | NOT STARTED | |
+| P1 — `warn_if_empty` signature change preserves composition | DONE | R12-VC1: identical, derived + measured |
+| P2 — `env_label` argument positions at all call sites | DONE | R12-VC2: all 10 correct |
+| P3 — empty-env warning fires exactly once, right cases | DONE | R12-VC3: correct; 2-for-2 is right |
+| P4 — startup state line: content and placement | DONE | R12-F1: RUST_LOG=warn + intent-vs-effect |
+| `--help` wording; AUDIT accuracy | IN PROGRESS | |
 
 ## Round 12 findings
+
+### R12-VC1 — P1: the `warn_if_empty` rewrite is behaviour-identical. Re-derived, then measured.
+**Derivation.** Old form: `value = as_bool(v).or(warn_if_empty(flag, v).and(value))`.
+`warn_if_empty` returned `Some(())` unconditionally, so `.and(value)` always
+evaluated to `value`, making the whole expression `as_bool(v).or(value)` plus a
+conditional print. New form: the print as a statement, then
+`value = as_bool(v).or(value)`. Same expression, same side effect.
+
+The only semantic difference is *ordering* of the print relative to `as_bool(v)`:
+in the old form `as_bool(v)` was the receiver and so evaluated first, with
+`warn_if_empty` following as the eager `.or` argument; now the warning comes
+first. That cannot change observable output, because the two printers are
+mutually exclusive — `as_bool` warns only for an unrecognised **non-empty**
+value, `warn_if_empty` only for an **empty** one, and no value is both. At most
+one ever fires, so their relative order is unobservable.
+
+**Measured.** Re-ran the round-11 preservation cases against a freshly built
+binary; the resolved values are unchanged:
+```
+5  env=off + --native-loop ''     -> off   (round 11 case C)
+6  --native-loop off then ''      -> off   (round 11 case D)
+7  --native-loop=off then =       -> off   (round 11 case D2)
+8  --native-loop off then on      -> on    (last-flag-wins)
+3  --native-loop '' alone         -> on
+```
+The composition round 11 verified survived the tidy-up intact. And I agree with
+the reasoning for doing it: the `.and(value)` pass-through was doing two
+unrelated jobs in one expression, which is the shape R10-F2 hid inside.
+
+### R12-VC2 — P2: no argument landed in the wrong slot.
+Signature is `(args, flag, env_label, env_value, default_on, fail_safe)`. There
+are ten call sites — one production, nine test. I checked each against its
+pre-change form rather than eyeballing the regex:
+- **Production** (`parse_switch:268`):
+  `parse_switch_with(args, flag, env, std::env::var(env).ok().as_deref(), default_on, fail_safe)`
+  — `flag` then `env` (the variable *name*) then the looked-up `Option<&str>`.
+  Correct.
+- **All nine tests** take `"--x"` in the flag slot and the new `"X_ENV"` in the
+  `env_label` slot, with the `Option` following.
+
+The dangerous swap here is not `flag`/`env_label` (both `&str`, so a mix-up is
+cosmetic and the compiler would not object) but `default_on`/`fail_safe`, which
+are both `bool` and *would* change behaviour. Every trailing pair is preserved
+exactly: eight sites read `true, false` and exactly one reads `true, true`
+(line 492) — which is the same single site that carried `true, true` before, the
+fail-safe-ON case. No pair was transposed.
+
+### R12-VC3 — P3: the warning fires exactly once, in exactly the right cases.
+```
+1  variable genuinely unset          warns=0    <- does not fire when unset
+2  MINERTIM_NATIVE_LOOP=  (empty)    warns=1
+3  --native-loop ''                  warns=1
+4  both empty                        warns=2
+10 MINERTIM_VERIFY_SHARES=  (empty)  warns=1    <- R11-F1 closed
+```
+Case 1 is the one that mattered: `env_value` is `None` when the variable is
+absent, so the closure never runs and nothing prints. Set-and-empty is properly
+distinguished from unset.
+
+**On case 4 — I do not think two warnings is a defect, and would not "fix" it.**
+You listed double-warning as something to avoid, but these are two *distinct*
+empty inputs from two *distinct* sources, and each line names its own:
+```
+warning: MINERTIM_NATIVE_LOOP given an empty value - ignoring it; ...
+warning: --native-loop given an empty value - ignoring it; ...
+```
+Suppressing either would hide a real fact the operator can act on — and the
+labelling you added in this commit is precisely what makes two lines readable
+rather than confusing. One warning per empty input is the right rule.
+
+### R12-F1 — The startup state line is invisible under `RUST_LOG=warn`, and reports the *requested* rather than the *effective* setting  [MINOR]
+**Where:** `src/bin/minertim.rs:80-88`
+**Two parts, both measured.**
+
+**(a) It disappears exactly where inference was the problem.** The line is
+`log::info!`. With `RUST_LOG=warn`:
+```
+native loop ON  -> (no state line, no warnings)
+native loop OFF -> "Native-loop JIT DISABLED ..."   (the warn survives)
+```
+So that operator sees a line when the switch is off and nothing when it is on —
+which is the inference-from-absence this line was added to eliminate, merely
+gated behind a non-default filter. The `DISABLED` message was deliberately put
+at `warn` in round 7 for exactly this reason ("survives operators who set
+`RUST_LOG=warn`"); the state line does not inherit that protection. I am not
+suggesting `warn` for a healthy startup — that would be noise. But it is worth
+knowing the guarantee is "at default log level" rather than unconditional, and
+the comment above it says "Unconditional:".
+
+**(b) It reports intent, not effect.** `native_loop` here is the parsed request.
+`RandomXVm::set_native_loop`'s own doc says it "takes effect only where every
+precondition the emitted code assumes holds: aarch64, rx/0, full mode. Elsewhere
+it is silently ignored." So on a non-aarch64 build, or in light mode, the line
+prints `Native-loop JIT: on` while the interpreter runs. For this project
+(macOS/Apple Silicon, full mode) that is academic, but the line reads as a
+statement of fact about what the miner is doing.
+**Failure scenario:** diagnostic only; nothing mis-computes. Both parts are
+one-liners if you want them — a `#[cfg(not(target_arch = "aarch64"))]` qualifier
+for (b), and either promoting the line or softening the word "unconditional"
+for (a).
+**Confidence:** HIGH — both measured.
+
+**Placement (P4, second half): good.** The line sits at :84, after the arg
+parsing and the Ctrl+C handler, and before `Miner::new` (:89) and
+`miner.initialize` (:120). The realistic failure — the pool connection — happens
+well after it, so a connection failure cannot hide it. The only thing that can
+is `ctrlc::set_handler(..).expect(..)` at :76, which panics; moving the line
+above that would close even that, but it is not a case I would spend a change on.

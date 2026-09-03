@@ -73,7 +73,15 @@ never read; ~2.75 GiB at 11 threads), R7-F2 (fail-safe **inverted** for
 **Round 11 (`6f2b95b..309cfda`):** R11-F1 … R11-F4.
 **Round 12 (`309cfda..74c8186`):** R12-F1 (startup line reports *requested*, not
 *effective*, state; invisible under `RUST_LOG=warn`), R12-F2 (`--help` note
-formatted as a flag entry).
+formatted as a flag entry). Both verified fixed in round 13.
+
+**Round 13 (`74c8186..6765b17`) — OPEN, not yet fixed.** Full text is below in
+this file, not in the archive: R13-F1 (MINOR — report says
+`share verification: off` on non-aarch64 while `miner.rs:549` enables the
+verifier), R13-F2 (MINOR — line reports `Native-loop JIT: on` when
+`JitCompiler::new()` failed on aarch64; the verifier then compares the
+interpreter against itself), R13-F3 (TRIVIAL — `--help` omits `--verify-shares`
+from the synopsis and the empty-value example is flag-only).
 
 ## Standing lesson
 
@@ -127,8 +135,8 @@ confirm rather than trust.
 ## Round 13 findings
 
 ### R13-F1 — The report and the behaviour disagree on non-aarch64: the line says `share verification: off` while `worker_loop` builds an **enabled** verifier  [MINOR]
-**Where:** report `src/bin/minertim.rs:87-88` (`verify_effective`), warning
-`src/bin/minertim.rs:~110`; behaviour `src/miner.rs:549`.
+**Where:** report `src/bin/minertim.rs:86-87` and `:102` (`verify_effective`),
+warning `src/bin/minertim.rs:108`; behaviour `src/miner.rs:549`.
 
 Three expressions, two of which were updated by `6765b17` and one of which was
 not:

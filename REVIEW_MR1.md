@@ -2633,7 +2633,7 @@ aarch64 and x86_64.
 | P2 — `env_label` argument positions at all call sites | DONE | R12-VC2: all 10 correct |
 | P3 — empty-env warning fires exactly once, right cases | DONE | R12-VC3: correct; 2-for-2 is right |
 | P4 — startup state line: content and placement | DONE | R12-F1: RUST_LOG=warn + intent-vs-effect |
-| `--help` wording; AUDIT accuracy | IN PROGRESS | |
+| `--help` wording; AUDIT accuracy | DONE | R12-F2; R12-VC4 |
 
 ## Round 12 findings
 
@@ -2744,3 +2744,49 @@ parsing and the Ctrl+C handler, and before `Miner::new` (:89) and
 well after it, so a connection failure cannot hide it. The only thing that can
 is `ctrlc::set_handler(..).expect(..)` at :76, which panics; moving the line
 above that would close even that, but it is not a case I would spend a change on.
+
+### R12-F2 — The `--help` note is correct in content but formatted as a flag entry, so it reads as an item in the flag list  [MINOR]
+**Where:** `src/bin/minertim.rs:36-39`; rendered output below.
+**Claim:** The content is good — accurate, and the `--flag "$VAR"` example is
+exactly the concrete case someone needs. The presentation is not. Rendered:
+```
+  --donate-level N  Percent of mining time donated (default: 5, min: 1).
+                    Split 50/50 between the MinerTim author and XMRig.
+  Switch values are on/off, true/false, yes/no, 1/0. An empty value is
+                    treated as unset and ignored (with a warning) rather than
+                    overriding an earlier one, so `--flag "$VAR"` with $VAR
+                    unset does not silently undo a previous setting.
+  --native-loop on|off  Use the native-loop JIT (default: on). ...
+```
+The first line begins in the same column as `--donate-level N` and
+`--native-loop on|off`, and its continuations are indented to the description
+column — so a reader scanning the list sees a prose sentence occupying an item
+slot, as though there were an option called "Switch values are on/off,
+true/false, yes/no, 1/0."
+
+It also lands **before** the two switches it describes, so "Switch values" has no
+antecedent yet: at that point the reader has met `pool:port`, `wallet`,
+`threads` and `--donate-level`, none of which is a switch.
+**Failure scenario:** cosmetic; nobody is misled about behaviour. But your
+question was whether it is clear to someone who has not read this thread, and
+for that reader the layout works against the content. Moving it below
+`--verify-shares` as a separate paragraph (blank line, no item indentation)
+would fix both problems at once.
+**Small content gap:** the example is flag-only (`--flag "$VAR"`), while the
+environment variables now behave identically and warn identically — worth half a
+clause, since `MINERTIM_NATIVE_LOOP="$NL"` is the shape that was silent until
+this very commit.
+**Confidence:** HIGH — read from the rendered output, not the source.
+
+### R12-VC4 — the AUDIT entry describes what changed, accurately.
+It states each of the four fixes and what it was fixing, credits the corrections
+(including that its own earlier question named the wrong file), and does not
+claim more than was done. The measurement claims I could check are true: the
+twelve-case verification, the left-operand argument for last-flag-wins, and the
+`125 lib + 8 bin` state all match what I found independently.
+
+**One imprecision, the same one as R12-F1(a):** it says *"One **unconditional**
+line now reports both switches at startup"*, and the code comment likewise opens
+`// Unconditional:`. It is a `log::info!`, so it is conditional on the log level
+— absent under `RUST_LOG=warn`, where the `DISABLED` warning still appears. The
+substance of the change is right; only the word overstates it.

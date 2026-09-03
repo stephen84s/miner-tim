@@ -2295,7 +2295,7 @@ aarch64 and x86_64.
 |---|---|---|
 | P1 — `.or(value)` composition in every order | DONE | R11-VC1: correct; R11-F1 on the env arm |
 | P2 — last-flag-wins still holds? | DONE | R11-VC2: holds, verified 4 orders |
-| P3 — R10-F1 composition test + AUDIT wording | NOT STARTED | |
+| P3 — R10-F1 composition test + AUDIT wording | IN PROGRESS | |
 | P4 — framing condition placement | NOT STARTED | |
 | Warning text; blank-value docs | NOT STARTED | |
 

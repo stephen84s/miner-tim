@@ -495,6 +495,45 @@ mod full_hash_tests {
         );
     }
 
+    /// The positive direction of `native_loop_effective()`: a real full-mode v1
+    /// VM with the switch on must report `true`.
+    ///
+    /// Every other assertion on that method in the tree is negative (light
+    /// mode, and the `native_loop_applies` truth table), so a `cfg` slip making
+    /// it constant-`false` on aarch64 — the exact class of defect that produced
+    /// issue #3 — would pass the whole suite while silently disarming share
+    /// verification on the shipping platform.
+    ///
+    /// This is also the only test in the tree that hard-requires a successful
+    /// `mmap(MAP_JIT)`. `test_native_loop_known_answer` passes even when the
+    /// allocation fails, because the interpreter fallback produces the same
+    /// hash — which is issue #4's shape exactly. So this is the test that goes
+    /// red in an environment where MAP_JIT is unavailable, and that is the
+    /// point of it.
+    ///
+    /// The dataset is the shared `LazyLock` every known-answer vector here
+    /// already builds, so the cost is one extra `new_full` on a live `Arc`, not
+    /// a 2 GiB build. (AUDIT.md's earlier claim to the contrary is corrected in
+    /// the 2026-09-04 review-follow-up entry.)
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn full_mode_v1_vm_reports_the_native_loop_effective() {
+        let mut vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        vm_full.set_native_loop(true);
+        assert!(
+            vm_full.native_loop_effective(),
+            "full mode + rx/0 + aarch64 + a live JIT is every precondition of the guard; \
+             if this is false the mining path is the interpreter and share verification \
+             is comparing it against itself"
+        );
+
+        vm_full.set_native_loop(false);
+        assert!(
+            !vm_full.native_loop_effective(),
+            "the switch is load-bearing: turning it off must move the VM off the native loop"
+        );
+    }
+
     /// Full mode must not build an Argon2d cache. `cache_memory` is read in
     /// exactly one place — `init_dataset_item`, on the `dataset == None` arm —
     /// so a VM that owns a dataset never touches it, and building one cost

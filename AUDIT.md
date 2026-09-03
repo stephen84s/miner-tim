@@ -2579,3 +2579,258 @@ the ledger:
 Pre-existing: #1 (R5-F7, FMOVs), #2 (multi-platform CI). `REVIEW_MR1.md`'s open
 table now links each. The only untracked item left is the `worker_loop` verifier
 glue, which needs a re-check rather than an issue.
+
+## 2026-09-04 — Issue #4: the silent MAP_JIT fallback is now visible (and #3 fell out of it)
+
+### Request / goal
+GitLab issue **#4** (R13-F2). `JitCompiler::new()` returns
+`Result<Self, &'static str>` and both `RandomXVm` constructors discarded the
+error with `.ok()`. If the `mmap(MAP_JIT)` allocation failed on aarch64 the
+miner dropped to the interpreter while the startup line still reported
+`Native-loop JIT: on`. The second-order effect is the real defect: the share
+verifier's reference path *is* the interpreter, so once the mining VM fell back
+too, the verifier compared the interpreter against itself, agreed always, and
+reported `verify_failures = 0` forever. A health indicator that cannot go red.
+
+The issue asked for two things: log the discarded error, and stop *modelling*
+the effective state in `main` (which pinned one of the native-loop guard's four
+preconditions) when it can be *read* from the VM, where all four are known.
+
+### Files changed
+- `src/randomx/vm.rs` — `new_jit()` helper; `native_loop_applies()` predicate;
+  `RandomXVm::native_loop_effective()` (both target arms); guard rewired;
+  two new test modules.
+- `src/miner.rs` — `ShareVerifier::set_enabled()`; `worker_loop` now builds the
+  verifier disarmed and arms it from the VM; per-worker effective-state line;
+  corrected `get_verify_failures` doc; one new test.
+- `src/bin/minertim.rs` — startup line extracted into `startup_state_line()`
+  and reframed as the *requested* configuration; two new tests.
+- `CLAUDE.md` — task board row VIS-01.
+
+### Behaviour changes
+1. **A failed JIT allocation is loud.** `new_jit()` logs at `error!` with the
+   underlying message, says the VM falls back to the interpreter, and says that
+   share verification for that worker is consequently off. Deliberately *not*
+   fatal — such a VM still computes correct hashes, just slowly. The issue asked
+   for visibility, not a new abort path.
+2. **One definition of the guard.** `native_loop_applies(use_native_loop,
+   version, has_dataset, has_jit)` is now the only place the four preconditions
+   are spelled out. `execute_vm_inner`'s guard calls it (its `let (Some(ds),
+   Some(jit)) = …` half survives solely to bind, and is commented as such), and
+   `RandomXVm::native_loop_effective()` reports through it. What the miner says
+   it is running and what it runs can no longer drift.
+3. **The verifier is armed from the VM, not from the switches.** `worker_loop`
+   constructs `ShareVerifier::new(false)` and calls
+   `set_enabled(verify_shares && vm.native_loop_effective())` on every seed
+   rotation, once the VM exists. A worker on the interpreter — failed JIT, non-v1
+   program, light mode, or a non-aarch64 build — is disarmed rather than
+   comparing the reference path against itself.
+4. **Each worker reports its own effective state once**, at `info`, and at
+   `warn` if the native loop was requested and is not active.
+5. **The startup line no longer claims effective state.** It is explicitly
+   labelled as the request, and points at the per-worker line as the authority.
+6. **Issue #3 (R13-F1) is closed as a side effect.** It was the reverse skew:
+   `ShareVerifier::new(verify_shares && native_loop)` had no
+   `cfg!(target_arch = "aarch64")` term while the startup line did, so an x86_64
+   build armed verification against a mining path that was already the reference
+   path. There is now no second `cfg!` term to skew — enablement comes from
+   `native_loop_effective()`, whose non-aarch64 arm is `false`. **Behaviour
+   change on x86_64: share verification goes from on-but-vacuous (and paying for
+   a second full hash per candidate share) to off.**
+7. `get_verify_failures`'s doc no longer implies that 0 means the JIT is
+   correct; it now says 0 is also what a disarmed worker reports.
+
+### Verification
+- `cargo clippy --all-targets -- -D warnings`: clean (exit 0).
+- `cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings`:
+  clean (exit 0). Run *before* the long suite, since cfg skew is exactly what
+  bit in #3.
+- `make check`: clean.
+- `caffeinate -i make test`: **green** — 129 lib + 10 bin tests pass in release
+  (306.18 s, 2 long-running dataset tests ignored as before), 0 doc-tests. The
+  baseline before this change was 125 lib + 8 bin, so all six new tests are
+  accounted for. This is the run that matters for this change specifically,
+  since the 87 vectors go through the `execute_vm_inner` guard whose condition
+  was rewired. `cargo test --release --bin minertim` was re-run afterwards
+  (10 passed) because a later wording change to `main` landed after that build.
+- New tests, all passing:
+  - `native_loop_guard_tests::every_precondition_is_load_bearing` — the full
+    16-row truth table of the guard predicate.
+  - `native_loop_guard_tests::a_failed_jit_allocation_is_not_the_native_loop` —
+    the exact regression: everything available except the JIT.
+  - `native_loop_effective_tests::light_mode_never_reports_the_native_loop`.
+  - `verify_tests::arming_follows_the_vm_not_the_switches` — a disarmed verifier
+    folds into `SubmitUnverified`, arming restores the fail-open arm.
+  - `startup_line_reports_the_request_and_the_target` and
+    `startup_line_never_reports_verification_without_the_native_loop` — the
+    reporting path, exercised for **both** targets from the aarch64 runner. The
+    round-13 reviewer recorded that nothing exercised this path on either
+    target; that gap is closed.
+
+### Assumptions and known limits
+- **A real `mmap(MAP_JIT)` failure is not reproducible in a test.** The
+  predicate's response to `has_jit = false` is covered; the wiring from an actual
+  failed allocation to `jit: None` is one line and is not.
+- `native_loop_effective()`'s *field wiring* is only partially covered: a
+  light-mode VM reaches `has_dataset = false` cheaply, but exercising the
+  `has_dataset = true` arm on a real VM costs a 2 GiB dataset build, which was
+  judged not worth it against a 16-row table test of the same predicate.
+- The composition `verify_shares && native_effective` lives inline in
+  `worker_loop` and is not itself extracted; its two halves are tested
+  separately.
+- Re-deriving the arming decision on every seed rotation is insurance, not
+  necessity: all four guard terms are fixed for a VM's lifetime today (version
+  and JIT at construction, the flag once, and `reinit` is always passed a
+  dataset here). It stays correct if a future edit calls `reinit(key, None)`.
+- The `!verify_shares && native_requested_here` warning in `main` still uses
+  one-of-four modelling, deliberately. It cannot be moved to the worker without
+  losing its place in the startup banner, and it errs conservative: it can fire
+  when the native loop turns out not to be running, never the reverse. Its
+  wording was changed from "while the native-loop JIT is on" to "is requested
+  on" so that no line in `main` claims effective state any more.
+- On a non-aarch64 build every worker now emits the "requested but NOT active"
+  warning. That is true and the startup line already explains why; it was left
+  unconditional rather than adding a `cfg!` term back for log verbosity alone.
+
+## 2026-09-04 — VIS-01 review follow-up: four minor findings closed (F1–F4)
+
+### Request / goal
+An independent reviewer went over `fix/jit-alloc-failure-visible` (issues #4 and
+#3) and returned a **mergeable** verdict with four minor findings, recorded in
+`REVIEW_ISSUE4.md` on this branch. This entry closes all four plus the log-text
+nit from the reviewer's item 6. No blockers were raised and none are addressed
+here; nothing about the fix's behaviour on the mining path changes.
+
+### Correction to the previous entry (2026-09-04, VIS-01)
+
+The "Assumptions and known limits" list in that entry says:
+
+> exercising the `has_dataset = true` arm on a real VM costs a 2 GiB dataset
+> build, which was judged not worth it
+
+**That is factually wrong, and the reviewer was right to call it out (F2b).**
+`src/randomx/tests.rs`'s `test_key_000_dataset()` is a `LazyLock` full dataset
+that is *already built in the default test run* — three non-ignored tests use
+it, including `test_native_loop_known_answer` and
+`test_native_loop_known_answer_pipelined`. The positive-direction test cost one
+extra `RandomXVm::new_full` on a live `Arc`, not a dataset build. The
+cost/benefit judgement recorded there was made against a price that was never
+being charged, and the gap it justified is closed below. `AUDIT.md` is
+append-only, so the original text stands; this paragraph is its correction.
+
+### Files changed
+- `src/bin/minertim.rs` — F1a (doc comment restored to `parse_native_loop`), F3
+  (startup-line wording + a non-vacuous assertion).
+- `src/miner.rs` — F1b (doc comment restored to `is_enabled`), reviewer item 6
+  (per-worker warning text made true on every target).
+- `src/randomx/vm.rs` — F4 (`new_jit()`'s `error!` message and doc comment).
+- `src/randomx/tests.rs` — F2 (the positive-direction test).
+- `CLAUDE.md` — VIS-01 row extended.
+
+### What changed, per finding
+
+**F1a / F1b — two orphaned doc comments, both introduced by this branch.** A new
+function had been spliced in directly under an existing doc comment in each
+case, so the comment documented the new item and the item it was written for was
+left bare.
+- `startup_state_line` had taken `parse_native_loop`'s "malformed input falls
+  back to **off**: slower, but it cannot mine wrong hashes" — the fail-safe
+  direction of the switch, and the most safety-relevant sentence in that file.
+  Returned to `parse_native_loop`; `startup_state_line` keeps its own.
+- `set_enabled` had taken `is_enabled`'s R9-F1 / R11-F2 rationale ("a defence
+  that cannot be reached is not a defence"), while `is_armed`'s doc still
+  pointed readers at `is_enabled` for it. Returned to `is_enabled`;
+  `set_enabled` keeps its own.
+
+No behaviour change; documentation integrity only.
+
+**F2 — nothing asserted `native_loop_effective() == true`.** Every assertion on
+it was negative, so a `cfg` slip making it constant-`false` on aarch64 — the
+class of defect that produced issue #3 — would have passed the entire suite
+while disarming share verification on the shipping platform. Added
+`full_mode_v1_vm_reports_the_native_loop_effective` (aarch64-gated,
+`src/randomx/tests.rs`): a real full-mode v1 VM on the shared dataset must
+report `true` with the switch on and `false` with it off, so both the field
+wiring and the switch term are load-bearing.
+
+Worth recording: this is the **only** test in the tree that hard-requires a
+successful `mmap(MAP_JIT)`. `test_native_loop_known_answer` passes even when the
+allocation fails, because the interpreter fallback yields the same hash — issue
+#4's shape exactly. So this test is expected to go red in an environment where
+MAP_JIT is unavailable, and that is the point of it.
+
+**F3 — an assertion that could not fail.** `assert!(aarch64.contains("requested"))`
+held for every input, because `requested` was an unconditional literal in
+`startup_state_line`'s format string: it asserted a constant against itself.
+Separately, the parenthetical it was meant to check trailed the *share
+verification* field, whereas issue #4 was filed about the `Native-loop JIT:`
+field over-claiming. Both are fixed together — the qualifier now attaches to the
+field it qualifies:
+
+```
+Native-loop JIT: on (requested) | share verification: on — requested state only; each worker reports its own effective state once its VM is built
+Native-loop JIT: off (requested on; unavailable on this target) | share verification: off — requested state only; ...
+```
+
+and the assertion is now `contains("Native-loop JIT: on (requested)")`, which is
+input-dependent: the `unavailable` arm renders a different qualifier whenever
+the target cannot honour the request.
+
+**Proof it is no longer vacuous** (temporary break, reverted): the pre-fix format
+string was reinstated — qualifier trailing the whole line — with the old
+assertion restored alongside the new one. The old `contains("requested")`
+**passed**; the new assertion **failed** with
+`the native-loop field must carry its own 'requested' qualifier and not read as
+effective state: Native-loop JIT: on | share verification: on (requested; …)`.
+An earlier attempt to break the `unavailable` predicate itself was discarded as
+evidence: it also trips the pre-existing `!contains("unavailable")` assertion,
+so it does not isolate the new one.
+
+**F4 — `new_jit()`'s message overstated.** It said share verification is
+switched off, but `new_jit()` runs on **every** `RandomXVm` construction,
+including `ShareVerifier::reference()`'s own reference VM — where verification
+stays correctly armed and still works. Reworded to name both cases, and to state
+what was previously implicit: a failure on the verifier's VM silently changes
+what the reference path *is* (interpreter rather than the per-iteration body
+JIT), and the arming decision does not model that. The doc comment now records
+the dependency that makes it harmless — `native_loop_diff_tests`,
+`test_native_loop_known_answer*` and `test_vm_calculate_hash_jit` pin all three
+paths bit-identical in the default suite.
+
+**Reviewer item 6 — the per-worker warning text was false on non-aarch64.** It
+claimed "Expect a large hashrate shortfall on this worker" (nothing is lost on a
+target with no native loop) and "See any 'JIT allocation failed' error above"
+(there will never be one there; the field is `cfg`-ed out). The warning now
+lists every cause rather than predicting one, and says the hashrate cost applies
+"wherever the native loop does exist". **No `cfg!` term was added to do this** —
+re-deriving the target test at the reporting site is exactly issue #3, and a
+comment at the site says so.
+
+### Verification
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings` —
+  clean. Run because #3 was a cfg-skew defect and the new test is aarch64-gated;
+  it added no import that would be unused on that target.
+- `make check` — clean.
+- `caffeinate -i make test` (release) — **130 lib + 10 bin passed, 2 ignored,
+  0 failed**. One more lib test than the previous entry's 129, which is the F2
+  addition; the F3 change modified an existing bin test rather than adding one.
+
+### Assumptions and constraints
+- Scope was held to the four findings plus the item-6 wording. The reviewer's
+  weaker observations were deliberately **not** acted on: that
+  `every_precondition_is_load_bearing` restates the predicate's body (its stated
+  purpose is to pin it against change), that
+  `a_failed_jit_allocation_is_not_the_native_loop` is a subset of that table
+  (documentation, and cheap), and that `light_mode_never_reports_the_native_loop`
+  is vacuous on x86_64 (the `cfg(not)` arm returns a constant there, which is
+  itself the correct answer).
+- Considered and rejected: passing a caller label (`"mining"` / `"verifier"`)
+  into `new_jit()` so the message could be precise instead of naming both cases.
+  It would be an API change across two call sites for a log string, and the
+  finding asked for a reword.
+- The pre-existing orphaned doc comment on `get_verify_failures`
+  (`src/miner.rs:283`, noted by the reviewer as a third instance of the F1
+  pattern) is **on `main`, not this branch**, and was left alone under scope
+  discipline.
+- `REVIEW_ISSUE4.md` is the reviewer's record and was not modified.

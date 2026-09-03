@@ -282,8 +282,12 @@ impl Miner {
 
     /// Get share timing stats for display.
     /// Number of shares withheld because the reference path disagreed with the
-    /// native loop. Always 0 in normal operation; any other value means the JIT
-    /// is producing wrong hashes.
+    /// native loop. Any non-zero value means the JIT is producing wrong hashes.
+    ///
+    /// Zero is NOT by itself evidence that the JIT is correct: it is also what
+    /// a worker reports when verification is disarmed — `--verify-shares off`,
+    /// or a mining VM that is not on the native loop at all (issue #4). The
+    /// per-worker startup line says which of the two a given run is in.
     pub fn get_verify_failures(&self) -> u64 {
         self.stats.as_ref()
             .map(|s| s.verify_failures.load(Ordering::Relaxed))
@@ -430,6 +434,19 @@ impl ShareVerifier {
         Some(vm.calculate_hash(blob))
     }
 
+    /// Arm or disarm the verifier from the mining VM's *actual* state.
+    ///
+    /// Called once the worker's VM exists, because that is the first moment all
+    /// four native-loop preconditions are knowable. Verification is only
+    /// meaningful when the mining path differs from the reference path, so a VM
+    /// that fell back to the interpreter — a failed `mmap(MAP_JIT)`, a non-v1
+    /// program, light mode, or a non-aarch64 build — disarms it rather than
+    /// letting it compare the interpreter against itself and report a clean
+    /// counter forever (issues #4 and #3).
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     /// Whether verification is switched on for this worker.
     ///
     /// Deliberately **not** `enabled && dataset.is_some()`. Using the stricter
@@ -546,7 +563,17 @@ fn worker_loop(
     let mut pipeline_ready = false;
     // Reference-path verifier. Built lazily on the first share, and re-pointed
     // whenever the seed rotates — see `ShareVerifier`.
-    let mut verifier = ShareVerifier::new(verify_shares && native_loop);
+    //
+    // Starts DISARMED regardless of the switches: whether verification can
+    // detect anything depends on the mining VM's real state, which does not
+    // exist yet. It is armed from `native_loop_effective()` below, before any
+    // share can be found. Composing it here from `verify_shares && native_loop`
+    // was how it came to be armed on x86_64 against a mining path that was
+    // already the reference path (issue #3), and how a failed JIT allocation
+    // left it comparing the interpreter against itself (issue #4).
+    let mut verifier = ShareVerifier::new(false);
+    // The effective-state line is per worker and printed once, not per rotation.
+    let mut reported_effective_state = false;
 
     while mining_active.load(Ordering::Relaxed) {
         let job = match pool.get_work() {
@@ -585,6 +612,52 @@ fn worker_loop(
             // rotation: in full mode the dataset determines the hash, so a
             // verifier left on the old one would reject every share found.
             verifier.rekey(&job.seed_hash, dataset);
+
+            // Arm the verifier from what the VM actually does, and say so.
+            //
+            // All four guard terms are fixed for this VM's lifetime — version
+            // and JIT at construction, the flag once, and `reinit` above is
+            // always passed a dataset — so re-deriving on every rotation is
+            // free insurance rather than a necessity. It stays correct if a
+            // future edit ever calls `reinit(key, None)`.
+            let native_effective =
+                vm.as_ref().is_some_and(|v| v.native_loop_effective());
+            verifier.set_enabled(verify_shares && native_effective);
+            if !reported_effective_state {
+                reported_effective_state = true;
+                let on_off = |b: bool| if b { "on" } else { "off" };
+                log::info!(
+                    "Worker {}: native-loop JIT {} | share verification {}",
+                    thread_id,
+                    on_off(native_effective),
+                    on_off(verify_shares && native_effective),
+                );
+                if native_loop && !native_effective {
+                    // The loud path. The startup line announced the native loop
+                    // and this worker is not running it, which also means its
+                    // share verification measures nothing (issue #4, R13-F2).
+                    // Deliberately says nothing that depends on the target.
+                    // Re-deriving "does this build even have a native loop?"
+                    // here would put a `cfg!` term back into the reporting of
+                    // an enablement decision, which is precisely issue #3. So
+                    // the text lists every cause instead of predicting one.
+                    log::warn!(
+                        "Worker {}: native-loop JIT was requested but is NOT active — \
+                         running the per-iteration body JIT / interpreter. Share \
+                         verification is off for it, because the mining path and the \
+                         reference path are now the same and a zero failure count would \
+                         mean nothing. Possible causes: this build targets an \
+                         architecture with no native loop (nothing is lost there — it \
+                         has none to run), the program is not rx/0, the VM is in light \
+                         mode, or `mmap(MAP_JIT)` failed (logged as a 'JIT allocation \
+                         failed' error above). Wherever the native loop does exist, \
+                         running without it costs this worker a large fraction of its \
+                         hashrate.",
+                        thread_id
+                    );
+                }
+            }
+
             current_key = job.seed_hash.clone();
             pipeline_ready = false;
         }
@@ -962,6 +1035,36 @@ mod verify_tests {
             classify_share(v.is_enabled(), &A, reference.as_ref()).should_submit(),
             "a genuine share was withheld because the verifier was unavailable"
         );
+    }
+
+    /// Arming is a decision taken from the mining VM, not from the switches.
+    ///
+    /// `worker_loop` now constructs the verifier disarmed and calls
+    /// `set_enabled(verify_shares && vm.native_loop_effective())` once the VM
+    /// exists. This pins both ends of that: a disarmed verifier must fold into
+    /// the unverified verdict rather than the unavailable one (it is not that
+    /// the check failed — no check was wanted), and arming must restore the
+    /// fail-open arm (issues #4 and #3).
+    #[test]
+    fn arming_follows_the_vm_not_the_switches() {
+        let mut v = ShareVerifier::new(false);
+        assert!(!v.is_enabled(), "a verifier built disarmed reported itself armed");
+        assert_eq!(
+            classify_share(v.is_enabled(), &A, None),
+            ShareVerdict::SubmitUnverified,
+            "a disarmed verifier must not claim verification was attempted"
+        );
+
+        v.set_enabled(true);
+        assert!(v.is_enabled());
+        assert_eq!(
+            classify_share(v.is_enabled(), &A, None),
+            ShareVerdict::SubmitVerifierUnavailable,
+            "arming must make the fail-open arm reachable again"
+        );
+
+        v.set_enabled(false);
+        assert!(!v.is_enabled(), "disarming did not take effect");
     }
 
     /// A fresh `Miner` has no stats yet; the counter must read 0 rather than

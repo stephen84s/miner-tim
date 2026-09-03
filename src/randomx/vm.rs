@@ -1159,6 +1159,20 @@ pub(crate) fn derive_program_params(
     (config, ma, mx, dataset_offset)
 }
 
+/// The complete set of preconditions the native-loop guard in
+/// `execute_vm_inner` checks. Single definition on purpose: `RandomXVm::
+/// native_loop_effective` reports through this same function, so what the miner
+/// *says* it is running and what it *runs* cannot drift (issue #4).
+#[cfg(target_arch = "aarch64")]
+fn native_loop_applies(
+    use_native_loop: bool,
+    version: RxVersion,
+    has_dataset: bool,
+    has_jit: bool,
+) -> bool {
+    use_native_loop && version == RxVersion::V1 && has_dataset && has_jit
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_vm_inner(
     nreg: &mut NativeRegisterFile,
@@ -1217,9 +1231,14 @@ fn execute_vm_inner(
     // the dataset with no light-mode fallback, so anything else falls through
     // to the per-iteration body JIT below. `compile_native_loop` asserts the
     // version too, so a miswired caller trips there rather than mining garbage.
+    //
+    // The `let` half re-tests `dataset`/`jit` only because the bindings are
+    // needed below; `native_loop_applies` has already decided. If a fifth
+    // precondition is ever added it MUST go in `native_loop_applies`, not here,
+    // or `RandomXVm::native_loop_effective` — and therefore the startup report
+    // and the share verifier — will start lying again (issue #4).
     #[cfg(target_arch = "aarch64")]
-    if use_native_loop
-        && version == RxVersion::V1
+    if native_loop_applies(use_native_loop, version, dataset.is_some(), jit.is_some())
         && let (Some(ds), Some(jit)) = (dataset, jit.as_mut())
     {
         jit.compile_native_loop(bytecode, version, &config, ma, mx, dataset_offset);
@@ -1656,6 +1675,48 @@ pub struct RandomXVm {
     use_native_loop: bool,
 }
 
+/// Build the per-VM JIT, reporting failure instead of swallowing it.
+///
+/// `JitCompiler::new()` fails when the `mmap(MAP_JIT)` region cannot be
+/// allocated. That used to be `.ok()` with no log, and the consequence was not
+/// just a quiet performance cliff: the mining VM fell back to the interpreter
+/// while the startup line still announced the native loop, and the share
+/// verifier — whose reference path *is* the interpreter — then compared the
+/// interpreter against itself and reported a clean counter forever (issue #4,
+/// review round 13, R13-F2). A safety net that cannot go red is worse than no
+/// safety net, so this is loud.
+///
+/// It is deliberately not fatal: a VM without a JIT still mines correct hashes,
+/// just slowly. `RandomXVm::native_loop_effective` is what makes the fallback
+/// visible to everything downstream.
+///
+/// It runs for **every** `RandomXVm`, including `ShareVerifier::reference`'s
+/// own VM, and the two cases differ — which is why the message names both. A
+/// failure on the verifier's VM leaves verification correctly armed, but it
+/// silently changes what the reference path *is*: interpreter instead of the
+/// per-iteration body JIT. Nothing in the arming decision models that. It is
+/// harmless only because `native_loop_diff_tests`, `test_native_loop_known_answer*`
+/// and `test_vm_calculate_hash_jit` pin all three paths bit-identical.
+#[cfg(target_arch = "aarch64")]
+fn new_jit() -> Option<super::jit::JitCompiler> {
+    match super::jit::JitCompiler::new() {
+        Ok(jit) => Some(jit),
+        Err(e) => {
+            log::error!(
+                "JIT allocation failed ({e}) — this VM falls back to the interpreter. \
+                 What that costs depends on which VM this is. A worker's mining VM: \
+                 hashrate far below normal, and share verification for that worker is \
+                 switched off, because its mining path is now the interpreter and would \
+                 otherwise be compared against itself. The share verifier's own \
+                 reference VM: verification stays armed and still works, but the \
+                 reference path silently becomes the interpreter instead of the \
+                 per-iteration body JIT. Either way the hashes stay correct."
+            );
+            None
+        }
+    }
+}
+
 impl RandomXVm {
     /// Create a new VM in light mode (256 MiB cache, computes dataset items on-the-fly).
     pub fn new(key: &[u8]) -> Self {
@@ -1678,7 +1739,7 @@ impl RandomXVm {
             pipeline_state: [0u8; 64],
             version,
             #[cfg(target_arch = "aarch64")]
-            jit: super::jit::JitCompiler::new().ok(),
+            jit: new_jit(),
             use_native_loop: true,
         }
     }
@@ -1711,7 +1772,7 @@ impl RandomXVm {
             pipeline_state: [0u8; 64],
             version,
             #[cfg(target_arch = "aarch64")]
-            jit: super::jit::JitCompiler::new().ok(),
+            jit: new_jit(),
             use_native_loop: true,
         }
     }
@@ -1741,6 +1802,41 @@ impl RandomXVm {
     #[cfg(test)]
     pub(crate) fn uses_native_loop(&self) -> bool {
         self.use_native_loop
+    }
+
+    /// Whether this VM will *actually* run the native loop — every
+    /// precondition of `execute_vm_inner`'s guard, evaluated against this VM's
+    /// own fields rather than modelled from the command line.
+    ///
+    /// This exists because the startup line used to model exactly one of those
+    /// four terms (`--native-loop` on aarch64) and silently mispredicted the
+    /// other three. The one that bit was `jit.is_some()`: a failed
+    /// `mmap(MAP_JIT)` dropped the VM to the interpreter while the miner still
+    /// announced the native loop, which in turn made share verification compare
+    /// the interpreter against itself and report zero failures forever (issue
+    /// #4, R13-F2).
+    ///
+    /// Callers should treat this as the authority for both reporting and for
+    /// arming the share verifier. It is `false` on every non-aarch64 target,
+    /// where there is no native loop at all.
+    #[cfg(target_arch = "aarch64")]
+    pub fn native_loop_effective(&self) -> bool {
+        native_loop_applies(
+            self.use_native_loop,
+            self.version,
+            self.dataset.is_some(),
+            self.jit.is_some(),
+        )
+    }
+
+    /// Always `false`: the native loop is emitted only for aarch64. Having the
+    /// method exist on every target is what keeps the caller from re-deriving
+    /// the target test with its own `cfg!` — which is how the verifier ended up
+    /// armed on x86_64 against a mining path that was already the interpreter
+    /// (issue #3, R13-F1).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn native_loop_effective(&self) -> bool {
+        false
     }
 
     /// Enable or disable the native-loop JIT path.
@@ -2057,5 +2153,75 @@ impl RandomXVm {
         println!("==========================================\n");
 
         result
+    }
+}
+
+// ============================================================================
+// Native-loop precondition tests
+// ============================================================================
+
+/// The four-term guard that decides whether the native loop runs, pinned as a
+/// truth table. `has_jit` is the term that had no coverage at all and the term
+/// that failed in the field (issue #4): a failed `mmap(MAP_JIT)` is not
+/// reproducible in a test, but the predicate's response to it is.
+///
+/// Deliberately exercised through the pure function rather than through a
+/// `RandomXVm`, because reaching `has_dataset = true` on a real VM costs a
+/// 2 GiB dataset build.
+#[cfg(all(test, target_arch = "aarch64"))]
+mod native_loop_guard_tests {
+    use super::{RxVersion, native_loop_applies};
+
+    #[test]
+    fn every_precondition_is_load_bearing() {
+        for &flag in &[false, true] {
+            for &version in &[RxVersion::V1, RxVersion::V2] {
+                for &ds in &[false, true] {
+                    for &jit in &[false, true] {
+                        let expected = flag && version == RxVersion::V1 && ds && jit;
+                        assert_eq!(
+                            native_loop_applies(flag, version, ds, jit),
+                            expected,
+                            "flag={flag} version={version:?} dataset={ds} jit={jit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The specific regression: everything asked for and available except the
+    /// JIT allocation. Before issue #4 this case reported "on" and ran the
+    /// interpreter.
+    #[test]
+    fn a_failed_jit_allocation_is_not_the_native_loop() {
+        assert!(
+            !native_loop_applies(true, RxVersion::V1, true, false),
+            "a VM whose mmap(MAP_JIT) failed must not report the native loop"
+        );
+    }
+}
+
+/// A VM's own report agrees with its fields. Light mode is the affordable half
+/// of this — it has no dataset, so it must never claim the native loop no
+/// matter how the switch is set.
+#[cfg(test)]
+mod native_loop_effective_tests {
+    use super::RandomXVm;
+
+    #[test]
+    fn light_mode_never_reports_the_native_loop() {
+        let mut vm = RandomXVm::new(b"test key 000");
+        assert!(
+            !vm.native_loop_effective(),
+            "light mode has no dataset; the native loop cannot run"
+        );
+        vm.set_native_loop(true);
+        assert!(
+            !vm.native_loop_effective(),
+            "asking for the native loop must not make a dataset appear"
+        );
+        vm.set_native_loop(false);
+        assert!(!vm.native_loop_effective());
     }
 }

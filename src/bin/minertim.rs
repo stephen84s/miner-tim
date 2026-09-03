@@ -76,38 +76,26 @@ fn main() {
     })
     .expect("Failed to set Ctrl+C handler");
 
-    let on_off = |b: bool| if b { "on" } else { "off" };
-
-    // Report the EFFECTIVE state, not the requested one. The native loop is
-    // aarch64-only, so a build elsewhere would otherwise announce "on" while
-    // running the interpreter; and verification is skipped when the native loop
-    // is off, because the mining path is then already the reference path
-    // (review round 12, R12-F1).
-    let native_effective = native_loop && cfg!(target_arch = "aarch64");
-    let verify_effective = verify_shares && native_effective;
-
     // Emitted at info, which is the default filter — but it is NOT
     // unconditional, and an earlier comment wrongly said so: `RUST_LOG=warn`
     // suppresses it. The warnings below fire only in the non-default direction,
     // so at that level the state is again inferable from the absence of a line.
     // Anyone running at warn should read the switch back from their own config.
-    log::info!(
-        "Native-loop JIT: {}{} | share verification: {}",
-        on_off(native_effective),
-        if native_loop && !native_effective {
-            " (requested on; unavailable on this target)"
-        } else {
-            ""
-        },
-        on_off(verify_effective),
-    );
+    log::info!("{}", startup_state_line(native_loop, verify_shares, cfg!(target_arch = "aarch64")));
 
     let mut miner = Miner::new(mining_active.clone());
     miner.set_native_loop(native_loop);
     miner.set_verify_shares(verify_shares);
-    if !verify_shares && native_effective {
+    // `native_requested_here` is still only one of the guard's four terms — the
+    // other three are not knowable in `main`. That is fine for a warning whose
+    // point is that the operator switched off their own safety net: it errs
+    // conservative (it can fire when the native loop turns out not to be
+    // running, never the reverse). The wording says "requested on" rather than
+    // "is on" so that this line does not repeat the claim issue #4 was about.
+    let native_requested_here = native_loop && cfg!(target_arch = "aarch64");
+    if !verify_shares && native_requested_here {
         log::warn!(
-            "Share verification DISABLED while the native-loop JIT is on. A \
+            "Share verification DISABLED while the native-loop JIT is requested on. A \
              native-loop defect would now be submitted to the pool as a wrong \
              share instead of being withheld, and the only symptom would be \
              rejects climbing on the pool side."
@@ -381,6 +369,36 @@ fn parse_switch_with(
     value.unwrap_or(default_on)
 }
 
+/// The startup configuration line.
+///
+/// This reports what was *requested* and whether the target can honour it. It
+/// deliberately does NOT claim to know the effective state: three of the four
+/// preconditions in the native-loop guard — the RandomX version, full mode, and
+/// whether `mmap(MAP_JIT)` succeeded — are not knowable here, and modelling one
+/// of four is what let a failed JIT allocation be announced as "on" while the
+/// miner ran the interpreter (issue #4). Each worker logs its own effective
+/// state once its VM exists; that line is the authority.
+///
+/// `target_has_native_loop` is a parameter rather than a `cfg!` inside so that
+/// both targets can be exercised from the one runner we have. Nothing tested
+/// this path on either target before, which is how the missing `cfg!` term in
+/// the verifier's composition (issue #3) got in.
+fn startup_state_line(native_loop: bool, verify_shares: bool, target_has_native_loop: bool) -> String {
+    let on_off = |b: bool| if b { "on" } else { "off" };
+    let unavailable = native_loop && !target_has_native_loop;
+    // The qualifier is attached to the `Native-loop JIT:` field rather than
+    // trailing the whole line, because that is the field issue #4 was filed
+    // about over-claiming. Trailing the line it read as if it qualified share
+    // verification, which was never the field in question.
+    format!(
+        "Native-loop JIT: {} ({}) | share verification: {} — requested state only; \
+         each worker reports its own effective state once its VM is built",
+        on_off(native_loop && target_has_native_loop),
+        if unavailable { "requested on; unavailable on this target" } else { "requested" },
+        on_off(verify_shares && native_loop && target_has_native_loop),
+    )
+}
+
 /// The native-loop JIT switch. Malformed input falls back to **off**: slower,
 /// but it cannot mine wrong hashes.
 fn parse_native_loop(args: &[String]) -> bool {
@@ -407,7 +425,7 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_native_loop, parse_switch_with, parse_verify_shares};
+    use super::{parse_native_loop, parse_switch_with, parse_verify_shares, startup_state_line};
 
     fn args(extra: &[&str]) -> Vec<String> {
         let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
@@ -529,5 +547,58 @@ mod tests {
         assert!(parse_verify_shares(&args(&["--verify-shares"])));
         // ...whereas the native-loop switch fails safe the other way.
         assert!(!parse_native_loop(&args(&["--native-loop", "nonsense"])));
+    }
+
+    /// The startup line, on both targets, from the one runner we have.
+    ///
+    /// Before issue #4 nothing exercised this path at all — which is how the
+    /// verifier's composition drifted out of step with it (issue #3). The line
+    /// must never claim the native loop is active on a target that has none,
+    /// and must never claim verification is on when the thing it verifies is
+    /// off.
+    #[test]
+    fn startup_line_reports_the_request_and_the_target() {
+        let aarch64 = startup_state_line(true, true, true);
+        assert!(aarch64.contains("Native-loop JIT: on"), "{aarch64}");
+        assert!(!aarch64.contains("unavailable"), "{aarch64}");
+        assert!(aarch64.contains("share verification: on"), "{aarch64}");
+        // Not `contains("requested")`: that literal is unconditional in the
+        // format string, so it held for every input and asserted a constant
+        // against itself (review of this branch, F3). This form is
+        // input-dependent — the `(requested on; unavailable on this target)`
+        // arm renders instead whenever the target cannot honour the request —
+        // and it also pins the qualifier to the native-loop field rather than
+        // to whichever field happens to be last.
+        assert!(
+            aarch64.contains("Native-loop JIT: on (requested)"),
+            "the native-loop field must carry its own 'requested' qualifier and not \
+             read as effective state: {aarch64}"
+        );
+
+        // Same request, target without the native loop.
+        let other = startup_state_line(true, true, false);
+        assert!(other.contains("Native-loop JIT: off"), "{other}");
+        assert!(other.contains("unavailable on this target"), "{other}");
+        assert!(
+            other.contains("share verification: off"),
+            "verification must follow the native loop, not the switch alone: {other}"
+        );
+    }
+
+    /// Verification is only meaningful while the mining path differs from the
+    /// reference path, so it can never be reported on with the native loop off.
+    #[test]
+    fn startup_line_never_reports_verification_without_the_native_loop() {
+        for &target in &[false, true] {
+            for &verify in &[false, true] {
+                let line = startup_state_line(false, verify, target);
+                assert!(line.contains("Native-loop JIT: off"), "{line}");
+                assert!(
+                    line.contains("share verification: off"),
+                    "verification claimed on with the native loop off: {line}"
+                );
+            }
+        }
+        assert!(startup_state_line(true, false, true).contains("share verification: off"));
     }
 }

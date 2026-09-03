@@ -118,8 +118,8 @@ confirm rather than trust.
 |---|---|---|
 | 1 | `verify_effective` vs `worker_loop` consistency | DONE — R13-F1 |
 | 2 | R12-F1 fix — four combinations, both targets | DONE — R13-VC1, R13-F2 |
-| 3 | R12-F2 fix — help layout | TODO |
-| 4 | "unconditional" removed from comments + AUDIT | TODO |
+| 3 | R12-F2 fix — help layout | DONE — R13-VC2, R13-F3 |
+| 4 | "unconditional" removed from comments + AUDIT | DONE — R13-VC3 |
 | 5 | Test + clippy claims reproduced | TODO |
 
 ## Round 13 findings
@@ -235,3 +235,61 @@ that makes the swallow visible as a defect. A fix that only qualifies the
 startup line would still leave the JIT failure itself unlogged.
 **Confidence:** HIGH on the code path (read end to end); the failure is
 untriggered here — I did not force an mmap failure.
+
+### R13-VC2 — item 3: R12-F2 is properly closed. The note now reads as documentation, not as a flag.
+Rendered from the built binary (`./target/release/minertim` with no args):
+```
+  --verify-shares on|off  Re-check every candidate share on the reference
+                    ...  Also MINERTIM_VERIFY_SHARES.
+
+Switch values (--native-loop, --verify-shares):
+  on/off, true/false, yes/no, 1/0. An empty value is treated as unset: it is
+  ignored with a warning rather than overriding an earlier setting, so
+  `--native-loop "$VAR"` with $VAR unset will not silently undo one.
+```
+Both halves of R12-F2 are fixed: it is now **below** both switches it describes
+(so "Switch values" has its antecedent), and it is a titled paragraph — blank
+line, heading at column 0 where every flag entry starts at column 2, body
+indented uniformly — so it cannot be mistaken for an option. Naming the two
+switches in the heading is better than the generic "Switch values" I asked for.
+
+### R13-F3 — Two small carry-overs in `--help`, neither behavioural  [TRIVIAL]
+**Where:** `src/bin/minertim.rs:20` (usage synopsis) and `:47-51` (the new note).
+1. Round 12's "small content gap" is unaddressed: the example is still
+   flag-only (`--native-loop "$VAR"`), while the environment variables warn and
+   behave identically and `MINERTIM_NATIVE_LOOP="$NL"` is the shape that was
+   silent until round 12's commit. Half a clause.
+2. The usage synopsis reads
+   `<pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]` —
+   `--verify-shares` is missing from it, though it has a full entry below and is
+   the switch that guards share correctness. Pre-existing, not introduced by
+   `6765b17`; not previously filed in rounds 5-12 (checked the archive).
+**Confidence:** HIGH — read from rendered output and source.
+
+### R13-VC3 — item 4: "unconditional" is gone from the code, and the AUDIT is handled correctly.
+- **Code:** the only remaining occurrence in `minertim.rs` is at `:90`, where the
+  comment now says the opposite of the old claim — *"it is NOT unconditional,
+  and an earlier comment wrongly said so: `RUST_LOG=warn` suppresses it"*, plus
+  the actionable consequence. That is the R12-F1(a) correction landing exactly
+  where the next reader is. The other four tree-wide hits (`vm.rs:1228`,
+  `tests.rs:592`, `jit/compiler.rs:775`, `jit/aarch64.rs:537`) are unrelated uses
+  of the word. `DESIGN_JIT_NATIVE_LOOP.md` has none.
+- **AUDIT:** `AUDIT.md:2401` still reads *"One unconditional line now reports both
+  switches at startup"*. That is the **round-11** entry, and leaving it is right:
+  `CLAUDE.md` requires the audit to be append-only ("Do not delete prior audit
+  history; append chronologically"), and the round-12 entry corrects it in place
+  42 lines below at `:2443` — *"It is not unconditional. It is `log::info!`..."*.
+  History plus correction, not a stale claim. **No defect.** The brief's "no
+  AUDIT line still claims it" cannot mean rewriting the ledger.
+
+### R13-VC4 — item 2, measured: the four combinations behave exactly as traced.
+Run against the freshly built `6765b17` binary at `RUST_LOG=info` (pool refused,
+which is after the line, so nothing hides it):
+```
+NL=on  VS=on   Native-loop JIT: on  | share verification: on    no warnings
+NL=on  VS=off  Native-loop JIT: on  | share verification: off   verification-DISABLED warn
+NL=off VS=on   Native-loop JIT: off | share verification: off   native-loop-DISABLED warn only
+NL=off VS=off  Native-loop JIT: off | share verification: off   native-loop-DISABLED warn only
+```
+Identical to the table in R13-VC1. In particular no spurious verification
+warning in rows 3-4, which was the specific regression risk in R12-F1's fix.

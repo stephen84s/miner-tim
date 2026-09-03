@@ -33,10 +33,6 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
-        eprintln!("  Switch values are on/off, true/false, yes/no, 1/0. An empty value is");
-        eprintln!("                    treated as unset and ignored (with a warning) rather than");
-        eprintln!("                    overriding an earlier one, so `--flag \"$VAR\"` with $VAR");
-        eprintln!("                    unset does not silently undo a previous setting.");
         eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
         eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
         eprintln!("                    if shares start being rejected, turn it off and restart to");
@@ -48,6 +44,11 @@ fn main() {
         eprintln!("                    because shares are rare. Catches faults in the native-loop");
         eprintln!("                    machinery; both paths share an instruction generator, so a");
         eprintln!("                    fault common to both would pass. Also MINERTIM_VERIFY_SHARES.");
+        eprintln!();
+        eprintln!("Switch values (--native-loop, --verify-shares):");
+        eprintln!("  on/off, true/false, yes/no, 1/0. An empty value is treated as unset: it is");
+        eprintln!("  ignored with a warning rather than overriding an earlier setting, so");
+        eprintln!("  `--native-loop \"$VAR\"` with $VAR unset will not silently undo one.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -76,20 +77,35 @@ fn main() {
     .expect("Failed to set Ctrl+C handler");
 
     let on_off = |b: bool| if b { "on" } else { "off" };
-    // Unconditional: the warnings below only fire in the non-default direction,
-    // so without this the resolved state is inferable only from the *absence*
-    // of a line — which is exactly how an accidentally-flipped switch stays
-    // unnoticed (review round 11).
+
+    // Report the EFFECTIVE state, not the requested one. The native loop is
+    // aarch64-only, so a build elsewhere would otherwise announce "on" while
+    // running the interpreter; and verification is skipped when the native loop
+    // is off, because the mining path is then already the reference path
+    // (review round 12, R12-F1).
+    let native_effective = native_loop && cfg!(target_arch = "aarch64");
+    let verify_effective = verify_shares && native_effective;
+
+    // Emitted at info, which is the default filter — but it is NOT
+    // unconditional, and an earlier comment wrongly said so: `RUST_LOG=warn`
+    // suppresses it. The warnings below fire only in the non-default direction,
+    // so at that level the state is again inferable from the absence of a line.
+    // Anyone running at warn should read the switch back from their own config.
     log::info!(
-        "Native-loop JIT: {} | share verification: {}",
-        on_off(native_loop),
-        on_off(verify_shares),
+        "Native-loop JIT: {}{} | share verification: {}",
+        on_off(native_effective),
+        if native_loop && !native_effective {
+            " (requested on; unavailable on this target)"
+        } else {
+            ""
+        },
+        on_off(verify_effective),
     );
 
     let mut miner = Miner::new(mining_active.clone());
     miner.set_native_loop(native_loop);
     miner.set_verify_shares(verify_shares);
-    if !verify_shares && native_loop {
+    if !verify_shares && native_effective {
         log::warn!(
             "Share verification DISABLED while the native-loop JIT is on. A \
              native-loop defect would now be submitted to the pool as a wrong \

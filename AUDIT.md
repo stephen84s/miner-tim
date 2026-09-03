@@ -2412,3 +2412,69 @@ last-flag-wins holds.
 ### Reviewer's closing position
 Mergeable, no caveat. Nothing outstanding across rounds 5-11 can produce a wrong
 hash, a withheld valid share, or an out-of-bounds access.
+
+---
+
+## 2026-09-03 - Review round 12: two minors, both about honesty of reporting
+
+Second consecutive round in which the applied fixes introduced no regression.
+Round 12 re-derived the `warn_if_empty` rewrite rather than trusting my summary
+and confirmed it behaviour-identical: `warn_if_empty` returned `Some(())`
+unconditionally, so `.and(value)` always evaluated to `value` — the old
+expression *was* `as_bool(v).or(value)` plus a conditional print. The one
+difference (the print now precedes `as_bool`) is unobservable because the two
+printers are mutually exclusive: `as_bool` warns only for unrecognised
+**non-empty** values, `warn_if_empty` only for **empty** ones.
+
+It also checked all ten `parse_switch_with` call sites after the `env_label`
+parameter was inserted by regex — the behavioural risk (`default_on`/`fail_safe`,
+both `bool`) is intact, and the single `true, true` site is the one that carried
+it before.
+
+**One suggestion of mine it declined, correctly.** I had listed double-warning
+as something to avoid when both an env value and a flag are empty. It kept it:
+those are two distinct empty inputs from two distinct sources, and suppressing
+either hides a fact the operator can act on. The labelling added in round 11 is
+what makes the pair readable.
+
+### R12-F1 (fixed): the state line claimed more than it delivered
+Two problems with the startup line added last round.
+
+1. **It is not unconditional.** It is `log::info!`, so `RUST_LOG=warn`
+   suppresses it while the `DISABLED` warning survives — putting that operator
+   back to inferring "on" from the absence of a line, the exact thing the line
+   was added to remove. The comment and the AUDIT both called it unconditional.
+   Wording corrected rather than the level changed: `info` is the default
+   filter, and someone who lowered it asked for less.
+2. **It reported the *requested* setting, not the effective one.** On a
+   non-aarch64 build it would have announced `Native-loop JIT: on` while the
+   interpreter ran. It now reports effective state, and says
+   `(requested on; unavailable on this target)` when those differ.
+
+The same correction applies to verification: it is skipped when the native loop
+is off, because the mining path is then already the reference path — so
+reporting `share verification: on` in that case was misleading. The "verification
+DISABLED" warning is now keyed to the effective state too, and no longer fires
+when the native loop is already off and verification is therefore moot.
+
+### R12-F2 (fixed): the help note read as an option
+The empty-value note was formatted as an entry in the flag list — first line in
+the flag column, continuations in the description column — so it parsed as an
+option named "Switch values are on/off, true/false, yes/no, 1/0." It also
+appeared *before* the two switches it described, so "Switch values" had no
+antecedent. Moved below both and reformatted as a titled paragraph.
+
+### On R11-F3, which the reviewer rated better than what it asked for
+The note at `vm.rs`'s `match dataset` names the test
+`share_verifier_builds_lazily_and_resets_on_seed_rotation` explicitly, so a grep
+from either end finds the other. Worth repeating as a pattern: when a constraint
+in one file is enforced by a test in another, name the test.
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64. Four
+switch/report combinations re-verified against a freshly built binary, including
+that no spurious verification warning fires when the native loop is already off.
+
+### Reviewer's position
+Mergeable, no caveat. Nothing outstanding across rounds 5-12 can produce a wrong
+hash, a withheld valid share, or an out-of-bounds access.

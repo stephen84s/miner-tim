@@ -30,7 +30,7 @@ everything you need is here.
 row not marked DONE, and continue from there.
 
 ## Status
-COMPLETE — rounds 5-11 finished. Round 11 (`6f2b95b..309cfda`): no blockers, no majors, four minors (all documentation/diagnostic). Both round-10 findings verified fixed. **Mergeable.**
+COMPLETE — rounds 5-12 finished. Round 12 (`309cfda..74c8186`): no blockers, no majors, two minors (both about how state is reported). All four round-11 minors verified fixed. **Mergeable.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -2815,3 +2815,80 @@ part I did not think to ask for: it means a `grep` for the test finds the
 constraint, and vice versa, so the link survives someone reading from either
 end. It also cross-references `ShareVerifier::rekey`, closing the loop back to
 the claim.
+
+### R12-VC7 — the claimed state is real, on the right source.
+```
+git diff 74c8186..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+running 127 tests
+test result: ok. 125 passed; 0 failed; 2 ignored   (lib, release, 92.84s)
+test result: ok. 8 passed; 0 failed                (bin)
+clippy --all-targets -- -D warnings                          clean (aarch64)
+clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+125 + 8 as claimed, unchanged from round 11 — this commit adds no tests, which
+is consistent with it being four documentation/diagnostic fixes plus one log
+line.
+
+## Round 12 verdict
+
+**Blockers: none. Majors: none.** Second consecutive round with no regression
+introduced by the fixes.
+
+**All four round-11 minors are properly closed**, and two of them better than I
+asked:
+- **R11-F1** — both arms warn, each labelled with its own source; and the
+  `Option<()>`-through-`.and(value)` trick was unwound rather than left in place.
+  I agree with that call: the density was the mechanism by which R10-F2 hid.
+- **R11-F2** — the honest wording is now in both code comments, with the
+  invariant spelled out (`vm` is assigned only inside the block that calls
+  `rekey`) and the pinning test named (R12-VC5).
+- **R11-F3** — recorded at `vm.rs`'s `match dataset`, the break site, and it
+  **names the test** it would weaken, so the link is greppable from either end
+  (R12-VC6).
+- **R11-F4** — documented in `--help`, correctly not in `mining.conf.example`.
+
+**Two minors:** R12-F1 (the startup state line is `log::info!`, so it vanishes
+under `RUST_LOG=warn` where the `DISABLED` warning survives — the
+inference-from-absence returns for that operator; and it reports the *requested*
+rather than the *effective* setting), R12-F2 (the `--help` note is formatted as
+an item in the flag list and appears before the switches it describes).
+
+**Your four questions:**
+1. **Did the `warn_if_empty` rewrite preserve the composition?** Yes. Re-derived
+   — `Some(())`+`.and(value)` was always just `value`, so the new statement form
+   is the same expression — and re-measured across the round-11 preservation
+   cases, which all still resolve identically. The print-ordering change is
+   unobservable because `as_bool`'s warning (unrecognised non-empty) and
+   `warn_if_empty`'s (empty) are mutually exclusive.
+2. **Did any argument land in the wrong slot?** No. Ten call sites checked
+   individually against their pre-change forms. The cosmetic risk
+   (`flag`/`env_label`, both `&str`) did not occur, and the behavioural risk
+   (`default_on`/`fail_safe`, both `bool`) is intact — eight sites read
+   `true, false` and the single `true, true` is the same site that had it before.
+3. **Does the empty warning fire exactly once, in the right cases?** Yes. Silent
+   when the variable is genuinely unset (`env_value` is `None`, closure never
+   runs), one warning for a set-and-empty env, one for an empty flag. When both
+   are empty it prints two — and I would keep that: they are two distinct inputs
+   from two distinct sources, each named, and suppressing either would hide a
+   fact the operator can act on.
+4. **The startup state line.** Content is right and placement is right — it
+   precedes `Miner::new` and `miner.initialize`, so the realistic failure (the
+   pool connection) cannot hide it. The two caveats are in R12-F1.
+
+**Mergeable: yes**, no caveat. Nothing outstanding across rounds 5-12 can
+produce a wrong hash, a withheld valid share, or an out-of-bounds access. The
+two round-12 minors are both about how state is reported, not what the miner
+does.
+
+## Remaining work if this review is interrupted
+- **Round 12 is complete.** All four priorities plus both lower-priority items
+  answered, two minors filed, full suite and both clippy targets run against
+  `74c8186`'s source.
+- Order I would take the minors: **R12-F1(a)** (either promote the state line or
+  drop the word "unconditional" from the comment and the AUDIT — currently both
+  overstate it), then **R12-F2** (move the `--help` note below `--verify-shares`
+  as a plain paragraph), then **R12-F1(b)** (qualify the line on non-aarch64).
+  All three are one-liners.
+- Unchanged and still open by choice: R5-F2, R5-F4, R5-F6, issue #1 (R5-F7),
+  issue #2 (ARM64 CI), `worker_loop` testability. Issue #2 remains the only one
+  I would not leave open indefinitely.

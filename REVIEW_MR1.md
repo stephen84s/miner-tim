@@ -2221,3 +2221,19 @@ correct now than to explain later.
 - Unchanged from earlier rounds and still open by choice: R5-F2, R5-F4, R5-F6,
   issue #1 (R5-F7), issue #2 (ARM64 CI). Issue #2 remains the only one I would
   not leave open indefinitely.
+
+---
+
+# Round 11 — `6f2b95b..309cfda`
+One commit fixing R10-F2 and R10-F1.
+
+## Round 11 coverage ledger
+| Area | Status | Notes |
+|---|---|---|
+| P1 — `.or(value)` composition in every order | IN PROGRESS | Precedence + warn_if_empty semantics |
+| P2 — last-flag-wins still holds? | NOT STARTED | |
+| P3 — R10-F1 composition test + AUDIT wording | NOT STARTED | |
+| P4 — framing condition placement | NOT STARTED | |
+| Warning text; blank-value docs | NOT STARTED | |
+
+## Round 11 findings

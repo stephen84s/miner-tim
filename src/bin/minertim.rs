@@ -250,8 +250,32 @@ fn parse_donate_level(args: &[String]) -> u8 {
 /// Previously it was silently ignored, which was the one shape that could leave
 /// an operator believing they had changed a setting when they had not.
 fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_safe: bool) -> bool {
+    parse_switch_with(args, flag, std::env::var(env).ok().as_deref(), default_on, fail_safe)
+}
+
+/// The switch logic, with the environment value injected.
+///
+/// Split out so tests never call `std::env::set_var`. That call is unsound if
+/// any other thread is inside `getenv` while it reallocates `environ`, and this
+/// binary's other switch tests all reach `std::env::var` through
+/// `parse_switch` — so an earlier "no other test reads the environment"
+/// justification was simply wrong (review round 9, R9-F5). Injection removes
+/// the hazard rather than reasoning about it.
+fn parse_switch_with(
+    args: &[String],
+    flag: &str,
+    env_value: Option<&str>,
+    default_on: bool,
+    fail_safe: bool,
+) -> bool {
     let word = if fail_safe { "ON" } else { "OFF" };
     let as_bool = |v: &str| -> Option<bool> {
+        // An empty value is "unset", not a parse failure: `NATIVE_LOOP=` in
+        // mining.conf and an unset shell variable both arrive here, and neither
+        // expresses an intent to change anything.
+        if v.trim().is_empty() {
+            return None;
+        }
         match v.trim().to_ascii_lowercase().as_str() {
             "on" | "true" | "yes" | "1" => Some(true),
             "off" | "false" | "no" | "0" => Some(false),
@@ -265,7 +289,7 @@ fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_s
         }
     };
 
-    let mut value = std::env::var(env).ok().and_then(|v| as_bool(&v));
+    let mut value = env_value.and_then(as_bool);
     let eq_prefix = format!("{flag}=");
 
     let mut i = 0;
@@ -317,7 +341,7 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_native_loop, parse_switch, parse_verify_shares};
+    use super::{parse_native_loop, parse_switch_with, parse_verify_shares};
 
     fn args(extra: &[&str]) -> Vec<String> {
         let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
@@ -369,34 +393,35 @@ mod tests {
     }
 
     /// The environment-variable branch, and that an explicit flag beats it.
-    /// Uses a dedicated variable name so it cannot collide with a real one or
-    /// with another test running in parallel.
+    ///
+    /// Injects the value rather than calling `std::env::set_var`, which is
+    /// unsound under a concurrent `getenv` — and every other switch test in
+    /// this binary reaches `std::env::var` through `parse_switch` (R9-F5).
     #[test]
     fn switch_reads_the_environment_and_the_flag_overrides_it() {
-        const VAR: &str = "MINERTIM_SWITCH_ENV_BRANCH_TEST";
-        // SAFETY: `set_var` is unsound if another thread is in `getenv` while
-        // it reallocates `environ` — the hazard is concurrency, not the name.
-        // A unique name avoids clobbering another test's value but does NOT
-        // make this sound. It is acceptable here because no other test in this
-        // binary reads the environment: `parse_switch` is the only reader and
-        // is exercised nowhere else, and `env_logger` initialises in `main`,
-        // which tests do not run. Adding an environment read elsewhere in this
-        // binary would invalidate that and make this test a flake source.
-        unsafe { std::env::set_var(VAR, "off") };
-        assert!(!parse_switch(&args(&[]), "--x", VAR, true, false), "env beats default");
-        assert!(parse_switch(&args(&["--x", "on"]), "--x", VAR, true, false), "flag beats env");
+        fn env(v: &str) -> Option<&str> {
+            Some(v)
+        }
+        assert!(!parse_switch_with(&args(&[]), "--x", env("off"), true, false), "env beats default");
+        assert!(
+            parse_switch_with(&args(&["--x", "on"]), "--x", env("off"), true, false),
+            "flag beats env"
+        );
 
         // An unparseable env value takes the switch's fail-safe direction, not
-        // the default — and that direction is per-switch (R7-F2). An empty
-        // MINERTIM_VERIFY_SHARES= reaches this path with no typo at all.
-        unsafe { std::env::set_var(VAR, "wat") };
-        assert!(!parse_switch(&args(&[]), "--x", VAR, true, false));
-        assert!(parse_switch(&args(&[]), "--x", VAR, true, true));
-        unsafe { std::env::set_var(VAR, "") };
-        assert!(parse_switch(&args(&[]), "--x", VAR, true, true), "empty env must not disarm");
+        // the default — and that direction is per-switch (R7-F2).
+        assert!(!parse_switch_with(&args(&[]), "--x", env("wat"), true, false));
+        assert!(parse_switch_with(&args(&[]), "--x", env("wat"), true, true));
 
-        unsafe { std::env::remove_var(VAR) };
-        assert!(parse_switch(&args(&[]), "--x", VAR, true, false), "default applies once unset");
+        // An EMPTY value is "unset", not a typo. `NATIVE_LOOP=` in mining.conf
+        // and an unset shell variable both land here, and neither expresses an
+        // intent to change anything — so both must fall through to the default
+        // rather than to the fail-safe direction, which would silently disable
+        // the native loop for anyone who left the key blank.
+        assert!(parse_switch_with(&args(&[]), "--x", env(""), true, false), "empty env is unset");
+        assert!(parse_switch_with(&args(&[]), "--x", env("  "), true, false), "blank env is unset");
+
+        assert!(parse_switch_with(&args(&[]), "--x", None, true, false), "default applies unset");
     }
 
     #[test]

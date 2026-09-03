@@ -1719,6 +1719,19 @@ impl RandomXVm {
         self.dataset = dataset;
     }
 
+    /// Whether this VM would use the native loop. Test-only, and it exists for
+    /// one specific reason: the share verifier's whole premise is that its VM is
+    /// on the *reference* path, and no test could detect that premise breaking.
+    /// Both paths produce identical hashes, so a comparison against a reference
+    /// VM still passes if the verifier silently switched to the native loop —
+    /// at which point verification compares the native loop against itself and
+    /// reports a clean counter forever. That is structurally the same defect as
+    /// the A/B benchmark measuring one arm against itself (review round 5, F1).
+    #[cfg(test)]
+    pub(crate) fn uses_native_loop(&self) -> bool {
+        self.use_native_loop
+    }
+
     /// Enable or disable the native-loop JIT path.
     ///
     /// Takes effect only where every precondition the emitted code assumes

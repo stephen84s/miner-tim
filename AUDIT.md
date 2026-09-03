@@ -2196,3 +2196,84 @@ Named here rather than implied to be covered.
 
 ### Verification
 124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 9 applied: seven minors, one of which outranked its severity
+
+Round 9 covered the four previously-unreviewed commits. **No blockers, no
+majors**, and it independently confirmed the `ShareVerifier` extraction is
+behaviour-preserving on every reachable path (drop timing, build timing, key
+derivation, dataset move, and the relationship to the
+`job.seed_hash != current_key || vm.is_none()` guard).
+
+### The reviewer measured something that reframes the whole feature
+**In full mode the key has no effect on the hash at all.** Two different keys
+over the same dataset produce byte-identical hashes — because the 2026-09-02
+change removed the Argon2d cache and `ss_programs` are light-mode only. So the
+*dataset* is the sole thing that can make a verifier stale. Every description of
+this as "keyed to the seed" was imprecise; it is keyed to the dataset.
+
+### R9-F7 — the one to act on first: an arm assumed rather than asserted
+Nothing asserted that the verifier's VM is on the **reference** path. The
+rotation test compared its output against a freshly built
+`set_native_loop(false)` VM — but that assertion *cannot fail* if
+`ShareVerifier::reference` lost its `set_native_loop(false)` line, because both
+paths produce identical hashes by construction. Verification would compare the
+native loop against itself, report a clean counter forever, and every test,
+clippy and CI would stay green.
+
+**That is structurally the round-5 F1 defect** — the A/B benchmark measuring one
+arm against itself — in the code rather than the benchmark. The line is present
+and correct; this was a missing guard. Added
+`RandomXVm::uses_native_loop()` and `ShareVerifier::vm_is_on_reference_path()`,
+asserted in the rotation test.
+
+### R9-F1/R9-F6 — `is_armed()` silently retired the fail-open branch
+Passing `is_armed()` to `classify_share` made `is_armed() == true` imply
+`reference()` is `Some`, so `SubmitVerifierUnavailable` became unreachable and
+its `log::warn!` dead. No share was ever at risk (both verdicts submit), but a
+defence that cannot be reached is not a defence, and AUDIT's "no behaviour
+change" was inaccurate for that row. `worker_loop` now passes `is_enabled()`;
+`is_armed()` is retained as a test-only predicate.
+
+### R9-F2 — the rotation test could not distinguish "adopted" from "ignored"
+It re-keyed with the *same* `Arc`, making `holds_dataset` a `ptr_eq(x, x)`. Given
+the finding above — that the dataset is the only staleness vector — the test's
+emphasis was inverted relative to the risk: the untested half that sounds
+frightening (the key) is inert, and the one that sounds like bookkeeping is
+load-bearing. The fix cost nothing: both 2 GiB datasets already existed as
+`LazyLock` statics in the same binary. `native_loop_test_dataset()` is hoisted to
+the top level, the rotation now goes between two genuinely different datasets,
+and the test asserts the post-rotation hash matches the *new* dataset, differs
+from the pre-rotation hash, and that the old `Arc` is no longer held.
+
+### R9-F5 — a SAFETY comment that was wrong twice
+Round 8 corrected the comment to name concurrency as the hazard, then justified
+it with "no other test in this binary reads the environment". **Six do** — every
+switch test reaches `std::env::var` through `parse_switch`. Rather than write a
+third justification, the hazard is removed: `parse_switch_with` takes the
+environment value as a parameter, `parse_switch` is a thin wrapper that reads it,
+and no test calls `std::env::set_var` at all.
+
+That refactor also surfaced a real behaviour question the old test had encoded
+backwards: **an empty value is "unset", not a parse failure.** `NATIVE_LOOP=` in
+`mining.conf` and an unset shell variable both arrive as an empty string, and
+neither expresses an intent to change anything — so both now fall through to the
+default rather than to the fail-safe direction, which would have silently
+disabled the native loop for anyone leaving the key blank. The shipped
+`mining.conf.example` has `NATIVE_LOOP=` blank by default, so this was reachable
+by simply copying the example file.
+
+### R9-F3 — the `should_panic` substring stopped short of the repaired text
+The same blind spot that let the mangled panic message through: the expected
+substring ended before the damage. It now deliberately spans the line break.
+
+### R9-F4 — tests gated on aarch64 for a reason that is not true
+The `ShareVerifier` tests were gated on the stated grounds that full mode needs
+the JIT. It does not — full mode runs the interpreter on other targets. The gate
+also saved nothing, since two ungated tests already force the same dataset on
+CI. Ungated: these are among the few new tests CI *can* actually validate.
+
+### Verification
+124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.

@@ -24,6 +24,20 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// The full dataset for `b"native loop test key"` — the second of the two the
+/// test binary builds. Hoisted to the top level so the native-loop differential
+/// tests and the verifier-rotation test share one build rather than forcing a
+/// third 2 GiB allocation.
+fn native_loop_test_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
+    static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
+        std::sync::LazyLock::new(|| {
+            let vm_light = vm::RandomXVm::new(b"native loop test key");
+            let (cache, programs) = vm_light.cache_and_programs();
+            std::sync::Arc::new(super::dataset::RandomXDataset::generate(cache, programs, 8))
+        });
+    DS.clone()
+}
+
 /// The full dataset for `b"test key 000"` — the key behind every known-answer
 /// vector in this file. It is 2 GiB and three tests need it, so it is built
 /// once per test binary rather than once per test.
@@ -500,7 +514,10 @@ mod full_hash_tests {
     /// rather than as an out-of-bounds index inside a spawned worker thread
     /// (MR !1 review round 8, R8-F1).
     #[test]
-    #[should_panic(expected = "needs a light-mode VM's Argon2d cache")]
+    // The expected substring deliberately spans the line break in the message.
+    // The previous one stopped short of it, which is exactly why a 14-space run
+    // in that literal went undetected by this very test (review round 9, R9-F3).
+    #[should_panic(expected = "Argon2d cache; got an empty one")]
     fn dataset_generation_rejects_a_full_mode_vms_empty_cache() {
         let vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
         let (cache, programs) = vm_full.cache_and_programs();
@@ -611,7 +628,6 @@ mod full_hash_tests {
     /// full mode the dataset determines the hash, so a stale one would disagree
     /// with **every** share from that point on, looking exactly like the JIT
     /// fault it is supposed to detect.
-    #[cfg(target_arch = "aarch64")]
     #[test]
     fn share_verifier_builds_lazily_and_resets_on_seed_rotation() {
         use crate::miner::ShareVerifier;
@@ -648,19 +664,53 @@ mod full_hash_tests {
             "verifier is not computing the reference-path hash"
         );
 
-        // A rotation must drop the cached VM and adopt the new dataset.
-        v.rekey(b"another seed", ds.clone());
+        // The verifier must be on the REFERENCE path. Nothing else can catch
+        // this: both paths produce identical hashes, so the comparison above
+        // still passes if `set_native_loop(false)` were dropped — at which
+        // point verification compares the native loop against itself and
+        // reports a clean counter forever (review round 9, R9-F7).
+        assert_eq!(
+            v.vm_is_on_reference_path(),
+            Some(true),
+            "the verifier's VM is not on the reference path — verification \
+             would be comparing the native loop against itself"
+        );
+
+        // A rotation must drop the cached VM and adopt the new dataset. Rotate
+        // to a genuinely DIFFERENT dataset: re-keying with the same `Arc` made
+        // `holds_dataset` a `ptr_eq(x, x)` that could not tell "adopted" from
+        // "ignored the argument" (R9-F2). The dataset is the only thing that
+        // can make a verifier stale — in full mode the key does not affect the
+        // hash at all, since the Argon2d cache is not built and the
+        // SuperscalarHash programs are light-mode only.
+        let other = native_loop_test_dataset();
+        v.rekey(b"native loop test key", other.clone());
         assert!(
             !v.has_cached_vm(),
             "cached VM survived a seed rotation — it would verify against the \
              previous seed's dataset and withhold every share"
         );
-        assert!(v.holds_dataset(&ds));
+        assert!(v.holds_dataset(&other), "the new dataset was not adopted");
+        assert!(!v.holds_dataset(&ds), "still holding the old dataset");
+
+        // And it must now hash against the new dataset, not the old one.
+        let after = v.reference(&blob).expect("no reference after rotation");
+        let mut other_vm = vm::RandomXVm::new_full(b"native loop test key", other);
+        other_vm.set_native_loop(false);
+        assert_eq!(
+            hex_encode(&after),
+            hex_encode(&other_vm.calculate_hash(&blob)),
+            "verifier is still hashing against the pre-rotation dataset"
+        );
+        assert_ne!(
+            hex_encode(&after),
+            hex_encode(&got),
+            "the two datasets produced the same hash; this test proves nothing"
+        );
     }
 
     /// A disabled verifier must never build a VM or produce a reference, so the
     /// fallback switch really does cost nothing.
-    #[cfg(target_arch = "aarch64")]
     #[test]
     fn disabled_share_verifier_does_no_work() {
         use crate::miner::ShareVerifier;
@@ -1129,12 +1179,7 @@ mod native_loop_diff_tests {
     /// per test function, which meant two concurrent 2 GiB allocations plus two
     /// 256 MiB Argon2d caches when both tests ran.
     fn test_dataset() -> Arc<RandomXDataset> {
-        static DS: std::sync::LazyLock<Arc<RandomXDataset>> = std::sync::LazyLock::new(|| {
-            let vm_light = vm::RandomXVm::new(b"native loop test key");
-            let (cache, programs) = vm_light.cache_and_programs();
-            Arc::new(RandomXDataset::generate(cache, programs, 8))
-        });
-        DS.clone()
+        super::native_loop_test_dataset()
     }
 
     /// The C1 memory-safety worst case, executed rather than argued.

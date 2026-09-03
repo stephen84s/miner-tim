@@ -421,20 +421,41 @@ impl ShareVerifier {
         Some(vm.calculate_hash(blob))
     }
 
-    /// Whether a mismatch could be detected right now: enabled, and holding a
-    /// dataset to check against.
+    /// Whether verification is switched on for this worker.
+    ///
+    /// Deliberately **not** `enabled && dataset.is_some()`. Using the stricter
+    /// form as `classify_share`'s first argument made
+    /// `SubmitVerifierUnavailable` unreachable — `is_armed` would have implied
+    /// `reference()` is `Some` — which silently retired the fail-open branch
+    /// instead of enforcing it (review round 9, R9-F1). No share was at risk,
+    /// since both verdicts submit, but a defence that cannot be reached is not
+    /// a defence.
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Whether a mismatch could actually be detected right now: switched on
+    /// *and* holding a dataset. Test-only — deliberately not what
+    /// `worker_loop` passes to `classify_share`; see `is_enabled`.
+    #[cfg(test)]
     pub(crate) fn is_armed(&self) -> bool {
         self.enabled && self.dataset.is_some()
     }
 
-    // aarch64-gated to match their only callers: the tests need a real
-    // full-mode VM, which means the JIT, which is aarch64-only.
-    #[cfg(all(test, target_arch = "aarch64"))]
+    #[cfg(test)]
     pub(crate) fn has_cached_vm(&self) -> bool {
         self.vm.is_some()
     }
 
-    #[cfg(all(test, target_arch = "aarch64"))]
+    /// Whether the cached VM is on the reference path. `None` if none is built.
+    /// See `RandomXVm::uses_native_loop` for why this is asserted rather than
+    /// assumed (R9-F7).
+    #[cfg(test)]
+    pub(crate) fn vm_is_on_reference_path(&self) -> Option<bool> {
+        self.vm.as_ref().map(|v| !v.uses_native_loop())
+    }
+
+    #[cfg(test)]
     pub(crate) fn holds_dataset(&self, other: &Arc<RandomXDataset>) -> bool {
         self.dataset.as_ref().is_some_and(|d| Arc::ptr_eq(d, other))
     }
@@ -639,7 +660,10 @@ fn worker_loop(
             // The decision itself lives in `classify_share` so every branch is
             // reachable from a test; only the expensive recomputation is here.
             let reference = verifier.reference(&job_blob_current);
-            let verdict = classify_share(verifier.is_armed(), &hash, reference.as_ref());
+            // `is_enabled`, not `is_armed`: the distinction is what keeps the
+            // "verification wanted but unavailable" case reachable so it can
+            // fail open loudly rather than being folded into "not verified".
+            let verdict = classify_share(verifier.is_enabled(), &hash, reference.as_ref());
             match verdict {
                 ShareVerdict::Withhold => {
                     stats.verify_failures.fetch_add(1, Ordering::Relaxed);

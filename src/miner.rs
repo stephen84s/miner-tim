@@ -392,9 +392,18 @@ impl ShareVerifier {
 
     /// Point the verifier at a new seed and its dataset.
     ///
-    /// **Drops any cached VM.** In full mode the dataset is what determines the
-    /// hash, so a VM held across a rotation would verify against the previous
-    /// seed's data and disagree with every share the miner found.
+    /// **Drops any cached VM.** In full mode the *dataset* is what determines
+    /// the hash — the key reaches `RandomXVm` only through `cache_memory` and
+    /// `ss_programs`, and the sole read of either during hashing is the
+    /// light-mode arm of `execute_vm_inner`'s `match dataset`. So a VM held
+    /// across a rotation would verify against the previous seed's data and
+    /// disagree with every share the miner found.
+    ///
+    /// That holds only while the full/light split stays absolute. A future
+    /// lazily-filled dataset with a compute-on-miss path would make the key
+    /// load-bearing again and silently weaken the rotation test, which
+    /// deliberately leans on the dataset being the only staleness vector
+    /// (review round 10).
     pub(crate) fn rekey(&mut self, key: &[u8], dataset: Arc<RandomXDataset>) {
         self.vm = None;
         self.dataset = Some(dataset);
@@ -909,6 +918,36 @@ mod verify_tests {
                 "byte {i} differing was not caught"
             );
         }
+    }
+
+    /// The fail-open arm, composed the way `worker_loop` composes it.
+    ///
+    /// Round 9 restored the *independence* of `classify_share`'s two arguments
+    /// by passing `is_enabled()` rather than `is_armed()`. Round 10 pointed out
+    /// that this makes the arm reachable as a matter of logic but still not in
+    /// the current binary, because `vm.is_some()` implies `rekey` has run — so
+    /// the defence is real only for future edits. This pins the composition
+    /// itself, with no dataset and in microseconds, so the arm cannot quietly
+    /// become unsatisfiable again (R10-F1).
+    #[test]
+    fn an_enabled_but_unfed_verifier_fails_open() {
+        let mut v = ShareVerifier::new(true);
+        assert!(v.is_enabled(), "enabled verifier reported itself disabled");
+        assert!(!v.is_armed(), "armed with no dataset");
+
+        let reference = v.reference(&[0u8; 76]);
+        assert_eq!(reference, None, "produced a reference with no dataset");
+
+        assert_eq!(
+            classify_share(v.is_enabled(), &A, reference.as_ref()),
+            ShareVerdict::SubmitVerifierUnavailable,
+            "verification was wanted but unavailable; this must fail OPEN and \
+             be reported, not be folded into the unverified case"
+        );
+        assert!(
+            classify_share(v.is_enabled(), &A, reference.as_ref()).should_submit(),
+            "a genuine share was withheld because the verifier was unavailable"
+        );
     }
 
     /// A fresh `Miner` has no stats yet; the counter must read 0 rather than

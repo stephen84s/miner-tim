@@ -261,6 +261,21 @@ fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_s
 /// `parse_switch` — so an earlier "no other test reads the environment"
 /// justification was simply wrong (review round 9, R9-F5). Injection removes
 /// the hazard rather than reasoning about it.
+/// Warn when a switch is handed an empty value, and return `Some(())` so the
+/// caller's `.and(value)` keeps whatever was already resolved.
+///
+/// Silence here is what made R10-F2 hard to notice: the operator wrote an
+/// explicit setting, it was discarded, and nothing said so.
+fn warn_if_empty(flag: &str, v: &str) -> Option<()> {
+    if v.trim().is_empty() {
+        eprintln!(
+            "warning: {flag} given an empty value - ignoring it; the previous \
+             setting or the default applies. Use on|off."
+        );
+    }
+    Some(())
+}
+
 fn parse_switch_with(
     args: &[String],
     flag: &str,
@@ -270,9 +285,19 @@ fn parse_switch_with(
 ) -> bool {
     let word = if fail_safe { "ON" } else { "OFF" };
     let as_bool = |v: &str| -> Option<bool> {
-        // An empty value is "unset", not a parse failure: `NATIVE_LOOP=` in
-        // mining.conf and an unset shell variable both arrive here, and neither
-        // expresses an intent to change anything.
+        // An empty value is "unset" — it declines to have an opinion rather
+        // than failing to parse. The path that produces one is a wrapper script
+        // writing `--native-loop "$NL"` with `$NL` unset: quoted, the shell
+        // leaves an empty argument. (Unquoted, the token vanishes entirely and
+        // hits the warned bare-flag arm below.) `NATIVE_LOOP=` in mining.conf
+        // does NOT reach here — that is a Makefile variable, and
+        // `$(if $(NATIVE_LOOP),...)` suppresses the flag altogether.
+        //
+        // Returning `None` here is only safe because both call sites below
+        // preserve any previously resolved value with `.or(value)`. Without
+        // that, an empty token ERASES an explicit setting: `--native-loop off
+        // --native-loop ""` resolved to `on`, silently (review round 10,
+        // R10-F2).
         if v.trim().is_empty() {
             return None;
         }
@@ -295,10 +320,11 @@ fn parse_switch_with(
     let mut i = 0;
     while i < args.len() {
         if let Some(v) = args[i].strip_prefix(&eq_prefix) {
-            value = as_bool(v);
+            // `.or(value)`: an empty value must not erase an earlier one.
+            value = as_bool(v).or(warn_if_empty(flag, v).and(value));
         } else if args[i] == flag {
             match args.get(i + 1) {
-                Some(v) => value = as_bool(v),
+                Some(v) => value = as_bool(v).or(warn_if_empty(flag, v).and(value)),
                 None => {
                     eprintln!(
                         "warning: {flag} given with no value - assuming {word} \
@@ -383,6 +409,34 @@ mod tests {
     #[test]
     fn native_loop_with_no_value_fails_safe_to_off() {
         assert!(!parse_native_loop(&args(&["--native-loop"])));
+    }
+
+    /// An empty value declines to have an opinion; it must NOT erase one.
+    ///
+    /// Introduced as a regression by the round-9 fix and caught in round 10
+    /// (R10-F2): `--native-loop off --native-loop ""` resolved to **on**,
+    /// silently. The realistic source is a wrapper writing
+    /// `--native-loop "$NL"` with `$NL` unset — and the *careful* quoting style
+    /// is the one that breaks, since unquoted the token vanishes and hits the
+    /// warned bare-flag path instead. Two opposite outcomes decided by quoting.
+    #[test]
+    fn an_empty_value_does_not_erase_an_explicit_setting() {
+        // Explicit flag, then an empty one: the explicit setting stands.
+        assert!(!parse_native_loop(&args(&["--native-loop", "off", "--native-loop", ""])));
+        assert!(!parse_native_loop(&args(&["--native-loop=off", "--native-loop="])));
+        // An explicit `on` likewise survives.
+        assert!(parse_native_loop(&args(&["--native-loop", "on", "--native-loop", ""])));
+
+        // An empty environment value must not erase an explicit flag either,
+        // nor vice versa.
+        assert!(
+            !parse_switch_with(&args(&["--x", ""]), "--x", Some("off"), true, false),
+            "an empty flag erased an explicit environment setting"
+        );
+
+        // With nothing else to fall back on, empty means "unset" -> default.
+        assert!(parse_native_loop(&args(&["--native-loop", ""])));
+        assert!(parse_switch_with(&args(&[]), "--x", Some(""), true, false));
     }
 
     /// Last flag wins, so a wrapper script can append an override.

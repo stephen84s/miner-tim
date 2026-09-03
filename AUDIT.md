@@ -2277,3 +2277,74 @@ CI. Ungated: these are among the few new tests CI *can* actually validate.
 
 ### Verification
 124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 10: caught a regression I introduced while fixing round 9
+
+Round 10 was sent automatically rather than on request, per the new standing
+practice. It closed six of the seven round-9 minors cleanly and found one major
+— **a regression created by the round-9 fix itself**.
+
+### R10-F2 (MAJOR, fixed): an empty value erased an explicit setting
+Round 9 made `as_bool` return `None` for an empty value ("unset", not a parse
+failure). That was the right semantics but the wrong mechanics: round 7 had
+earlier replaced `value = as_bool(v).or(value)` with a bare assignment, which
+was safe *only because* `as_bool` could never return `None` at the time. Making
+it return `None` without restoring `.or(value)` meant an empty token no longer
+declined to have an opinion — it **erased** the previous one.
+
+Measured on the shipped binary before the fix:
+
+| Input | Result |
+|---|---|
+| `MINERTIM_NATIVE_LOOP=off --native-loop ""` | native loop **ON**, silently |
+| `--native-loop off --native-loop ""` | native loop **ON**, silently |
+
+The operator set the switch explicitly to `off` and got `on`, with no
+diagnostic. The realistic source is a wrapper writing `--native-loop "$NL"` with
+`$NL` unset — and **the careful quoting style is the broken one**: quoted, the
+shell leaves an empty argument; unquoted, the token vanishes and correctly hits
+the warned bare-flag path. Two opposite outcomes decided by quoting.
+
+Fixed by restoring `.or(value)` on both flag arms and warning on an empty value,
+since silence was what made it hard to notice. All six cases re-verified against
+a freshly built binary, and `an_empty_value_does_not_erase_an_explicit_setting`
+pins them.
+
+**Also corrected:** my code comment claimed `NATIVE_LOOP=` in `mining.conf`
+reaches this path. It does not — that is a Makefile variable, and
+`$(if $(NATIVE_LOOP),...)` suppresses the flag entirely. The other half of the
+reasoning (unset shell variable) is real and is the path that misfired. The
+reviewer verified this against the Makefile rather than accepting the comment.
+
+### R10-F1 (minor, fixed): a defence that is real only for future edits
+Passing `is_enabled()` did restore the *logical* independence of
+`classify_share`'s arguments. But `SubmitVerifierUnavailable` is still
+unreachable in `worker_loop` for an unrelated reason: `vm` is assigned only
+inside the block that calls `rekey`, so `vm.is_some()` implies a dataset exists.
+The AUDIT and comments read as though the arm were live. It is not — it is a
+guard against future edits, which is worth having but should be described
+honestly. `an_enabled_but_unfed_verifier_fails_open` now pins the composition in
+microseconds with no dataset.
+
+### Confirmed, having asked for it to be attacked
+- **I did not invert R7-F2.** An empty `MINERTIM_VERIFY_SHARES=` still leaves
+  the safety net on — measured, not reasoned.
+- **The "keyed to the dataset" framing is correct**, and the reviewer enumerated
+  every route rather than relying on its earlier measurement: the key reaches
+  `RandomXVm` only via `cache_memory` and `ss_programs`, and the single read of
+  either during hashing is the light-mode arm of one `match`. True for rx/2 too.
+  **One condition now recorded in the code:** this holds only while the
+  full/light split stays absolute. A future lazily-filled dataset with a
+  compute-on-miss path would make the key load-bearing again and silently weaken
+  the rotation test.
+- The dataset hoist is clean — same key, same construction, exactly two
+  `LazyLock`s, differential tests on byte-identical data.
+- `vm_is_on_reference_path()` is **not** vacuous on x86_64: the field and setter
+  are ungated, so it passes for the right reason and still fails if the guarded
+  line is dropped. Since CI can never run the JIT, this is one of the few
+  native-loop regressions CI *can* catch — ungating it was right.
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64.

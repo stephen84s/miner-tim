@@ -1817,3 +1817,44 @@ behaviour change" is exactly the kind of statement this log has been careful to
 get right elsewhere. Suggested wording: *"No change to any reachable action; one
 already-unreachable diagnostic branch became structurally unreachable."*
 **Confidence:** HIGH.
+
+### R9-F7 — Nothing tests that the verifier is actually on the *reference* path; a dropped `set_native_loop(false)` would be a silent no-op, which is precisely the round-5 F1 failure  [MINOR, but note the history]
+**Where:** `src/miner.rs` `ShareVerifier::reference`;
+`src/randomx/tests.rs` `share_verifier_builds_lazily_and_resets_on_seed_rotation`
+**Claim:** The verifier's whole value rests on one line inside the lazy builder:
+```rust
+let mut v = RandomXVm::new_full(key, ds);
+v.set_native_loop(false);          // <-- the entire point
+```
+It is present and correct. But **no test can detect its removal.** The rotation
+test asserts the verifier's output equals a freshly built VM's hash:
+```rust
+let mut expected_vm = vm::RandomXVm::new_full(b"test key 000", ds.clone());
+expected_vm.set_native_loop(false);
+assert_eq!(hex_encode(&got), hex_encode(&expected_vm.calculate_hash(&blob)), ...);
+```
+That assertion cannot fail if the line is dropped, because the native loop and
+the body JIT produce **identical** hashes — which is the premise of the entire
+MR. Both sides would simply be the native loop, and the test would still pass.
+`disabled_share_verifier_does_no_work` never builds a VM, and
+`verifier_withholds_a_hash_that_does_not_match_the_reference` drives
+`classify_share` directly rather than `ShareVerifier`. So the property "the
+reference arm is the reference path" is asserted nowhere.
+
+**This is structurally the same defect as round-5 F1**, where the A/B benchmark's
+baseline arm was silently the native loop because the arm was inferred from a
+default rather than asserted. The consequence here is the same shape: share
+verification would compare the native loop against itself, report a clean
+`verify_failures` counter forever, and provide zero protection — while every
+test, clippy and CI stayed green. Given this branch has already been burned by
+exactly this pattern once, I would not leave it unasserted.
+
+**Cheap fix (not a fix I am making):** a test-only accessor on `ShareVerifier`
+returning the inner VM's `use_native_loop` — or making
+`RandomXVm::native_loop_enabled()` test-visible — and asserting it is `false`
+after the first `reference()`. Two lines, no dataset cost beyond what the test
+already pays.
+**Failure scenario:** none today; the line is present. This is a missing guard
+against a specific, historically-demonstrated regression, not a live bug.
+**Confidence:** HIGH — the identical-hash premise is what makes the existing
+assertion blind, and that premise is verified elsewhere in this very file.

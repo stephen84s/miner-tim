@@ -2,7 +2,7 @@
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-COMPLETE — rounds 5, 6, 7 and 8 all finished. Round 8 (final pass, e6724ce..3c281dc): no blockers, no majors. **Mergeable.**
+COMPLETE — rounds 5-9 finished. Round 9 (`3c281dc..5fe7eb3`): no blockers, no majors, seven minors. **Mergeable.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -1566,13 +1566,13 @@ extraction — the substantive one).
 ## Round 9 coverage ledger
 | Area | Commit | Status | Notes |
 |---|---|---|---|
-| P1 — is the extraction behaviour-preserving? | 5fe7eb3 | IN PROGRESS | Live-bug risk on the default mining path |
-| P2 — do the tests pin the stale-verifier hazard? | 5fe7eb3 | NOT STARTED | |
-| P3 — `is_armed()` as the `classify_share` predicate | 5fe7eb3 | NOT STARTED | Possible silently-retired branch |
-| P4 — `generate`'s hard assert on a public API | 914fe88 | NOT STARTED | |
-| Panic-message repair + branch sweep | ea354ee | NOT STARTED | |
-| `#[cfg(all(test, aarch64))]` on the test accessors | 5fe7eb3 | NOT STARTED | |
-| AUDIT "no behaviour change" claim | 5fe7eb3 | NOT STARTED | |
+| P1 — is the extraction behaviour-preserving? | 5fe7eb3 | DONE | R9-VC1; one exception, R9-F1 |
+| P2 — do the tests pin the stale-verifier hazard? | 5fe7eb3 | DONE | R9-F2: half of it; key measured irrelevant |
+| P3 — `is_armed()` as the `classify_share` predicate | 5fe7eb3 | DONE | R9-F1: branch is now unreachable |
+| P4 — `generate`'s hard assert on a public API | 914fe88 | DONE | R9-VC2: cannot fire legitimately |
+| Panic-message repair + branch sweep | ea354ee | DONE | R9-VC3 + R9-F3 |
+| `#[cfg(all(test, aarch64))]` on the test accessors | 5fe7eb3 | DONE | R9-F4 |
+| AUDIT "no behaviour change" claim | 5fe7eb3 | DONE | R9-F6: inaccurate |
 
 ## Round 9 findings
 
@@ -1858,3 +1858,72 @@ already pays.
 against a specific, historically-demonstrated regression, not a live bug.
 **Confidence:** HIGH — the identical-hash premise is what makes the existing
 assertion blind, and that premise is verified elsewhere in this very file.
+
+### R9-VC4 — the claimed state is real, and my run covered the right source.
+```
+running 126 tests
+test result: ok. 124 passed; 0 failed; 2 ignored   (lib, release, 92.75s)
+test result: ok. 7 passed; 0 failed                (bin)
+clippy --all-targets -- -D warnings                          clean (aarch64)
+clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+Matches your 124 + 7 exactly. `git diff 5fe7eb3..HEAD -- src/ benches/
+Cargo.toml Makefile` is **empty**, and every commit of mine since touches only
+`REVIEW_MR1.md`, so this is a clean reading of `5fe7eb3`'s source.
+
+## Round 9 verdict
+
+**Blockers: none. Majors: none.**
+
+**Seven minors**, none of which affects a hash or a submitted share:
+R9-F1 (a diagnostic branch became structurally unreachable), R9-F2 (the rotation
+test's dataset assertion is vacuous), R9-F3 (the `should_panic` substring still
+sits before the region that was mangled), R9-F4 (the `ShareVerifier` tests are
+aarch64-gated for a reason that does not hold, costing CI the only new coverage
+it could run), R9-F5 (the rewritten SAFETY comment's precondition is false),
+R9-F6 (AUDIT's "no behaviour change"), R9-F7 (nothing asserts the verifier is on
+the reference path).
+
+**The four priorities:**
+1. **Behaviour-preserving?** Yes on every reachable path. I walked drop timing,
+   build timing, key derivation, dataset move, `enabled` computation and the
+   guard relationship — all identical, and the key snapshot is more robust than
+   the old read of a mutable local. The single exception is R9-F1, on a row that
+   was already unreachable and whose action is unchanged.
+2. **Do the tests pin the failure that matters?** Half of it. The VM-drop is
+   properly asserted; the dataset-adoption is not, because the same `Arc` is
+   re-keyed. And that is the load-bearing half — I **measured** that in full
+   mode the key does not affect the hash at all, so only a stale *dataset* can
+   make a verifier wrong. The fix is free: two distinct 2 GiB datasets already
+   exist as `LazyLock` statics in that same test binary.
+3. **Is `is_armed()` right?** It is a behaviour change and it did retire the
+   fail-open branch — but the branch was already unreachable and both verdicts
+   submit, so no share is at risk. The new structure is arguably better (armed
+   now *implies* a reference exists). Keep the match arm as defence; correct the
+   AUDIT wording.
+4. **The `generate` assert.** Cannot fire on any legitimate path. Every caller
+   builds a light VM first, `argon2d_cache` returns a fixed 256 MiB whose length
+   is key-independent, and the assert precedes the 2 GiB allocation.
+
+**The one I would act on first is R9-F7**, not because it is a defect — the line
+is present and correct — but because it is the round-5 F1 pattern lying in wait:
+an experiment arm that is *assumed* rather than *asserted*, in code whose whole
+purpose is to catch silent wrongness. Two lines close it.
+
+**Mergeable: yes, still.** Nothing in these four commits touches the emitted
+loop, the C1 arithmetic or the hash path; the refactor is behaviour-preserving
+where it counts, the new assert is sound, and the panic-message repair is
+correct with the sweep independently confirmed.
+
+## Remaining work if this review is interrupted
+- **Round 9 is complete.** All four priorities answered, both lower-priority
+  items answered, seven minors filed, full suite and both clippy targets run
+  independently against `5fe7eb3`'s source.
+- Suggested order for the minors: **R9-F7** (assert the verifier is on the
+  reference path — the historically-demonstrated failure), then **R9-F2** (rotate
+  between the two datasets that already exist), then R9-F5 (make the SAFETY
+  precondition true or state the residual risk), then R9-F3/F6 (one-word fixes),
+  then R9-F4 (a judgement call about CI cost).
+- Still open by choice from earlier rounds and unchanged: R5-F2, R5-F4, R5-F6,
+  issue #1 (R5-F7), issue #2 (ARM64 CI). Of these, issue #2 remains the only one
+  I would not leave open indefinitely.

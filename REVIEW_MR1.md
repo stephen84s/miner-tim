@@ -2580,3 +2580,59 @@ want improved, not things the miner does wrong.
 - Unchanged and still open by choice: R5-F2, R5-F4, R5-F6, issue #1 (R5-F7),
   issue #2 (ARM64 CI), `worker_loop` testability. Issue #2 remains the only one
   I would not leave open indefinitely.
+
+---
+
+# Round 12 — `309cfda..74c8186`
+One commit applying all four round-11 minors plus the startup-state suggestion.
+
+## Round 12 brief
+**Scope:** `git diff 309cfda..74c8186` — one commit.
+
+**What changed:**
+- **R11-F1** — both arms now warn on an empty value, labelled with the flag or
+  the variable name. `warn_if_empty` unwound from an `Option<()>` threaded
+  through `.and(value)` back into a plain statement, on the grounds that the
+  density is how R10-F2 hid in the first place.
+- **R11-F2** — the honest wording about the fail-open arm now sits in both code
+  comments, not only in AUDIT.
+- **R11-F3** — the dataset dependency is recorded at `vm.rs`'s `match dataset`,
+  naming the test it would silently weaken.
+- **R11-F4** — documented in `--help` (not `mining.conf.example`, whose blank is
+  inert).
+- **Startup state line** — `Native-loop JIT: on | share verification: on`,
+  unconditional, placed before `Miner::new`.
+
+**Questions to attack:**
+1. **The `warn_if_empty` signature change.** `fn(&str,&str) -> Option<()>` became
+   `fn(&str,&str)`, and the flag arms went from
+   `value = as_bool(v).or(warn_if_empty(flag, v).and(value))` to a statement
+   followed by `value = as_bool(v).or(value)`. Believed behaviour-identical, but
+   it touches the exact composition round 11 verified across twelve cases —
+   re-derive rather than assume the rewrite preserved it.
+2. **`parse_switch_with` gained an `env_label` parameter.** Test call sites were
+   updated with a regex; check none was silently given the wrong argument
+   position. A mislabelled warning is cosmetic; an argument in the wrong slot is
+   not.
+3. **Does the empty-env warning fire exactly once, in the right cases?** It must
+   not fire when the variable is genuinely unset (as opposed to set-and-empty),
+   and must not double-warn when both an env value and a flag are empty.
+4. **The startup state line.** Is `on|off` for both switches the right thing to
+   report, and does it fire before anything that could fail and hide it?
+
+Lower priority: is the `--help` wording about empty values clear to someone who
+has not read this thread, and does the AUDIT entry describe what changed?
+
+**State at brief time:** 125 lib + 8 bin tests pass in release; clippy clean on
+aarch64 and x86_64.
+
+## Round 12 coverage ledger
+| Area | Status | Notes |
+|---|---|---|
+| P1 — `warn_if_empty` signature change preserves composition | NOT STARTED | |
+| P2 — `env_label` argument positions at all call sites | NOT STARTED | |
+| P3 — empty-env warning fires exactly once, right cases | NOT STARTED | |
+| P4 — startup state line: content and placement | NOT STARTED | |
+| `--help` wording; AUDIT accuracy | NOT STARTED | |
+
+## Round 12 findings

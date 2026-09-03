@@ -2029,3 +2029,70 @@ built on the new dataset, which pins the behaviour and not just the field. The
 `assert_ne!(after, got, "the two datasets produced the same hash; this test
 proves nothing")` is the part I would not have thought to ask for: it guards the
 test against its own premise silently failing. Good.
+
+### R10-F2 — An empty value now *erases* an explicit `off`, silently turning the native loop back on  [MAJOR]
+**Where:** `src/bin/minertim.rs` `parse_switch_with` — `as_bool`'s new empty
+short-circuit combined with `value = as_bool(v)` on both flag paths.
+
+**First, your direct question: no, you did not invert R7-F2.** That finding was
+about `--verify-shares`, and its outcome is unchanged and correct — an empty
+`MINERTIM_VERIFY_SHARES=` still leaves the safety net **on**. Verified against
+the shipped binary (case E below). The reasoning you quoted back at me was
+applied correctly to the switch it was about.
+
+**But the change did more than choose a default.** Round 7 replaced
+`value = as_bool(v).or(value)` with `value = as_bool(v)`, which was safe *only
+because* `as_bool` could never return `None`. This round made `as_bool` return
+`None` for an empty value without restoring the `.or(value)`. So an empty value
+no longer means "no opinion" — it means "discard whatever was decided before".
+
+Measured on the release binary (grepping for the DISABLED warning):
+```
+A  MINERTIM_NATIVE_LOOP=                          -> native loop ON,  no output at all
+B  --native-loop ""                               -> native loop ON,  silent
+C  MINERTIM_NATIVE_LOOP=off  --native-loop ""     -> native loop ON,  silent   <-- explicit env erased
+D  --native-loop off --native-loop ""             -> native loop ON,  silent   <-- explicit flag erased
+E  MINERTIM_VERIFY_SHARES=                        -> verification ON  (correct, unchanged)
+F  MINERTIM_NATIVE_LOOP=off                       -> "Native-loop JIT DISABLED" (control, works)
+```
+**C and D are the finding.** The operator set the switch explicitly, to `off`,
+and got `on` with no diagnostic. No precedence model justifies an absent value
+outranking a present one; "flag beats env" should mean a *parsed* flag beats
+env, not that an empty token clears the field.
+
+**Failure scenario.** `--native-loop "$NL"` with `$NL` unset is ordinary — and
+note the *careful* style is the broken one: quoted, the empty argument reaches
+case B/C; unquoted, the token vanishes and hits the bare-flag path, which warns
+and correctly resolves to off. Two opposite outcomes from the same intent,
+decided by quoting.
+The harm is bounded — it cannot produce a wrong share, and it fails toward the
+*faster* path, so no revenue is lost directly. What it defeats is the switch's
+one stated purpose: ruling the JIT in or out during an incident. An operator
+following the error message's own advice ("restart with `--native-loop off`")
+through a wrapper that passes an empty value would see the rejects continue and
+conclude the JIT is innocent. Share verification stays on and would still catch
+a real fault, which is why this is not a blocker.
+
+**The justification in the code comment is half right.** *"`NATIVE_LOOP=` in
+mining.conf ... arrives here"* — it does not. I verified in round 6 (R6-VC2)
+that `NATIVE_LOOP` is a **Makefile** variable and
+`$(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),)` suppresses the flag
+entirely when it is empty, so the shipped `mining.conf.example` never reaches
+`parse_switch` at all. The *other* half — an unset shell variable arriving as an
+empty string — is real, and is exactly the path that now misfires.
+
+**Suggested direction (not a fix I am making):** keep "empty means unset" — it is
+the conventional reading and I agree with it — but (a) restore `.or(value)` on
+both flag arms so an empty value cannot clear an earlier decision, and (b) warn
+on it, e.g. `warning: --native-loop given an empty value - ignoring`. That keeps
+the semantics you wanted while removing both the erasure and the silence.
+**Confidence:** HIGH — measured on the shipped binary, six cases.
+
+### R10-VC4 — the injection refactor itself is exactly right and fully closes R9-F5.
+`parse_switch_with` takes `env_value: Option<&str>`; `parse_switch` is a
+one-line wrapper doing `std::env::var(env).ok().as_deref()`. No test calls
+`set_var` any more — `grep set_var src/` returns nothing — so the
+`setenv`/`getenv` race is *removed* rather than argued about, which is the right
+way to answer a soundness objection. The temporary `Option<String>` in the
+wrapper lives to the end of the call expression, so the `as_deref()` borrow is
+sound. Production behaviour is unchanged: the env is still read once per switch.

@@ -116,7 +116,7 @@ confirm rather than trust.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | `verify_effective` vs `worker_loop` consistency | TODO |
+| 1 | `verify_effective` vs `worker_loop` consistency | DONE — R13-F1 |
 | 2 | R12-F1 fix — four combinations, both targets | TODO |
 | 3 | R12-F2 fix — help layout | TODO |
 | 4 | "unconditional" removed from comments + AUDIT | TODO |
@@ -124,7 +124,45 @@ confirm rather than trust.
 
 ## Round 13 findings
 
-_(none yet)_
+### R13-F1 — The report and the behaviour disagree on non-aarch64: the line says `share verification: off` while `worker_loop` builds an **enabled** verifier  [MINOR]
+**Where:** report `src/bin/minertim.rs:87-88` (`verify_effective`), warning
+`src/bin/minertim.rs:~110`; behaviour `src/miner.rs:549`.
+
+Three expressions, two of which were updated by `6765b17` and one of which was
+not:
+
+| Site | Expression |
+|---|---|
+| Startup report (`minertim.rs`) | `verify_shares && native_loop && cfg!(target_arch = "aarch64")` |
+| `DISABLED` warning (`minertim.rs`) | `!verify_shares && native_loop && cfg!(target_arch = "aarch64")` |
+| **Actual verifier** (`miner.rs:549`) | `ShareVerifier::new(verify_shares && native_loop)` — **no `cfg!` term** |
+
+So on a non-aarch64 build with both switches on, the miner prints
+`share verification: off` and then constructs `ShareVerifier::new(true)`,
+verifying every share. The fix moved the two *reporting* sites to effective
+state and left the *behavioural* site on requested state.
+
+**Direction matters:** this is an **under**claim, not an overclaim. The miner
+does more than it says, not less. No share is withheld that would otherwise be
+submitted, and no wrong hash is possible: on non-aarch64 the mining VM and
+`reference()`'s `set_native_loop(false)` VM are both the interpreter, so their
+hashes always agree and `verify_failures` stays 0 (wasted double-hash per share
+only, and shares are rare).
+
+**Severity MINOR, deliberately not major.** On aarch64 `cfg!` is `true`, so all
+three expressions coincide and the shipping target reports exactly what it does.
+The divergence exists only on a target that today is reached solely by
+`cargo clippy --target x86_64-apple-darwin` — there is no non-aarch64 test or
+run anywhere (open issue #2, ARM64/multi-platform CI, is the same gap).
+
+**If it is fixed:** the honest repair is to make `miner.rs:549` read the same
+effective predicate rather than to weaken the report — otherwise the next
+platform port re-opens it. There is no fourth consumer: `grep` for
+`verify_shares|native_loop` across `src/` and `benches/` returns only
+`minertim.rs`, `miner.rs`, `vm.rs`, `jit/compiler.rs`, `tests.rs` and the bench,
+and only the two sites above decide whether verification runs.
+**Confidence:** HIGH — read from both sources; `cfg!` is compile-time and
+unambiguous.
 
 ## Remaining work if this review is interrupted
 

@@ -2691,3 +2691,146 @@ preconditions) when it can be *read* from the VM, where all four are known.
 - On a non-aarch64 build every worker now emits the "requested but NOT active"
   warning. That is true and the startup line already explains why; it was left
   unconditional rather than adding a `cfg!` term back for log verbosity alone.
+
+## 2026-09-04 — VIS-01 review follow-up: four minor findings closed (F1–F4)
+
+### Request / goal
+An independent reviewer went over `fix/jit-alloc-failure-visible` (issues #4 and
+#3) and returned a **mergeable** verdict with four minor findings, recorded in
+`REVIEW_ISSUE4.md` on this branch. This entry closes all four plus the log-text
+nit from the reviewer's item 6. No blockers were raised and none are addressed
+here; nothing about the fix's behaviour on the mining path changes.
+
+### Correction to the previous entry (2026-09-04, VIS-01)
+
+The "Assumptions and known limits" list in that entry says:
+
+> exercising the `has_dataset = true` arm on a real VM costs a 2 GiB dataset
+> build, which was judged not worth it
+
+**That is factually wrong, and the reviewer was right to call it out (F2b).**
+`src/randomx/tests.rs`'s `test_key_000_dataset()` is a `LazyLock` full dataset
+that is *already built in the default test run* — three non-ignored tests use
+it, including `test_native_loop_known_answer` and
+`test_native_loop_known_answer_pipelined`. The positive-direction test cost one
+extra `RandomXVm::new_full` on a live `Arc`, not a dataset build. The
+cost/benefit judgement recorded there was made against a price that was never
+being charged, and the gap it justified is closed below. `AUDIT.md` is
+append-only, so the original text stands; this paragraph is its correction.
+
+### Files changed
+- `src/bin/minertim.rs` — F1a (doc comment restored to `parse_native_loop`), F3
+  (startup-line wording + a non-vacuous assertion).
+- `src/miner.rs` — F1b (doc comment restored to `is_enabled`), reviewer item 6
+  (per-worker warning text made true on every target).
+- `src/randomx/vm.rs` — F4 (`new_jit()`'s `error!` message and doc comment).
+- `src/randomx/tests.rs` — F2 (the positive-direction test).
+- `CLAUDE.md` — VIS-01 row extended.
+
+### What changed, per finding
+
+**F1a / F1b — two orphaned doc comments, both introduced by this branch.** A new
+function had been spliced in directly under an existing doc comment in each
+case, so the comment documented the new item and the item it was written for was
+left bare.
+- `startup_state_line` had taken `parse_native_loop`'s "malformed input falls
+  back to **off**: slower, but it cannot mine wrong hashes" — the fail-safe
+  direction of the switch, and the most safety-relevant sentence in that file.
+  Returned to `parse_native_loop`; `startup_state_line` keeps its own.
+- `set_enabled` had taken `is_enabled`'s R9-F1 / R11-F2 rationale ("a defence
+  that cannot be reached is not a defence"), while `is_armed`'s doc still
+  pointed readers at `is_enabled` for it. Returned to `is_enabled`;
+  `set_enabled` keeps its own.
+
+No behaviour change; documentation integrity only.
+
+**F2 — nothing asserted `native_loop_effective() == true`.** Every assertion on
+it was negative, so a `cfg` slip making it constant-`false` on aarch64 — the
+class of defect that produced issue #3 — would have passed the entire suite
+while disarming share verification on the shipping platform. Added
+`full_mode_v1_vm_reports_the_native_loop_effective` (aarch64-gated,
+`src/randomx/tests.rs`): a real full-mode v1 VM on the shared dataset must
+report `true` with the switch on and `false` with it off, so both the field
+wiring and the switch term are load-bearing.
+
+Worth recording: this is the **only** test in the tree that hard-requires a
+successful `mmap(MAP_JIT)`. `test_native_loop_known_answer` passes even when the
+allocation fails, because the interpreter fallback yields the same hash — issue
+#4's shape exactly. So this test is expected to go red in an environment where
+MAP_JIT is unavailable, and that is the point of it.
+
+**F3 — an assertion that could not fail.** `assert!(aarch64.contains("requested"))`
+held for every input, because `requested` was an unconditional literal in
+`startup_state_line`'s format string: it asserted a constant against itself.
+Separately, the parenthetical it was meant to check trailed the *share
+verification* field, whereas issue #4 was filed about the `Native-loop JIT:`
+field over-claiming. Both are fixed together — the qualifier now attaches to the
+field it qualifies:
+
+```
+Native-loop JIT: on (requested) | share verification: on — requested state only; each worker reports its own effective state once its VM is built
+Native-loop JIT: off (requested on; unavailable on this target) | share verification: off — requested state only; ...
+```
+
+and the assertion is now `contains("Native-loop JIT: on (requested)")`, which is
+input-dependent: the `unavailable` arm renders a different qualifier whenever
+the target cannot honour the request.
+
+**Proof it is no longer vacuous** (temporary break, reverted): the pre-fix format
+string was reinstated — qualifier trailing the whole line — with the old
+assertion restored alongside the new one. The old `contains("requested")`
+**passed**; the new assertion **failed** with
+`the native-loop field must carry its own 'requested' qualifier and not read as
+effective state: Native-loop JIT: on | share verification: on (requested; …)`.
+An earlier attempt to break the `unavailable` predicate itself was discarded as
+evidence: it also trips the pre-existing `!contains("unavailable")` assertion,
+so it does not isolate the new one.
+
+**F4 — `new_jit()`'s message overstated.** It said share verification is
+switched off, but `new_jit()` runs on **every** `RandomXVm` construction,
+including `ShareVerifier::reference()`'s own reference VM — where verification
+stays correctly armed and still works. Reworded to name both cases, and to state
+what was previously implicit: a failure on the verifier's VM silently changes
+what the reference path *is* (interpreter rather than the per-iteration body
+JIT), and the arming decision does not model that. The doc comment now records
+the dependency that makes it harmless — `native_loop_diff_tests`,
+`test_native_loop_known_answer*` and `test_vm_calculate_hash_jit` pin all three
+paths bit-identical in the default suite.
+
+**Reviewer item 6 — the per-worker warning text was false on non-aarch64.** It
+claimed "Expect a large hashrate shortfall on this worker" (nothing is lost on a
+target with no native loop) and "See any 'JIT allocation failed' error above"
+(there will never be one there; the field is `cfg`-ed out). The warning now
+lists every cause rather than predicting one, and says the hashrate cost applies
+"wherever the native loop does exist". **No `cfg!` term was added to do this** —
+re-deriving the target test at the reporting site is exactly issue #3, and a
+comment at the site says so.
+
+### Verification
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings` —
+  clean. Run because #3 was a cfg-skew defect and the new test is aarch64-gated;
+  it added no import that would be unused on that target.
+- `make check` — clean.
+- `caffeinate -i make test` (release) — **130 lib + 10 bin passed, 2 ignored,
+  0 failed**. One more lib test than the previous entry's 129, which is the F2
+  addition; the F3 change modified an existing bin test rather than adding one.
+
+### Assumptions and constraints
+- Scope was held to the four findings plus the item-6 wording. The reviewer's
+  weaker observations were deliberately **not** acted on: that
+  `every_precondition_is_load_bearing` restates the predicate's body (its stated
+  purpose is to pin it against change), that
+  `a_failed_jit_allocation_is_not_the_native_loop` is a subset of that table
+  (documentation, and cheap), and that `light_mode_never_reports_the_native_loop`
+  is vacuous on x86_64 (the `cfg(not)` arm returns a constant there, which is
+  itself the correct answer).
+- Considered and rejected: passing a caller label (`"mining"` / `"verifier"`)
+  into `new_jit()` so the message could be precise instead of naming both cases.
+  It would be an API change across two call sites for a log string, and the
+  finding asked for a reword.
+- The pre-existing orphaned doc comment on `get_verify_failures`
+  (`src/miner.rs:283`, noted by the reviewer as a third instance of the F1
+  pattern) is **on `main`, not this branch**, and was left alone under scope
+  discipline.
+- `REVIEW_ISSUE4.md` is the reviewer's record and was not modified.

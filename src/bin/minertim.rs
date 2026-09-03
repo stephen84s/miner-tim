@@ -369,8 +369,6 @@ fn parse_switch_with(
     value.unwrap_or(default_on)
 }
 
-/// The native-loop JIT switch. Malformed input falls back to **off**: slower,
-/// but it cannot mine wrong hashes.
 /// The startup configuration line.
 ///
 /// This reports what was *requested* and whether the target can honour it. It
@@ -388,15 +386,21 @@ fn parse_switch_with(
 fn startup_state_line(native_loop: bool, verify_shares: bool, target_has_native_loop: bool) -> String {
     let on_off = |b: bool| if b { "on" } else { "off" };
     let unavailable = native_loop && !target_has_native_loop;
+    // The qualifier is attached to the `Native-loop JIT:` field rather than
+    // trailing the whole line, because that is the field issue #4 was filed
+    // about over-claiming. Trailing the line it read as if it qualified share
+    // verification, which was never the field in question.
     format!(
-        "Native-loop JIT: {}{} | share verification: {} (requested; each worker reports \
-         its effective state once its VM is built)",
+        "Native-loop JIT: {} ({}) | share verification: {} — requested state only; \
+         each worker reports its own effective state once its VM is built",
         on_off(native_loop && target_has_native_loop),
-        if unavailable { " (requested on; unavailable on this target)" } else { "" },
+        if unavailable { "requested on; unavailable on this target" } else { "requested" },
         on_off(verify_shares && native_loop && target_has_native_loop),
     )
 }
 
+/// The native-loop JIT switch. Malformed input falls back to **off**: slower,
+/// but it cannot mine wrong hashes.
 fn parse_native_loop(args: &[String]) -> bool {
     parse_switch(args, "--native-loop", "MINERTIM_NATIVE_LOOP", true, false)
 }
@@ -558,7 +562,18 @@ mod tests {
         assert!(aarch64.contains("Native-loop JIT: on"), "{aarch64}");
         assert!(!aarch64.contains("unavailable"), "{aarch64}");
         assert!(aarch64.contains("share verification: on"), "{aarch64}");
-        assert!(aarch64.contains("requested"), "the line must not read as effective state: {aarch64}");
+        // Not `contains("requested")`: that literal is unconditional in the
+        // format string, so it held for every input and asserted a constant
+        // against itself (review of this branch, F3). This form is
+        // input-dependent — the `(requested on; unavailable on this target)`
+        // arm renders instead whenever the target cannot honour the request —
+        // and it also pins the qualifier to the native-loop field rather than
+        // to whichever field happens to be last.
+        assert!(
+            aarch64.contains("Native-loop JIT: on (requested)"),
+            "the native-loop field must carry its own 'requested' qualifier and not \
+             read as effective state: {aarch64}"
+        );
 
         // Same request, target without the native loop.
         let other = startup_state_line(true, true, false);

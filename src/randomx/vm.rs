@@ -1689,6 +1689,14 @@ pub struct RandomXVm {
 /// It is deliberately not fatal: a VM without a JIT still mines correct hashes,
 /// just slowly. `RandomXVm::native_loop_effective` is what makes the fallback
 /// visible to everything downstream.
+///
+/// It runs for **every** `RandomXVm`, including `ShareVerifier::reference`'s
+/// own VM, and the two cases differ — which is why the message names both. A
+/// failure on the verifier's VM leaves verification correctly armed, but it
+/// silently changes what the reference path *is*: interpreter instead of the
+/// per-iteration body JIT. Nothing in the arming decision models that. It is
+/// harmless only because `native_loop_diff_tests`, `test_native_loop_known_answer*`
+/// and `test_vm_calculate_hash_jit` pin all three paths bit-identical.
 #[cfg(target_arch = "aarch64")]
 fn new_jit() -> Option<super::jit::JitCompiler> {
     match super::jit::JitCompiler::new() {
@@ -1696,9 +1704,13 @@ fn new_jit() -> Option<super::jit::JitCompiler> {
         Err(e) => {
             log::error!(
                 "JIT allocation failed ({e}) — this VM falls back to the interpreter. \
-                 Hashrate will be far below normal, and share verification for this \
-                 worker is switched off because it would otherwise compare the \
-                 interpreter against itself."
+                 What that costs depends on which VM this is. A worker's mining VM: \
+                 hashrate far below normal, and share verification for that worker is \
+                 switched off, because its mining path is now the interpreter and would \
+                 otherwise be compared against itself. The share verifier's own \
+                 reference VM: verification stays armed and still works, but the \
+                 reference path silently becomes the interpreter instead of the \
+                 per-iteration body JIT. Either way the hashes stay correct."
             );
             None
         }

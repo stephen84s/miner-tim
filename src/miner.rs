@@ -434,6 +434,19 @@ impl ShareVerifier {
         Some(vm.calculate_hash(blob))
     }
 
+    /// Arm or disarm the verifier from the mining VM's *actual* state.
+    ///
+    /// Called once the worker's VM exists, because that is the first moment all
+    /// four native-loop preconditions are knowable. Verification is only
+    /// meaningful when the mining path differs from the reference path, so a VM
+    /// that fell back to the interpreter — a failed `mmap(MAP_JIT)`, a non-v1
+    /// program, light mode, or a non-aarch64 build — disarms it rather than
+    /// letting it compare the interpreter against itself and report a clean
+    /// counter forever (issues #4 and #3).
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     /// Whether verification is switched on for this worker.
     ///
     /// Deliberately **not** `enabled && dataset.is_some()`. Using the stricter
@@ -449,19 +462,6 @@ impl ShareVerifier {
     /// `rekey` has run. Restoring the distinction makes it reachable *in
     /// principle*, so a future edit that separates those two facts fails open
     /// rather than silently submitting unverified (R11-F2).
-    /// Arm or disarm the verifier from the mining VM's *actual* state.
-    ///
-    /// Called once the worker's VM exists, because that is the first moment all
-    /// four native-loop preconditions are knowable. Verification is only
-    /// meaningful when the mining path differs from the reference path, so a VM
-    /// that fell back to the interpreter — a failed `mmap(MAP_JIT)`, a non-v1
-    /// program, light mode, or a non-aarch64 build — disarms it rather than
-    /// letting it compare the interpreter against itself and report a clean
-    /// counter forever (issues #4 and #3).
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -636,13 +636,23 @@ fn worker_loop(
                     // The loud path. The startup line announced the native loop
                     // and this worker is not running it, which also means its
                     // share verification measures nothing (issue #4, R13-F2).
+                    // Deliberately says nothing that depends on the target.
+                    // Re-deriving "does this build even have a native loop?"
+                    // here would put a `cfg!` term back into the reporting of
+                    // an enablement decision, which is precisely issue #3. So
+                    // the text lists every cause instead of predicting one.
                     log::warn!(
                         "Worker {}: native-loop JIT was requested but is NOT active — \
-                         running the per-iteration body JIT / interpreter. Expect a large \
-                         hashrate shortfall on this worker. Share verification is off for \
-                         it, because the mining path and the reference path are now the \
-                         same and a zero failure count would mean nothing. See any \
-                         'JIT allocation failed' error above for the cause.",
+                         running the per-iteration body JIT / interpreter. Share \
+                         verification is off for it, because the mining path and the \
+                         reference path are now the same and a zero failure count would \
+                         mean nothing. Possible causes: this build targets an \
+                         architecture with no native loop (nothing is lost there — it \
+                         has none to run), the program is not rx/0, the VM is in light \
+                         mode, or `mmap(MAP_JIT)` failed (logged as a 'JIT allocation \
+                         failed' error above). Wherever the native loop does exist, \
+                         running without it costs this worker a large fraction of its \
+                         hashrate.",
                         thread_id
                     );
                 }

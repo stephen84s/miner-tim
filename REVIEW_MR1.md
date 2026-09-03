@@ -2,7 +2,7 @@
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
 ## Status
-COMPLETE — rounds 5-9 finished. Round 9 (`3c281dc..5fe7eb3`): no blockers, no majors, seven minors. **Mergeable.**
+COMPLETE — rounds 5-10 finished. Round 10 (`5fe7eb3..6f2b95b`): no blockers, one major (R10-F2, a regression introduced by this commit), one minor. **Mergeable, but land R10-F2's two-line fix first.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -1936,12 +1936,12 @@ One commit applying all seven round-9 minors.
 ## Round 10 coverage ledger
 | Area | Status | Notes |
 |---|---|---|
-| P1 — is `SubmitVerifierUnavailable` reachable again? | IN PROGRESS | Or was the problem just moved? |
-| P2 — empty-env behaviour change (R9-F5 refactor) | NOT STARTED | Checked as a change, not a fix |
-| P3 — dataset hoist: same datasets, still two? | NOT STARTED | |
-| P4 — `vm_is_on_reference_path()` on x86_64 | NOT STARTED | Vacuous there? |
-| "Keyed to the dataset, not the seed" framing | NOT STARTED | |
-| R9-F3 substring; AUDIT accuracy | NOT STARTED | |
+| P1 — is `SubmitVerifierUnavailable` reachable again? | DONE | R10-F1: at `classify_share`, not in `worker_loop` |
+| P2 — empty-env behaviour change (R9-F5 refactor) | DONE | R10-VC4 + **R10-F2** |
+| P3 — dataset hoist: same datasets, still two? | DONE | R10-VC1/VC3: clean, exactly two |
+| P4 — `vm_is_on_reference_path()` on x86_64 | DONE | R10-VC2: not vacuous |
+| "Keyed to the dataset, not the seed" framing | DONE | R10-VC5: correct, one condition |
+| R9-F3 substring; AUDIT accuracy | DONE | R10-VC6/VC7 |
 
 ## Round 10 findings
 
@@ -2149,3 +2149,75 @@ say is that `SubmitVerifierUnavailable` is *still* unreachable from
 defence is now live. Adding a clause such as "reachable at the `classify_share`
 boundary; still unreachable in `worker_loop` today because `rekey` always
 precedes the first hash" would make it exact.
+
+### R10-VC8 — the claimed state is real, on the right source.
+```
+git diff 6f2b95b..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+running 126 tests
+test result: ok. 124 passed; 0 failed; 2 ignored   (lib, release, 92.54s)
+test result: ok. 7 passed; 0 failed                (bin)
+clippy --all-targets -- -D warnings                          clean (aarch64)
+clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+124 + 7 as claimed. The lib count is unchanged from round 9 because the two
+`ShareVerifier` tests were already compiled on aarch64; ungating them adds two
+to an x86_64 run, which is the point.
+
+## Round 10 verdict
+
+**Blockers: none.**
+
+**Major: R10-F2** — an empty value now erases an explicit `off`, silently
+re-enabling the native loop. Introduced by this commit, demonstrated on the
+shipped binary, and fixable in two lines.
+
+**Minor: R10-F1** — `SubmitVerifierUnavailable` is reachable again at the
+`classify_share` boundary but still unreachable inside `worker_loop`; the fix is
+right, the surrounding claims slightly overstate it.
+
+**Six of the seven round-9 minors are cleanly closed** (R9-F2, F3, F4, F5, F6,
+F7); R9-F1's fix is correct but incomplete in the way R10-F1 describes.
+
+**Your four questions:**
+1. **Did you move the problem?** No — you restored the *independence* of
+   `classify_share`'s two arguments, which is the right fix and which
+   `is_armed()` had genuinely destroyed. But the branch still cannot fire today,
+   because `vm` is assigned only inside the block that calls `rekey`, so
+   `vm.is_some()` implies a dataset exists. The defence is now real for future
+   edits, not for the current binary; the comment and AUDIT should say so. A
+   composition test (`ShareVerifier::new(true)` with no `rekey`, then
+   `classify_share(v.is_enabled(), .., v.reference(..).as_ref())`) would pin it
+   for microseconds and no dataset.
+2. **Did you invert R7-F2?** **No.** That finding was about `--verify-shares`,
+   and an empty `MINERTIM_VERIFY_SHARES=` still leaves the safety net on —
+   measured. Your reading was right. The problem is elsewhere: `as_bool` can now
+   return `None`, but round 7 had already replaced `.or(value)` with a bare
+   assignment on the flag arms, so an empty token clears an earlier decision
+   instead of declining to make one. That is R10-F2.
+3. **Dataset hoist:** clean. Same key, same construction, the module-local
+   `static` deleted rather than duplicated, exactly two `LazyLock`s remain, and
+   the differential tests run on byte-identical data.
+4. **`vm_is_on_reference_path()` on x86_64:** meaningful, not vacuous.
+   `use_native_loop` is an ungated field and `set_native_loop` an ungated setter,
+   so the assertion passes for the right reason *and* still fails if the guarded
+   line is dropped. Since CI can never run the JIT, this is now one of the few
+   native-loop regressions CI can catch — ungating was right.
+
+**Mergeable: yes.** One caveat, and it is about sequencing rather than severity:
+R10-F2 is a regression *introduced by this commit*, is operator-facing, and is a
+two-line fix. I would land that fix before merging rather than after — not
+because it endangers a share (it cannot), but because shipping a switch that
+silently ignores an explicit `off` is the kind of thing that is much cheaper to
+correct now than to explain later.
+
+## Remaining work if this review is interrupted
+- **Round 10 is complete.** All four priorities answered, both lower-priority
+  items checked, one major and one minor filed, full suite and both clippy
+  targets run against `6f2b95b`'s source.
+- Order I would take them: **R10-F2** (restore `.or(value)` on both flag arms and
+  warn on an empty value), then **R10-F1** (the composition test, plus a clause
+  in the comment/AUDIT noting the `worker_loop` invariant), then the one-line
+  doc note that `ShareVerifier.key` is inert in full mode.
+- Unchanged from earlier rounds and still open by choice: R5-F2, R5-F4, R5-F6,
+  issue #1 (R5-F7), issue #2 (ARM64 CI). Issue #2 remains the only one I would
+  not leave open indefinitely.

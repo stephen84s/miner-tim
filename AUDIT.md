@@ -2646,6 +2646,13 @@ preconditions) when it can be *read* from the VM, where all four are known.
   clean (exit 0). Run *before* the long suite, since cfg skew is exactly what
   bit in #3.
 - `make check`: clean.
+- `caffeinate -i make test`: **green** — 129 lib + 10 bin tests pass in release
+  (306.18 s, 2 long-running dataset tests ignored as before), 0 doc-tests. The
+  baseline before this change was 125 lib + 8 bin, so all six new tests are
+  accounted for. This is the run that matters for this change specifically,
+  since the 87 vectors go through the `execute_vm_inner` guard whose condition
+  was rewired. `cargo test --release --bin minertim` was re-run afterwards
+  (10 passed) because a later wording change to `main` landed after that build.
 - New tests, all passing:
   - `native_loop_guard_tests::every_precondition_is_load_bearing` — the full
     16-row truth table of the guard predicate.
@@ -2675,6 +2682,12 @@ preconditions) when it can be *read* from the VM, where all four are known.
   necessity: all four guard terms are fixed for a VM's lifetime today (version
   and JIT at construction, the flag once, and `reinit` is always passed a
   dataset here). It stays correct if a future edit calls `reinit(key, None)`.
+- The `!verify_shares && native_requested_here` warning in `main` still uses
+  one-of-four modelling, deliberately. It cannot be moved to the worker without
+  losing its place in the startup banner, and it errs conservative: it can fire
+  when the native loop turns out not to be running, never the reverse. Its
+  wording was changed from "while the native-loop JIT is on" to "is requested
+  on" so that no line in `main` claims effective state any more.
 - On a non-aarch64 build every worker now emits the "requested but NOT active"
   warning. That is true and the startup line already explains why; it was left
   unconditional rather than adding a `cfg!` term back for log verbosity alone.

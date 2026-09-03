@@ -76,8 +76,6 @@ fn main() {
     })
     .expect("Failed to set Ctrl+C handler");
 
-    let native_effective = native_loop && cfg!(target_arch = "aarch64");
-
     // Emitted at info, which is the default filter — but it is NOT
     // unconditional, and an earlier comment wrongly said so: `RUST_LOG=warn`
     // suppresses it. The warnings below fire only in the non-default direction,
@@ -88,9 +86,16 @@ fn main() {
     let mut miner = Miner::new(mining_active.clone());
     miner.set_native_loop(native_loop);
     miner.set_verify_shares(verify_shares);
-    if !verify_shares && native_effective {
+    // `native_requested_here` is still only one of the guard's four terms — the
+    // other three are not knowable in `main`. That is fine for a warning whose
+    // point is that the operator switched off their own safety net: it errs
+    // conservative (it can fire when the native loop turns out not to be
+    // running, never the reverse). The wording says "requested on" rather than
+    // "is on" so that this line does not repeat the claim issue #4 was about.
+    let native_requested_here = native_loop && cfg!(target_arch = "aarch64");
+    if !verify_shares && native_requested_here {
         log::warn!(
-            "Share verification DISABLED while the native-loop JIT is on. A \
+            "Share verification DISABLED while the native-loop JIT is requested on. A \
              native-loop defect would now be submitted to the pool as a wrong \
              share instead of being withheld, and the only symptom would be \
              rejects climbing on the pool side."

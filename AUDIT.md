@@ -2144,3 +2144,55 @@ Prefer a heredoc written straight to the file, or verify the rendered literal
 after any scripted edit that contains one.
 
 122 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - worker_loop testability: the verifier's state machine is now covered
+
+### The gap this closes
+Every review round since the verifier landed listed the same open item: its lazy
+construction and its reset on seed rotation lived as three loose locals inside
+`worker_loop`, a function that needs a live pool connection and a 2 GiB dataset.
+Round 7 traced them by eye and found them correct; nothing tested them.
+
+That gap mattered more than its size. **A verifier surviving a seed rotation
+would withhold every share from that point on** — in full mode the dataset
+determines the hash, so a stale one disagrees with everything the miner finds,
+and the symptom is indistinguishable from the JIT fault the feature exists to
+detect. The operator would see the "WITHHELD a share" error, follow its advice,
+restart with `--native-loop off`, and the rejects would continue.
+
+### What changed
+`ShareVerifier` now owns that state (`vm`, `dataset`, `key`, `enabled`) with
+three methods — `rekey`, `reference`, `is_armed` — and `worker_loop` holds one
+value instead of three locals. No behaviour change: `rekey` drops the cached VM
+exactly as the inline code did, and `reference` performs the same lazy build.
+
+The point is that the state machine is now reachable from a test.
+
+### Tests
+- `share_verifier_builds_lazily_and_resets_on_seed_rotation` walks the whole
+  lifecycle: unarmed with no dataset and no VM built; armed after `rekey` but
+  **still** no VM (the laziness is the reason a worker that never finds a share
+  pays nothing); VM built on first `reference`, and that reference equal to an
+  independently constructed reference-path VM's hash — which pins that it uses
+  the right dataset *and* that `set_native_loop(false)` was applied; then a
+  rotation dropping the cached VM and adopting the new dataset.
+- `disabled_share_verifier_does_no_work` — a disabled verifier never reports
+  itself armed, never returns a reference and never builds a VM, so
+  `VERIFY_SHARES=off` really is free.
+
+Test-only accessors (`has_cached_vm`, `holds_dataset`) are gated
+`#[cfg(all(test, target_arch = "aarch64"))]` — a plain `#[cfg(test)]` made them
+dead code on x86_64 and failed `rust:lint`, which is the same cfg-skew that
+broke CI before and is invisible to any local aarch64 build.
+
+### Still not covered
+The three lines of `worker_loop` glue that call `verifier.reference(...)` and
+act on the verdict. Round 7's point stands: if that call were removed the
+feature would be a silent no-op and no test would notice. It is straight-line
+code in a function still needing a live pool; closing it means a fake-pool seam.
+Named here rather than implied to be covered.
+
+### Verification
+124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.

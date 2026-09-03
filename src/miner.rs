@@ -366,6 +366,80 @@ impl Miner {
     }
 }
 
+/// Owns the reference-path VM used to re-check candidate shares.
+///
+/// This exists as a type purely so its state machine is testable. It previously
+/// lived as three loose locals inside `worker_loop`, which needs a live pool
+/// connection and a 2 GiB dataset, so the two things most likely to go wrong —
+/// the lazy build and the reset on seed rotation — could not be exercised at
+/// all. A stale verifier surviving a rotation would withhold **every** share
+/// from that point on, which is the worst failure this feature can have: it
+/// looks exactly like the JIT fault it is supposed to detect.
+pub(crate) struct ShareVerifier {
+    /// Built on the first share, not on construction: most workers never find
+    /// one for a given seed, and building costs a VM plus a 2 MiB scratchpad.
+    vm: Option<RandomXVm>,
+    /// The dataset the current seed resolved to. `None` before the first job.
+    dataset: Option<Arc<RandomXDataset>>,
+    key: Vec<u8>,
+    enabled: bool,
+}
+
+impl ShareVerifier {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self { vm: None, dataset: None, key: Vec::new(), enabled }
+    }
+
+    /// Point the verifier at a new seed and its dataset.
+    ///
+    /// **Drops any cached VM.** In full mode the dataset is what determines the
+    /// hash, so a VM held across a rotation would verify against the previous
+    /// seed's data and disagree with every share the miner found.
+    pub(crate) fn rekey(&mut self, key: &[u8], dataset: Arc<RandomXDataset>) {
+        self.vm = None;
+        self.dataset = Some(dataset);
+        self.key.clear();
+        self.key.extend_from_slice(key);
+    }
+
+    /// The reference hash for `blob`, or `None` if verification does not apply
+    /// — disabled, or no dataset seen yet.
+    ///
+    /// `calculate_hash` refills the scratchpad from the blob, so this neither
+    /// disturbs nor is disturbed by the mining VM's pipeline state.
+    pub(crate) fn reference(&mut self, blob: &[u8]) -> Option<[u8; 32]> {
+        if !self.enabled {
+            return None;
+        }
+        let ds = self.dataset.clone()?;
+        let key = &self.key;
+        let vm = self.vm.get_or_insert_with(|| {
+            let mut v = RandomXVm::new_full(key, ds);
+            v.set_native_loop(false);
+            v
+        });
+        Some(vm.calculate_hash(blob))
+    }
+
+    /// Whether a mismatch could be detected right now: enabled, and holding a
+    /// dataset to check against.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.enabled && self.dataset.is_some()
+    }
+
+    // aarch64-gated to match their only callers: the tests need a real
+    // full-mode VM, which means the JIT, which is aarch64-only.
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn has_cached_vm(&self) -> bool {
+        self.vm.is_some()
+    }
+
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn holds_dataset(&self, other: &Arc<RandomXDataset>) -> bool {
+        self.dataset.as_ref().is_some_and(|d| Arc::ptr_eq(d, other))
+    }
+}
+
 /// What to do with a candidate share once the reference path has had its say.
 ///
 /// Split out of `worker_loop` because that function needs a live pool
@@ -434,10 +508,9 @@ fn worker_loop(
     let start_time = Instant::now();
     let mut last_hashrate_update = Instant::now();
     let mut pipeline_ready = false;
-    // Reference-path VM for share verification, built lazily on the first share
-    // so a worker that never finds one never pays the 2 MiB scratchpad.
-    let mut verify_vm: Option<RandomXVm> = None;
-    let mut verify_dataset: Option<Arc<RandomXDataset>> = None;
+    // Reference-path verifier. Built lazily on the first share, and re-pointed
+    // whenever the seed rotates — see `ShareVerifier`.
+    let mut verifier = ShareVerifier::new(verify_shares && native_loop);
 
     while mining_active.load(Ordering::Relaxed) {
         let job = match pool.get_work() {
@@ -472,11 +545,10 @@ fn worker_loop(
                 new_vm.set_native_loop(native_loop);
                 vm = Some(new_vm);
             }
-            // The verifier is keyed to the seed, so a seed rotation invalidates
-            // it. Dropped rather than reinitialised: it is rebuilt lazily on the
-            // next share, and most seeds never produce one on a given worker.
-            verify_vm = None;
-            verify_dataset = Some(dataset);
+            // Re-point the verifier at the new seed. This must happen on every
+            // rotation: in full mode the dataset determines the hash, so a
+            // verifier left on the old one would reject every share found.
+            verifier.rekey(&job.seed_hash, dataset);
             current_key = job.seed_hash.clone();
             pipeline_ready = false;
         }
@@ -566,24 +638,8 @@ fn worker_loop(
             // (MR !1 review round 7, R7-F6.)
             // The decision itself lives in `classify_share` so every branch is
             // reachable from a test; only the expensive recomputation is here.
-            let verification_applies = verify_shares && native_loop;
-            let reference = if verification_applies {
-                verify_dataset.clone().map(|ds| {
-                    let vvm = verify_vm.get_or_insert_with(|| {
-                        let mut v = RandomXVm::new_full(&current_key, ds);
-                        v.set_native_loop(false);
-                        v
-                    });
-                    // `calculate_hash` is self-contained — it refills the
-                    // scratchpad from the blob — so it neither disturbs nor is
-                    // disturbed by the mining VM's pipeline state.
-                    vvm.calculate_hash(&job_blob_current)
-                })
-            } else {
-                None
-            };
-
-            let verdict = classify_share(verification_applies, &hash, reference.as_ref());
+            let reference = verifier.reference(&job_blob_current);
+            let verdict = classify_share(verifier.is_armed(), &hash, reference.as_ref());
             match verdict {
                 ShareVerdict::Withhold => {
                     stats.verify_failures.fetch_add(1, Ordering::Relaxed);

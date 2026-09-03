@@ -604,6 +604,74 @@ mod full_hash_tests {
         );
     }
 
+    /// The verifier's state machine — the two things that previously lived as
+    /// loose locals inside `worker_loop` and so could not be tested at all.
+    ///
+    /// The failure that matters is a verifier surviving a seed rotation: in
+    /// full mode the dataset determines the hash, so a stale one would disagree
+    /// with **every** share from that point on, looking exactly like the JIT
+    /// fault it is supposed to detect.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn share_verifier_builds_lazily_and_resets_on_seed_rotation() {
+        use crate::miner::ShareVerifier;
+
+        let ds = test_key_000_dataset();
+        let blob = {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b
+        };
+
+        let mut v = ShareVerifier::new(true);
+
+        // Before any job: nothing to verify against, and no VM built.
+        assert!(!v.is_armed(), "armed with no dataset");
+        assert_eq!(v.reference(&blob), None, "produced a reference with no dataset");
+        assert!(!v.has_cached_vm());
+
+        v.rekey(b"test key 000", ds.clone());
+        assert!(v.is_armed());
+        assert!(v.holds_dataset(&ds));
+        // Lazy: a worker that never finds a share never pays for a VM.
+        assert!(!v.has_cached_vm(), "VM built before the first share");
+
+        // First reference builds the VM and must equal a reference-path hash.
+        let got = v.reference(&blob).expect("armed verifier returned no reference");
+        assert!(v.has_cached_vm(), "VM not cached after first use");
+
+        let mut expected_vm = vm::RandomXVm::new_full(b"test key 000", ds.clone());
+        expected_vm.set_native_loop(false);
+        assert_eq!(
+            hex_encode(&got),
+            hex_encode(&expected_vm.calculate_hash(&blob)),
+            "verifier is not computing the reference-path hash"
+        );
+
+        // A rotation must drop the cached VM and adopt the new dataset.
+        v.rekey(b"another seed", ds.clone());
+        assert!(
+            !v.has_cached_vm(),
+            "cached VM survived a seed rotation — it would verify against the \
+             previous seed's dataset and withhold every share"
+        );
+        assert!(v.holds_dataset(&ds));
+    }
+
+    /// A disabled verifier must never build a VM or produce a reference, so the
+    /// fallback switch really does cost nothing.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn disabled_share_verifier_does_no_work() {
+        use crate::miner::ShareVerifier;
+
+        let mut v = ShareVerifier::new(false);
+        v.rekey(b"test key 000", test_key_000_dataset());
+        assert!(!v.is_armed(), "a disabled verifier reported itself armed");
+        assert_eq!(v.reference(&[0u8; 76]), None);
+        assert!(!v.has_cached_vm(), "a disabled verifier built a VM");
+    }
+
     /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
     /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
     #[test]

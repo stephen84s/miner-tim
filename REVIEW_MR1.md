@@ -1692,3 +1692,79 @@ and let the test assert `!holds_dataset(&ds1) && holds_dataset(&ds2)` at zero
 additional memory or time cost. That also turns R5-F4 (two datasets as a
 liability) into an asset.
 **Confidence:** HIGH on the vacuity and on the key-irrelevance (measured).
+
+### R9-VC2 — P4: `generate`'s hard assert cannot fire on any legitimate path.
+- **Every in-tree caller passes a light-mode VM's cache.** `miner.rs:733`
+  (`get_or_generate_dataset`, which constructs a fresh `RandomXVm::new(seed_hash)`
+  on *every* call, so a seed change is covered), `tests.rs:35`, `tests.rs:1135`,
+  `benches/fullmode.rs:40`, `benches/nativeloop_ab.rs:209` — all `RandomXVm::new`.
+  The only other caller is `tests.rs:507`, which triggers it deliberately.
+- **A light-mode cache is never empty.** `argon2d_cache` (`argon2d.rs:376-419`)
+  ends with `let mut result = vec![0u8; total_blocks * ARGON2_BLOCK_SIZE]`, a
+  fixed 256 MiB whose length is derived from compile-time constants and is
+  independent of the key — including an empty key. There is no input that yields
+  a zero-length cache.
+- **Placement is right:** the assert precedes
+  `vec![[0u64; 8]; DATASET_ITEM_COUNT]`, so the programmer error is reported
+  before 2 GiB is allocated rather than after.
+- It is a real `assert!`, not `debug_assert!`, so it holds in release. Correct
+  for a public-API precondition.
+
+### R9-VC3 — `ea354ee` repairs the panic message correctly, and the branch sweep claim checks out.
+The literal is now
+```rust
+"dataset generation needs a light-mode VM's Argon2d cache; got an empty \
+ one (a full-mode VM does not build one)"
+```
+The `\`-newline strips the newline and the next line's leading whitespace while
+preserving the space before the backslash, giving `...got an empty one (a
+full-mode VM does not build one)`. Correct.
+
+I re-ran the sweep independently across every tracked `.rs` file, looking for the
+signature of the damage — a 3+ space run *mid-sentence* (lowercase or
+punctuation, spaces, lowercase) rather than at line start:
+```
+benches/nativeloop_ab.rs:175  ...H/s   median {:8.1}...
+benches/nativeloop_ab.rs:176  ...H/s   median {:8.1}...
+```
+Two hits, both deliberate column alignment in benchmark output. **No remaining
+instances of the mangling pattern**, confirming the sweep.
+
+### R9-F3 — The `should_panic` substring still sits before the region that was mangled, so the repair remains untested  [MINOR]
+**Where:** `src/randomx/tests.rs:503`
+**Claim:** `#[should_panic(expected = "needs a light-mode VM's Argon2d cache")]`
+matches a prefix that ends well before `got an ... empty one`. That is exactly
+why the mangled message passed CI, clippy and this test in the first place — and
+the expected substring was not extended when the message was repaired. If the
+same scripted-edit accident recurred tomorrow, this test would pass again.
+**Failure scenario:** cosmetic only — a garbled operator-facing panic message
+ships. But it is the identical blind spot that let it through once already, and
+closing it costs one word: extending the expected substring to reach past the
+join, e.g. `"got an empty one"`.
+**Confidence:** HIGH.
+
+### R9-F4 — The two `ShareVerifier` tests are gated to aarch64 for a reason that does not hold, and the gate costs CI the only new coverage it could have run  [MINOR]
+**Where:** `src/randomx/tests.rs:614` and `:663`; the comment on the accessors in
+`src/miner.rs`
+**Claim:** The accessors carry
+`// aarch64-gated to match their only callers: the tests need a real full-mode
+VM, which means the JIT, which is aarch64-only.` A full-mode VM does **not**
+require the JIT — `RandomXVm::new_full` is not architecture-gated, and on
+x86_64 it simply runs the interpreter. `ShareVerifier` itself is entirely
+architecture-independent: the lazy build, the rotation reset and the disabled
+path have nothing to do with emitted code.
+The plausible real reason would be avoiding a 2 GiB dataset build on x86_64 CI —
+but that saves nothing here, because `full_mode_vm_allocates_no_argon2d_cache`
+(`tests.rs:489`) and `dataset_generation_rejects_a_full_mode_vms_empty_cache`
+(`tests.rs:502`) are **ungated** and both call `test_key_000_dataset()`, so CI
+already forces that LazyLock.
+**Failure scenario:** no defect. The cost is coverage: CI cannot run any of the
+JIT work (issue #2), and these two tests are among the very few new ones it
+*could* validate — the state machine whose failure mode is "withhold every
+share". Gating them means the only machine that ever exercises them is the same
+single machine that exercises everything else.
+**Note:** the `#[cfg(all(test, target_arch = "aarch64"))]` on the accessors
+themselves is *correct* given the current callers — it prevents `dead_code`
+warnings on x86_64. If the tests were ungated the accessors should be too.
+**Confidence:** HIGH on the reasoning being wrong; MEDIUM on whether ungating is
+worth it to you, since it does add interpreter-speed full-mode hashing to CI.

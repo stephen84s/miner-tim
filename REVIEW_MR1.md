@@ -1,6 +1,34 @@
 # Review: MR !1 — JIT native iteration loop
 Reviewer: independent agent | Started: 2026-09-01T13:42:20Z | Last updated: 2026-09-02T (round 6 in progress)
 
+
+## Standing protocol — read this first if you are resuming cold
+
+This file is the durable state for an ongoing independent review of MR !1. It is
+written to continuously *because* review sessions have been ended twice by usage
+limits mid-round. If you are picking this up with no conversation context,
+everything you need is here.
+
+**Rules that apply to every round:**
+1. Write findings to this file **as you go** — after each finding, not at the
+   end. Assume you can be killed at any moment.
+2. Update the round's coverage ledger **before** starting each item and again
+   when it is done, so an interruption leaves an accurate picture.
+3. `git add REVIEW_MR1.md && git commit` periodically. **This file only.** Never
+   commit anything else, never amend, never push.
+4. Each round has a `## Round N brief` section stating scope and questions. If
+   you are resuming, that brief is your instructions — the requester's message
+   is not available to you.
+5. Verify claims by reading and running, not by trusting commit messages or the
+   requester's summary. Several rounds found defects in fixes whose commit
+   messages described them as correct.
+6. Do not fix anything. Review only.
+7. Finish by setting the round Status, filling "remaining work", committing, and
+   stating plainly whether the MR is mergeable.
+
+**Resume procedure:** find the last `## Round N coverage ledger`, take the first
+row not marked DONE, and continue from there.
+
 ## Status
 COMPLETE — rounds 5-10 finished. Round 10 (`5fe7eb3..6f2b95b`): no blockers, one major (R10-F2, a regression introduced by this commit), one minor. **Mergeable, but land R10-F2's two-line fix first.**
 
@@ -2226,6 +2254,41 @@ correct now than to explain later.
 
 # Round 11 — `6f2b95b..309cfda`
 One commit fixing R10-F2 and R10-F1.
+
+## Round 11 brief
+**Scope:** `git diff 6f2b95b..309cfda` — one commit, fixing R10-F2 and R10-F1.
+
+R10-F2 was a regression introduced while fixing round 9: `as_bool` returning
+`None` for an empty value was the right semantics, but round 7 had replaced
+`value = as_bool(v).or(value)` with a bare assignment, safe only while `as_bool`
+could never return `None`. Result: an empty token *erased* a previously resolved
+setting — `--native-loop off --native-loop ""` gave `on`, silently. The fix
+restores `.or(value)` on both flag arms and warns on an empty value.
+
+**Questions to attack:**
+1. **Is the `.or(value)` composition right in every order?** Both arms now read
+   `value = as_bool(v).or(warn_if_empty(flag, v).and(value))`. Check precedence
+   rather than trusting it: can an empty value still erase an earlier one via
+   the `=` form; does `warn_if_empty` returning `Some(())` unconditionally do
+   what is intended; can the warning fire on a non-empty value or fail to fire
+   on an empty one?
+2. **Does last-flag-wins still hold?** `--native-loop off --native-loop on` must
+   give `on`. There is a test, but an `.or` chain is exactly the change that
+   could turn "last wins" into "first non-empty wins" unnoticed.
+3. **R10-F1's composition test** (`an_enabled_but_unfed_verifier_fails_open`) —
+   does it pin what round 10 meant, and is the AUDIT wording (the arm is a guard
+   for future edits, not live in the current binary) accurate rather than
+   overclaiming?
+4. **The framing condition** from round 10 is now in `ShareVerifier::rekey`'s
+   doc: "keyed to the dataset" holds only while the full/light split stays
+   absolute. Is it stated where a future author would encounter it?
+
+Lower priority: is the new warning text useful mid-incident, and are the
+empty-value semantics documented anywhere an operator would look?
+(`mining.conf.example` currently says nothing about blank values.)
+
+**State at brief time:** 125 lib + 8 bin tests pass in release; clippy clean on
+aarch64 and x86_64.
 
 ## Round 11 coverage ledger
 | Area | Status | Notes |

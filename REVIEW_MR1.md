@@ -1555,3 +1555,23 @@ something has gone wrong.
 Nothing in that batch changes any round-8 conclusion: it touches documentation,
 a new precondition assert, and tests — not the emitted loop, the C1 arithmetic,
 or the share-verification decision.
+
+---
+
+# Round 9 — `3c281dc..5fe7eb3`
+Four commits: `914fe88` (R8-F1/R8-F2 fixes), `ea354ee` (panic-message repair),
+`8c80d8d` (my own review file — ignored), `5fe7eb3` (`ShareVerifier`
+extraction — the substantive one).
+
+## Round 9 coverage ledger
+| Area | Commit | Status | Notes |
+|---|---|---|---|
+| P1 — is the extraction behaviour-preserving? | 5fe7eb3 | IN PROGRESS | Live-bug risk on the default mining path |
+| P2 — do the tests pin the stale-verifier hazard? | 5fe7eb3 | NOT STARTED | |
+| P3 — `is_armed()` as the `classify_share` predicate | 5fe7eb3 | NOT STARTED | Possible silently-retired branch |
+| P4 — `generate`'s hard assert on a public API | 914fe88 | NOT STARTED | |
+| Panic-message repair + branch sweep | ea354ee | NOT STARTED | |
+| `#[cfg(all(test, aarch64))]` on the test accessors | 5fe7eb3 | NOT STARTED | |
+| AUDIT "no behaviour change" claim | 5fe7eb3 | NOT STARTED | |
+
+## Round 9 findings

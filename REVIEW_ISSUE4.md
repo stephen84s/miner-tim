@@ -116,6 +116,20 @@ present in itself. It would catch deletion of the suffix, which is not nothing,
 but it does not test what its message claims (that the line does not read as
 effective state), and the project has twice been bitten by exactly this shape.
 
+It is wrong in a second, provable way. The rendered line is
+
+```
+Native-loop JIT: on | share verification: on (requested; each worker reports its effective state once its VM is built)
+```
+
+— the parenthetical trails the **last** field, so on the plainest reading it
+qualifies *share verification*, not the `Native-loop JIT:` field, which is the
+field issue #4 was filed about over-claiming. So the assertion certifies a
+disclaimer that (a) is unconditional and (b) is not attached to the thing that
+needed disclaiming. Still minor, still no behaviour impact — the startup line's
+over-claim is now bounded and the per-worker line is the stated authority — but
+the assertion should not be read as evidence that the wording problem is closed.
+
 Related but weaker: `native_loop_guard_tests::every_precondition_is_load_bearing`
 computes `expected = flag && version == RxVersion::V1 && ds && jit`, which is a
 verbatim restatement of `native_loop_applies`'s body. It pins the predicate
@@ -134,8 +148,16 @@ against itself." `new_jit()` runs on **every** `RandomXVm` construction,
 including `ShareVerifier::reference()`'s reference VM (`src/miner.rs:430`). If
 the mining VM allocated fine and only the *verifier's* VM fails, verification
 stays correctly armed and still works (interpreter reference vs native-loop
-mining) — but the operator is told it was switched off. Log-only; the code does
-the right thing.
+mining) — but the operator is told it was switched off.
+
+Worth stating explicitly rather than leaving implicit: that failure silently
+changes what the reference path *is* (interpreter rather than body JIT), and the
+arming decision does not model it. It is harmless only because
+`native_loop_diff_tests::native_loop_matches_interpreter*`,
+`test_native_loop_known_answer*` and `test_vm_calculate_hash_jit` pin all three
+paths bit-identical in the default suite. Log-only today; the code does the
+right thing, and it does so because of a dependency nothing in this branch
+records.
 
 ---
 
@@ -308,3 +330,29 @@ Note in passing: `native_loop_diff_tests::native_loop_matches_interpreter*` and
 `test_native_loop_known_answer*` do run full-mode native-loop VMs in the default
 suite. They are the natural (and free) home for the missing positive assertion
 in F2.
+
+### Checked and clean: the `verify_failures` counter is not displayed as a green zero
+
+Issue #4's framing is "a health indicator that cannot go red is worse than no
+indicator", and this branch's own change to `get_verify_failures`'s doc concedes
+the value became ambiguous ("Zero is NOT by itself evidence that the JIT is
+correct"). So the obvious follow-on risk is that the 10 s stats loop renders an
+unqualified `0` and gives the operator false reassurance on x86_64 (verification
+now off) or on aarch64 after a failed `mmap(MAP_JIT)` (every worker disarmed).
+
+It does not. `src/bin/minertim.rs:147` reads the counter and `:188-194` emits it
+**only when `> 0`**, as an `error!`. Zero is never printed. There is no
+green-reading indicator to be made vacuous, so the doc-comment fix is the whole
+of what was needed and no fifth finding arises here.
+
+Two supporting checks on the same question:
+
+- Consumers are complete: `grep -rn "get_verify_failures\|verify_failures" src/`
+  returns only the field/init (`miner.rs:31/228`), the increment (`:755`), one
+  test (`:1065`), and the `minertim.rs` display above. Nothing else reads it.
+- The loud paths survive `RUST_LOG=warn`, which is the level at which the
+  startup line and the per-worker `info!` line both disappear: `new_jit()`'s
+  `error!` and the per-worker "requested but NOT active" `warn!` are both at or
+  above `warn`. So in the exact scenario issue #4 describes, an operator running
+  at the reduced level still gets told — twice. That is the strongest part of
+  this fix.

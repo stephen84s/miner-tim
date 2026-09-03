@@ -2348,3 +2348,67 @@ microseconds with no dataset.
 
 ### Verification
 125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 11 applied. No blockers, no majors, mergeable.
+
+Round 11 resumed cleanly from the on-disk brief and ledger after the second
+usage-limit interruption — the persistence protocol did its job. It confirmed
+the R10-F2 fix introduces no regression of its own (the first round in three
+where the fix was clean) and raised four minors, all applied.
+
+### Confirmed by measurement, not reasoning
+- **The `.or(value)` composition is correct in every order** — twelve cases
+  against a freshly built binary, including both the `--flag v` and `--flag=v`
+  forms. Neither arm is privileged.
+- **Last-flag-wins cannot degrade into first-non-empty-wins**: `as_bool(v)` is
+  the *left* operand, so any parseable later value short-circuits and only an
+  empty one defers.
+
+### R11-F1 (fixed): the erasure was fixed for flags but the silence only half
+`MINERTIM_NATIVE_LOOP=` still resolved silently, because the environment arm
+never called `warn_if_empty`. `--native-loop "$NL"` and
+`MINERTIM_NATIVE_LOOP="$NL"` come from the same shell idiom, so warning on one
+and not the other was arbitrary. Both arms warn now, naming the flag or the
+variable. `warn_if_empty` also became a plain statement rather than an
+`Option<()>` threaded through `.and(value)` — that trick was denser than the
+thing it replaced, which is how R10-F2 hid in the first place.
+
+### R11-F2 (fixed): the honest wording was in AUDIT but not at the code
+Round 10 established that `SubmitVerifierUnavailable` is a guard for future
+edits rather than a live path. That correction landed here but not in the two
+comments that make the claim — and a future author edits the comment three lines
+above the call, not a September audit entry. Both now state it plainly.
+
+### R11-F3 (fixed): the condition was beside the claim, not the break site
+The "keyed to the dataset" reasoning was documented on `ShareVerifier::rekey`.
+But someone adding a compute-on-miss path edits `vm.rs`'s `match dataset`, whose
+comment read only "Full mode: array lookup. Light mode: compute on-the-fly" —
+no hint that anything depended on that split staying absolute. The dependency is
+now recorded there, naming the test it would silently weaken.
+
+### R11-F4 (fixed) — and my question named the wrong file
+I asked whether the empty-value semantics should be documented in
+`mining.conf.example`. The reviewer pointed out a blank there is inert (the
+Makefile's `$(if ...)` suppresses the flag), so documenting it would describe a
+case that file cannot produce. `--help` is the right place, and that is where it
+went.
+
+### Also adopted: state the resolved switch state, do not imply it
+The warnings only fire in the non-default direction, so the resolved state was
+inferable *only from the absence of a line* — which is precisely how an
+accidentally-flipped switch stays unnoticed. One unconditional line now reports
+both switches at startup:
+
+    Native-loop JIT: on | share verification: on
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64. All
+switch behaviours re-verified against a freshly built binary: empty env warns,
+empty flag warns, an explicit setting survives an empty one in either order, and
+last-flag-wins holds.
+
+### Reviewer's closing position
+Mergeable, no caveat. Nothing outstanding across rounds 5-11 can produce a wrong
+hash, a withheld valid share, or an out-of-bounds access.

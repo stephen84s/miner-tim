@@ -1315,6 +1315,17 @@ fn execute_vm_inner(
         }
 
         // Full mode: array lookup. Light mode: compute on-the-fly.
+        //
+        // This split is load-bearing beyond performance, and the dependency is
+        // not local. `cache_memory` and `ss_programs` are the only route by
+        // which the cache key influences a hash, and this is their only read
+        // during hashing — which is why `RandomXVm::new_full` builds no Argon2d
+        // cache at all, and why the share verifier is documented as keyed to
+        // the *dataset* rather than the seed. A lazily-filled dataset with a
+        // compute-on-miss path here would make the key load-bearing again and
+        // silently weaken `share_verifier_builds_lazily_and_resets_on_seed_rotation`,
+        // which leans on the dataset being the only staleness vector.
+        // See `ShareVerifier::rekey` (review round 11, R11-F3).
         let item_number = read_ptr / CACHE_LINE_SIZE as u64;
         let dataset_line = match dataset {
             Some(ds) => *ds.get_item(item_number),

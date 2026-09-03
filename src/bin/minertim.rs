@@ -33,6 +33,10 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
+        eprintln!("  Switch values are on/off, true/false, yes/no, 1/0. An empty value is");
+        eprintln!("                    treated as unset and ignored (with a warning) rather than");
+        eprintln!("                    overriding an earlier one, so `--flag \"$VAR\"` with $VAR");
+        eprintln!("                    unset does not silently undo a previous setting.");
         eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
         eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
         eprintln!("                    if shares start being rejected, turn it off and restart to");
@@ -70,6 +74,17 @@ fn main() {
         shutdown.store(false, Ordering::SeqCst);
     })
     .expect("Failed to set Ctrl+C handler");
+
+    let on_off = |b: bool| if b { "on" } else { "off" };
+    // Unconditional: the warnings below only fire in the non-default direction,
+    // so without this the resolved state is inferable only from the *absence*
+    // of a line — which is exactly how an accidentally-flipped switch stays
+    // unnoticed (review round 11).
+    log::info!(
+        "Native-loop JIT: {} | share verification: {}",
+        on_off(native_loop),
+        on_off(verify_shares),
+    );
 
     let mut miner = Miner::new(mining_active.clone());
     miner.set_native_loop(native_loop);
@@ -250,7 +265,7 @@ fn parse_donate_level(args: &[String]) -> u8 {
 /// Previously it was silently ignored, which was the one shape that could leave
 /// an operator believing they had changed a setting when they had not.
 fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_safe: bool) -> bool {
-    parse_switch_with(args, flag, std::env::var(env).ok().as_deref(), default_on, fail_safe)
+    parse_switch_with(args, flag, env, std::env::var(env).ok().as_deref(), default_on, fail_safe)
 }
 
 /// The switch logic, with the environment value injected.
@@ -261,24 +276,26 @@ fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_s
 /// `parse_switch` — so an earlier "no other test reads the environment"
 /// justification was simply wrong (review round 9, R9-F5). Injection removes
 /// the hazard rather than reasoning about it.
-/// Warn when a switch is handed an empty value, and return `Some(())` so the
-/// caller's `.and(value)` keeps whatever was already resolved.
+/// Warn when a switch is handed an empty value.
 ///
-/// Silence here is what made R10-F2 hard to notice: the operator wrote an
-/// explicit setting, it was discarded, and nothing said so.
-fn warn_if_empty(flag: &str, v: &str) -> Option<()> {
+/// Silence is what made R10-F2 hard to notice: the operator wrote an explicit
+/// setting, it was discarded, and nothing said so. `label` is the flag or the
+/// environment variable name — **both** arms warn, because
+/// `--native-loop "$NL"` and `MINERTIM_NATIVE_LOOP="$NL"` come from the same
+/// shell idiom and one warning without the other is arbitrary (R11-F1).
+fn warn_if_empty(label: &str, v: &str) {
     if v.trim().is_empty() {
         eprintln!(
-            "warning: {flag} given an empty value - ignoring it; the previous \
+            "warning: {label} given an empty value - ignoring it; the previous \
              setting or the default applies. Use on|off."
         );
     }
-    Some(())
 }
 
 fn parse_switch_with(
     args: &[String],
     flag: &str,
+    env_label: &str,
     env_value: Option<&str>,
     default_on: bool,
     fail_safe: bool,
@@ -314,17 +331,24 @@ fn parse_switch_with(
         }
     };
 
-    let mut value = env_value.and_then(as_bool);
+    let mut value = env_value.and_then(|v| {
+        warn_if_empty(env_label, v);
+        as_bool(v)
+    });
     let eq_prefix = format!("{flag}=");
 
     let mut i = 0;
     while i < args.len() {
         if let Some(v) = args[i].strip_prefix(&eq_prefix) {
+            warn_if_empty(flag, v);
             // `.or(value)`: an empty value must not erase an earlier one.
-            value = as_bool(v).or(warn_if_empty(flag, v).and(value));
+            value = as_bool(v).or(value);
         } else if args[i] == flag {
             match args.get(i + 1) {
-                Some(v) => value = as_bool(v).or(warn_if_empty(flag, v).and(value)),
+                Some(v) => {
+                    warn_if_empty(flag, v);
+                    value = as_bool(v).or(value);
+                }
                 None => {
                     eprintln!(
                         "warning: {flag} given with no value - assuming {word} \
@@ -430,13 +454,13 @@ mod tests {
         // An empty environment value must not erase an explicit flag either,
         // nor vice versa.
         assert!(
-            !parse_switch_with(&args(&["--x", ""]), "--x", Some("off"), true, false),
+            !parse_switch_with(&args(&["--x", ""]), "--x", "X_ENV", Some("off"), true, false),
             "an empty flag erased an explicit environment setting"
         );
 
         // With nothing else to fall back on, empty means "unset" -> default.
         assert!(parse_native_loop(&args(&["--native-loop", ""])));
-        assert!(parse_switch_with(&args(&[]), "--x", Some(""), true, false));
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", Some(""), true, false));
     }
 
     /// Last flag wins, so a wrapper script can append an override.
@@ -456,26 +480,26 @@ mod tests {
         fn env(v: &str) -> Option<&str> {
             Some(v)
         }
-        assert!(!parse_switch_with(&args(&[]), "--x", env("off"), true, false), "env beats default");
+        assert!(!parse_switch_with(&args(&[]), "--x", "X_ENV", env("off"), true, false), "env beats default");
         assert!(
-            parse_switch_with(&args(&["--x", "on"]), "--x", env("off"), true, false),
+            parse_switch_with(&args(&["--x", "on"]), "--x", "X_ENV", env("off"), true, false),
             "flag beats env"
         );
 
         // An unparseable env value takes the switch's fail-safe direction, not
         // the default — and that direction is per-switch (R7-F2).
-        assert!(!parse_switch_with(&args(&[]), "--x", env("wat"), true, false));
-        assert!(parse_switch_with(&args(&[]), "--x", env("wat"), true, true));
+        assert!(!parse_switch_with(&args(&[]), "--x", "X_ENV", env("wat"), true, false));
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env("wat"), true, true));
 
         // An EMPTY value is "unset", not a typo. `NATIVE_LOOP=` in mining.conf
         // and an unset shell variable both land here, and neither expresses an
         // intent to change anything — so both must fall through to the default
         // rather than to the fail-safe direction, which would silently disable
         // the native loop for anyone who left the key blank.
-        assert!(parse_switch_with(&args(&[]), "--x", env(""), true, false), "empty env is unset");
-        assert!(parse_switch_with(&args(&[]), "--x", env("  "), true, false), "blank env is unset");
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env(""), true, false), "empty env is unset");
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env("  "), true, false), "blank env is unset");
 
-        assert!(parse_switch_with(&args(&[]), "--x", None, true, false), "default applies unset");
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", None, true, false), "default applies unset");
     }
 
     #[test]

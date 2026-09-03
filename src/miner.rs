@@ -439,6 +439,12 @@ impl ShareVerifier {
     /// instead of enforcing it (review round 9, R9-F1). No share was at risk,
     /// since both verdicts submit, but a defence that cannot be reached is not
     /// a defence.
+    ///
+    /// To be precise about what this buys: the arm is still not reachable from
+    /// `worker_loop` as the code stands, because a share cannot exist before
+    /// `rekey` has run. Restoring the distinction makes it reachable *in
+    /// principle*, so a future edit that separates those two facts fails open
+    /// rather than silently submitting unverified (R11-F2).
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -669,9 +675,17 @@ fn worker_loop(
             // The decision itself lives in `classify_share` so every branch is
             // reachable from a test; only the expensive recomputation is here.
             let reference = verifier.reference(&job_blob_current);
-            // `is_enabled`, not `is_armed`: the distinction is what keeps the
-            // "verification wanted but unavailable" case reachable so it can
-            // fail open loudly rather than being folded into "not verified".
+            // `is_enabled`, not `is_armed`: the distinction keeps the
+            // "verification wanted but unavailable" case *logically* reachable
+            // so it fails open loudly instead of being folded into "not
+            // verified".
+            //
+            // It is not reachable in this binary today, and the comment says so
+            // rather than implying coverage: `vm` is assigned only inside the
+            // block that calls `rekey`, so by the time a share exists the
+            // verifier always holds a dataset. This is a guard for future
+            // edits, pinned by `an_enabled_but_unfed_verifier_fails_open`
+            // (review round 11, R11-F2).
             let verdict = classify_share(verifier.is_enabled(), &hash, reference.as_ref());
             match verdict {
                 ShareVerdict::Withhold => {

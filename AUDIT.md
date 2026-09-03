@@ -2478,3 +2478,84 @@ that no spurious verification warning fires when the native loop is already off.
 ### Reviewer's position
 Mergeable, no caveat. Nothing outstanding across rounds 5-12 can produce a wrong
 hash, a withheld valid share, or an out-of-bounds access.
+
+---
+
+## 2026-09-03 — Review-cost diagnosis, ledger split, and MR !1 round 13
+
+### Request
+User: "can you check why the token usage is high ... we are unable to finish MR!1
+review", then "resume the reviewer".
+
+### What was actually wrong
+Measured from the session transcripts, deduplicated by API message id:
+
+| | requests | cache writes | cache reads |
+|---|---|---|---|
+| Main session (since 2026-08-11) | 730 | 16.8M | 175.3M |
+| All subagents | 475 | 6.9M | 103.3M |
+| — of which the MR !1 reviewer alone | 285 | 5.1M | **88.9M** |
+
+The reviewer (`agent-a59599aad393b5e96`) was being **resumed** each round rather
+than respawned, per the then-current `feedback_auto_review` memory note. Its
+context grew 35k → 560k tokens across rounds 5–12. Because work gaps (5–8 h)
+exceed the prompt-cache TTL, every resume first rewrote ~550k tokens cold and
+then re-read them on each internal turn. Its last 60 requests cost 27.9M read
+tokens; round 13 could not start. Its final log line is a 541,993-token cold
+write followed by nothing.
+
+Not a contributing factor: tool discipline. 558 shell calls averaged 0.8 KB of
+output; all tool results across the session totalled 0.55 MB.
+
+### Fix
+- `REVIEW_MR1.md` split (`ea86ec9`): **175 KB → 6.5 KB**. Head keeps the standing
+  protocol, status, open-items table, a one-line index of every closed finding
+  R5-F1…R12-F2, and the current round's brief and ledger. Full round transcripts
+  moved verbatim to `REVIEW_MR1_ARCHIVE.md`, to be grepped by finding ID.
+- Round 13 run on a **cold-spawned** reviewer with an explicit context budget
+  (do not read the archive or AUDIT.md whole; scope to the diff).
+- **Result: 92k tokens for the full round**, versus ~15M for a resume. ~160x.
+- `feedback_auto_review` memory note rewritten: spawn cold each round, carry
+  continuity in a small file. The note previously said the opposite, and that is
+  what produced this. Both halves recorded — continuity still matters, because
+  every round from 5 on found a defect in the previous round's *fix*.
+
+### Round 13 outcome (`74c8186..6765b17`)
+**Mergeable. No blockers, no majors.** Three new findings, all open:
+
+- **R13-F1 (MINOR)** — answers round 13's priority 1: the two expressions **do**
+  disagree, on non-aarch64 only. `minertim.rs:87` reports
+  `verify_shares && native_loop && cfg!(aarch64)`; `miner.rs:549` builds
+  `ShareVerifier::new(verify_shares && native_loop)`. Confirmed on a real
+  `x86_64-apple-darwin` build: prints `share verification: off`, then constructs
+  `ShareVerifier::new(true)`. Direction is an *under*claim. The same false
+  premise ("verification is skipped when the native loop is off") is now also
+  asserted in the new code comment and in this file's round-12 entry.
+- **R13-F2 (MINOR)** — R12-F1(b) closed the wrong-architecture case but not the
+  missing-JIT case. `native_effective` models only one of the four preconditions
+  in `execute_vm_inner`'s guard; `jit.is_some()` comes from
+  `JitCompiler::new().ok()` at `vm.rs:1681,1714`, which discards a
+  `mmap MAP_JIT failed` error with no log. On the shipping platform the startup
+  line can say `Native-loop JIT: on` while the interpreter runs — and the
+  verifier then compares the interpreter against itself and reports
+  `verify_failures = 0` forever. Structurally identical to round 5's F1.
+- **R13-F3 (TRIVIAL)** — `--help` synopsis omits `--verify-shares`; empty-value
+  example is flag-only; the native-loop-DISABLED warning gives non-actionable
+  advice on non-aarch64.
+
+Priorities 2–4 answered: R12-F1's fix is correct in all four combinations on
+aarch64 (traced and measured against the built binary, no spurious warning);
+R12-F2 fully closed; "unconditional" is gone from the code, and the one
+remaining hit in this file is the round-11 entry, correctly left under the
+append-only rule and corrected below it.
+
+### Verification
+Reviewer reproduced: 125 lib + 8 bin tests pass in release (92.67 s, 2
+long-running dataset tests ignored as before); clippy clean on aarch64 and
+x86_64. It also recorded that **nothing in the test suite exercises the startup
+reporting path on either target** — which is what let R13-F1 through, and makes
+open issue #2 (multi-platform CI) doubly earned.
+
+### Not done — awaiting user decision
+R13-F1/F2/F3 are unfixed. The MR is mergeable as it stands; the choice is fix
+now or merge and carry them as follow-ups.

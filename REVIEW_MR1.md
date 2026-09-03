@@ -1638,3 +1638,57 @@ sees the arm handled and reasonably assumes it is live.
 gains another `None` path — but the AUDIT should say the branch became
 unreachable rather than that nothing changed.
 **Confidence:** HIGH — this follows directly from the two method bodies.
+
+### R9-F2 — The rotation test's dataset assertion is vacuous, and the dataset is the half that actually matters  [MINOR]
+**Where:** `src/randomx/tests.rs`,
+`share_verifier_builds_lazily_and_resets_on_seed_rotation`
+**Claim:** You asked whether re-keying with the same `Arc` weakens the test.
+It does, and specifically it hollows out the assertion that covers the real
+hazard.
+
+**First, a fact I measured rather than assumed: in full mode the key has no
+effect on the hash at all.** Two full-mode VMs over the *same* dataset with
+completely different keys:
+```
+key ALPHA : f04a3a9feec72386571fd896e068f8abca0361b3b8dce2efbddffa6c7c5c46bc
+key BRAVO : f04a3a9feec72386571fd896e068f8abca0361b3b8dce2efbddffa6c7c5c46bc
+=> key affects full-mode hash? false
+```
+That follows from `914fe88`: `new_full` no longer builds a cache, and
+`ss_programs` are read only by `init_dataset_item` on the light-mode arm. So the
+only state that can make a verifier stale is **the dataset**.
+
+Now the two halves of the rotation:
+- **Drop the cached VM** — covered properly. `assert!(!v.has_cached_vm())` after
+  `rekey` is a real assertion and catches the primary mechanism (a VM built
+  against the old dataset being reused).
+- **Adopt the new dataset** — **not covered.** The test rekeys with
+  `ds.clone()`, the same `Arc` allocation, so `holds_dataset(&ds)` is
+  `Arc::ptr_eq(same, same)` — trivially true. It cannot distinguish "adopted the
+  new dataset" from "ignored the argument and kept the old one". If `rekey` were
+  mutated to `if self.dataset.is_none() { self.dataset = Some(dataset) }`, every
+  assertion in this test would still pass, and the production symptom would be
+  the catastrophic one: every share withheld after the first rotation, with an
+  error message telling the operator to restart with `--native-loop off`, after
+  which the rejects continue.
+
+Conversely, the *other* half of `rekey` — the `self.key` bookkeeping the test
+also does not check — is **inert**, per the measurement above. So the test's
+emphasis is inverted relative to the risk: the untested half that looks
+frightening is harmless, and the untested half that looks like bookkeeping is
+the load-bearing one.
+
+**Mitigating:** `rekey`'s body is a single unconditional
+`self.dataset = Some(dataset);` with no branch that could skip it, so this is a
+gap in proof, not evidence of a defect. I read it and it is correct.
+
+**The fix is free — no third dataset needed.** The test binary already holds two
+distinct 2 GiB datasets as `LazyLock` statics in the same process:
+`full_hash_tests::test_key_000_dataset()` (`b"test key 000"`) and
+`native_loop_diff_tests::test_dataset()` (`b"native loop test key"`). Both are
+in `src/randomx/tests.rs` and both are compiled on aarch64. Making the latter
+`pub(super)` and rotating between the two would give genuinely different `Arc`s
+and let the test assert `!holds_dataset(&ds1) && holds_dataset(&ds2)` at zero
+additional memory or time cost. That also turns R5-F4 (two datasets as a
+liability) into an asset.
+**Confidence:** HIGH on the vacuity and on the key-irrelevance (measured).

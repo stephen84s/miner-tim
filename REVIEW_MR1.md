@@ -2297,7 +2297,7 @@ aarch64 and x86_64.
 | P2 — last-flag-wins still holds? | DONE | R11-VC2: holds, verified 4 orders |
 | P3 — R10-F1 composition test + AUDIT wording | DONE | R11-VC3/VC4; R11-F2 on the code comments |
 | P4 — framing condition placement | DONE | R11-F3: at the claim, not at the break site |
-| Warning text; blank-value docs | IN PROGRESS | |
+| Warning text; blank-value docs | DONE | R11-VC5; R11-F4 |
 
 ## Round 11 findings
 
@@ -2458,3 +2458,47 @@ exists to prevent: a silent weakening that no test reports. One line at
 test assumes the dataset is the only staleness vector") would put it in the path
 of the person who would break it.
 **Confidence:** HIGH — the grep is exhaustive over `src/`.
+
+### R11-F4 — Empty-value semantics are documented nowhere an operator would look, and `mining.conf.example` is the wrong place to fix it  [MINOR]
+**Where:** `--help` text; `mining.conf.example`
+**Claim:** `grep -i "blank\|empty" mining.conf.example` returns nothing, and the
+`--help` entries for `--native-loop` and `--verify-shares` say nothing about
+empty values either. So the behaviour an operator can now trip — an empty value
+is ignored, the previous setting or the default stands — exists only in the
+source and in a warning they may not see (R11-F1: the environment arm prints
+none).
+
+**But note where the fix belongs, because your question named the wrong file.**
+A blank in `mining.conf` is *inert*: it is a Makefile variable, and
+`$(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),)` suppresses the flag
+entirely — the same fact you accepted in round 10. So documenting blank-value
+semantics in `mining.conf.example` would describe a case that file cannot
+produce, and would arguably mislead. The semantics only matter for the two
+routes that *can* carry an empty string: `MINERTIM_NATIVE_LOOP=` /
+`MINERTIM_VERIFY_SHARES=` in the environment, and `--native-loop ""` on the
+command line. `--help` is where both are already described, and is where a
+sentence belongs — something like "an empty value is ignored; the previous
+setting or the default applies".
+**Failure scenario:** documentation only.
+**Confidence:** HIGH.
+
+### R11-VC5 — the warning text is good on *what* and *why*, and silent on *what now*.
+```
+warning: --native-loop given an empty value - ignoring it; the previous
+setting or the default applies. Use on|off.
+```
+Mid-incident this gets the important things right: it names the flag, says the
+value was discarded rather than misparsed, and tells the operator the accepted
+spellings. Compared with the excellent `Native-loop JIT DISABLED` message (state
++ cost + how to undo), the gap is that it stops one step short of the question
+the operator actually has — *is the native loop on or off right now?* "The
+previous setting or the default applies" asks them to work it out.
+
+It cannot name the outcome at that point, correctly: a later flag may still
+override, so the resolved value is not yet known inside the argument loop. The
+cheap fix is at the other end — the startup path already logs loudly when the
+switch resolves **off** and says nothing when it resolves **on**, so the state is
+inferable only from the *absence* of a line. One unconditional
+`log::info!("Native-loop JIT: {on|off}")` at startup would mean no operator ever
+has to infer it, and would compose well with this warning. Not a defect; a
+suggestion.

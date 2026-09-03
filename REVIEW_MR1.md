@@ -2293,10 +2293,84 @@ aarch64 and x86_64.
 ## Round 11 coverage ledger
 | Area | Status | Notes |
 |---|---|---|
-| P1 — `.or(value)` composition in every order | IN PROGRESS | Precedence + warn_if_empty semantics |
-| P2 — last-flag-wins still holds? | NOT STARTED | |
+| P1 — `.or(value)` composition in every order | DONE | R11-VC1: correct; R11-F1 on the env arm |
+| P2 — last-flag-wins still holds? | DONE | R11-VC2: holds, verified 4 orders |
 | P3 — R10-F1 composition test + AUDIT wording | NOT STARTED | |
 | P4 — framing condition placement | NOT STARTED | |
 | Warning text; blank-value docs | NOT STARTED | |
 
 ## Round 11 findings
+
+### R11-VC1 — P1: the `.or(value)` composition is correct in every order I could construct, including the `=` form.
+I did not reason about the precedence; I ran it. Twelve cases against a freshly
+built release binary, reporting the resolved state and how many `warning:` lines
+were printed:
+
+```
+A  env=''                          loop=ON   warnings=0
+B  --native-loop ''                loop=ON   warnings=1
+C  env=off + --native-loop ''      loop=OFF  warnings=1   <- R10-F2 case C, fixed
+D  --native-loop off then ''       loop=OFF  warnings=1   <- R10-F2 case D, fixed
+D2 --native-loop=off then =        loop=OFF  warnings=1   <- the `=` form, fixed
+E  VERIFY_SHARES=''                loop=ON   warnings=0
+F  env=off (control)               loop=OFF  warnings=0
+G  off then on                     loop=ON   warnings=0
+H  on then off                     loop=OFF  warnings=0
+I  =on then =off                   loop=OFF  warnings=0
+J  '' then explicit off            loop=OFF  warnings=1
+K  env=on + flag off               loop=OFF  warnings=0
+```
+
+Answering your three sub-questions from the evidence:
+- **Can an empty value still erase an earlier one through the `=` form?** No —
+  D2 is the `=` form and the explicit `off` survives. Both arms carry the same
+  `.or(...)`, so neither is privileged.
+- **Does `warn_if_empty` returning `Some(())` unconditionally do what you
+  intend?** Yes. `Option::or`'s argument is eager, so `warn_if_empty` is
+  evaluated on *every* value — but it only prints when `v.trim().is_empty()`,
+  and the unconditional `Some(())` is what makes `.and(value)` hand back the
+  previously resolved value rather than `None`. The `Option<()>` is purely a
+  sequencing device for the side effect. It works, though it is doing two
+  unrelated jobs in one expression; a reader will have to think about `.and` to
+  see that it is a pass-through. That is a style observation, not a defect.
+- **Can the warning fire on a non-empty value, or fail to fire on an empty
+  one?** Not on a non-empty one: G, H, I and K all pass explicit values and
+  print zero warnings. It fires on every empty *flag* value: B, C, D, D2, J each
+  print exactly one. The one place it does not fire is the environment arm —
+  see R11-F1.
+
+### R11-VC2 — P2: last-flag-wins survives the `.or` chain.
+This was the right thing to be suspicious of, and it holds:
+```
+G  --native-loop off --native-loop on     -> ON
+H  --native-loop on  --native-loop off    -> OFF
+I  --native-loop=on  --native-loop=off    -> OFF
+K  env=on, --native-loop off              -> OFF   (flag still beats env)
+```
+The reason it cannot degrade into "first non-empty wins" is structural:
+`as_bool(v)` is the **left** operand of the `.or`, so any parseable later value
+short-circuits and overwrites. Only an *empty* later value defers to the earlier
+one — which is precisely the intended semantics. J (`"" ` then `off`) confirms
+the reverse order also behaves: an empty first token does not poison a later
+explicit setting.
+
+### R11-F1 — The environment arm still has no empty-value warning, so `MINERTIM_NATIVE_LOOP=` remains silent  [MINOR]
+**Where:** `src/bin/minertim.rs` — `let mut value = env_value.and_then(as_bool);`
+**Claim:** R10-F2 had two halves: (a) an empty value must not erase an explicit
+one, and (b) it should warn rather than being silent. **(a) is fully fixed**,
+including the `=` form. **(b) is fixed only for the flag arms.** The environment
+arm calls `as_bool` directly with no `warn_if_empty`, so an empty environment
+value is discarded without a word — cases **A** and **E** above, zero warnings.
+**Failure scenario:** the same shape as my round-10 case A, unchanged: a wrapper
+writing `MINERTIM_NATIVE_LOOP="$NL"` with `$NL` unset gets the native loop **on**
+with no diagnostic, while the operator believes they disabled it. It is strictly
+less serious than R10-F2 was, because the env arm is resolved first and so has
+nothing to erase — the value simply falls through to the default. And the
+default is the faster, correct-hash path, with share verification still on.
+**Why I am still raising it:** the asymmetry is hard to justify from the
+operator's side. `--native-loop "$NL"` and `MINERTIM_NATIVE_LOOP="$NL"` with an
+unset `$NL` arise from the identical shell idiom, and one warns while the other
+does not. One line — `.or(warn_if_empty(flag, v).and(None))` on the env arm, or
+simply calling `warn_if_empty` before `and_then` — closes it.
+**Confidence:** HIGH — measured, and the code path has no call to
+`warn_if_empty`.

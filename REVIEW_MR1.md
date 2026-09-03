@@ -2374,6 +2374,13 @@ does not. One line — `.or(warn_if_empty(flag, v).and(None))` on the env arm, o
 simply calling `warn_if_empty` before `and_then` — closes it.
 **Confidence:** HIGH — measured, and the code path has no call to
 `warn_if_empty`.
+**Knock-on:** the AUDIT describes the fix as *"restoring `.or(value)` on both
+flag arms and warning on an empty value"*. The first clause is precise about
+scope; the second reads as covering all empty values when it covers only the
+flag arms. Worth a two-word qualifier so the log stays exact. The AUDIT's other
+claim here — *"All six cases re-verified against a freshly built binary"* — I
+checked independently and it holds: every resolved state matches, and it does
+not claim case A gained a warning.
 
 ### R11-VC3 — P3: `an_enabled_but_unfed_verifier_fails_open` pins exactly what I asked for.
 It is the composition test from R10-F1, built the way I described: a

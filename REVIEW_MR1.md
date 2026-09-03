@@ -1927,3 +1927,20 @@ correct with the sweep independently confirmed.
 - Still open by choice from earlier rounds and unchanged: R5-F2, R5-F4, R5-F6,
   issue #1 (R5-F7), issue #2 (ARM64 CI). Of these, issue #2 remains the only one
   I would not leave open indefinitely.
+
+---
+
+# Round 10 — `5fe7eb3..6f2b95b`
+One commit applying all seven round-9 minors.
+
+## Round 10 coverage ledger
+| Area | Status | Notes |
+|---|---|---|
+| P1 — is `SubmitVerifierUnavailable` reachable again? | IN PROGRESS | Or was the problem just moved? |
+| P2 — empty-env behaviour change (R9-F5 refactor) | NOT STARTED | Checked as a change, not a fix |
+| P3 — dataset hoist: same datasets, still two? | NOT STARTED | |
+| P4 — `vm_is_on_reference_path()` on x86_64 | NOT STARTED | Vacuous there? |
+| "Keyed to the dataset, not the seed" framing | NOT STARTED | |
+| R9-F3 substring; AUDIT accuracy | NOT STARTED | |
+
+## Round 10 findings

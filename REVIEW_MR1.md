@@ -42,16 +42,22 @@ fixed. **Mergeable as of `6765b17`.**
 Rounds 5–13 found nothing that can produce a wrong hash, a withheld valid share,
 or an out-of-bounds access.
 
-## Open items — carried, by choice
+## Open items — all tracked on GitLab
 
-| ID | Item | Why still open |
+Every deferred finding now has an issue, so this ledger is no longer the only
+record. Filed 2026-09-03.
+
+| ID | Issue | Item |
 |---|---|---|
-| R5-F2 | `make test` runs debug; AUDIT verification was release, so `debug_assert` nets never ran in the verified profile | Deferred |
-| R5-F4 | Two 2 GiB `LazyLock` test datasets, ~4.5 GiB peak | May block contributors on 16 GB machines |
-| R5-F6 | 11-thread bench phase has no inter-thread barrier | Dilutes rather than inflates the result |
-| R5-F7 | 8 redundant FMOVs per iteration in the f-load path | GitLab issue #1; opportunity, not a defect |
-| — | ARM64 / multi-platform CI | GitLab issue #2. **Reviewer: the one item not to leave open indefinitely.** |
-| — | `worker_loop` verifier glue (3 lines) | Reviewer to re-check whether the `ShareVerdict`/`classify_share` extraction closed this |
+| R13-F1 | [#3](https://gitlab.com/stephen84s/miner-tim/-/issues/3) | Startup line and `miner.rs:549` disagree on non-aarch64 — reports `off`, verifies anyway. Introduced by `6765b17`. |
+| R13-F2 | [#4](https://gitlab.com/stephen84s/miner-tim/-/issues/4) | Silent `MAP_JIT` fallback: `.ok()` at `vm.rs:1681,1714` swallows the error, line still says `on`, verifier compares the interpreter against itself. **Reachable on the shipping platform.** |
+| R13-F3 | [#5](https://gitlab.com/stephen84s/miner-tim/-/issues/5) | `--help` synopsis omits `--verify-shares`; two other wording carry-overs. |
+| R5-F2 | [#6](https://gitlab.com/stephen84s/miner-tim/-/issues/6) | `make test` runs debug; AUDIT verification ran release, so the `debug_assert` nets never ran in the verified profile. |
+| R5-F4 | [#7](https://gitlab.com/stephen84s/miner-tim/-/issues/7) | Two 2 GiB `LazyLock` test datasets, ~4.5 GiB peak — may block contributors on 16 GB machines. |
+| R5-F6 | [#8](https://gitlab.com/stephen84s/miner-tim/-/issues/8) | Multi-thread bench phase has no barrier; dilutes rather than inflates, but the aggregate CI is too narrow. |
+| R5-F7 | [#1](https://gitlab.com/stephen84s/miner-tim/-/issues/1) | 8 redundant FMOVs per iteration in the f-load path. Opportunity, not a defect. |
+| — | [#2](https://gitlab.com/stephen84s/miner-tim/-/issues/2) | ARM64 / multi-platform CI. **The one item not to leave open indefinitely** — and doubly earned: R13-F1 exists precisely because no non-aarch64 build is ever run, only linted. |
+| — | — | `worker_loop` verifier glue (3 lines): re-check whether the `ShareVerdict`/`classify_share` extraction closed this. |
 
 ## Closed findings — index only
 

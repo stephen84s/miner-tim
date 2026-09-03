@@ -2834,3 +2834,19 @@ comment at the site says so.
   pattern) is **on `main`, not this branch**, and was left alone under scope
   discipline.
 - `REVIEW_ISSUE4.md` is the reviewer's record and was not modified.
+
+### Merge record (2026-09-04)
+MR !2 merged into `main` as `10b4546`, pipeline green on `af3825b` (rust:test
+18m46s, rust:audit, rust:lint all success). GitLab issues **#3 and #4 closed
+automatically** by the MR description's closing pattern.
+
+Open follow-ups after this merge: #1 (R5-F7, redundant FMOVs), #2 (multi-platform
+CI), #5 (R13-F3, `--help` wording), #6 (R5-F2, debug/release profile gap in the
+verification evidence), #7 (R5-F4, ~4.5 GiB test-suite peak), #8 (R5-F6, no
+barrier in the multi-thread bench phase).
+
+Process note worth carrying: this branch was run as three **cold-spawned** agents
+— implement, review, fix — for ~300k tokens total. The previous pattern of
+resuming one long-lived reviewer cost ~89M tokens across MR !1's rounds and left
+round 13 unable to start. Cold spawn plus a small durable ledger file is the
+working arrangement; see the rewritten `feedback_auto_review` memory note.

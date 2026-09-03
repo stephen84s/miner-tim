@@ -30,7 +30,7 @@ everything you need is here.
 row not marked DONE, and continue from there.
 
 ## Status
-COMPLETE — rounds 5-10 finished. Round 10 (`5fe7eb3..6f2b95b`): no blockers, one major (R10-F2, a regression introduced by this commit), one minor. **Mergeable, but land R10-F2's two-line fix first.**
+COMPLETE — rounds 5-11 finished. Round 11 (`6f2b95b..309cfda`): no blockers, no majors, four minors (all documentation/diagnostic). Both round-10 findings verified fixed. **Mergeable.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -2509,3 +2509,74 @@ inferable only from the *absence* of a line. One unconditional
 `log::info!("Native-loop JIT: {on|off}")` at startup would mean no operator ever
 has to infer it, and would compose well with this warning. Not a defect; a
 suggestion.
+
+### R11-VC6 — the claimed state is real, on the right source.
+```
+git diff 309cfda..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+running 127 tests
+test result: ok. 125 passed; 0 failed; 2 ignored   (lib, release, 92.13s)
+test result: ok. 8 passed; 0 failed                (bin)
+clippy --all-targets -- -D warnings                          clean (aarch64)
+clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
+```
+125 + 8 as claimed, and +1 lib / +1 bin over round 10 — the two new tests.
+
+## Round 11 verdict
+
+**Blockers: none. Majors: none.** Unlike round 10, this commit introduces no
+regression: all four minors are diagnostic or documentation polish, and nothing
+in it can affect a hash or a submitted share.
+
+**Both round-10 findings are properly fixed.**
+- **R10-F2** — the erasure is gone in every order I could construct, *including*
+  the `=` form, and last-flag-wins survives intact. Twelve cases run against a
+  freshly built binary rather than reasoned about (R11-VC1, R11-VC2).
+- **R10-F1** — the composition test is exactly what I sketched and goes one
+  better by pinning `is_enabled()` and `!is_armed()` on the same value, which is
+  the distinction that actually regressed (R11-VC3).
+
+**Four minors:** R11-F1 (the environment arm still prints no empty-value
+warning, so `MINERTIM_NATIVE_LOOP=` remains silent — the erasure half of R10-F2
+is fixed, the silence half only for flags), R11-F2 (the honest description of
+the fail-open arm landed in AUDIT.md but not in the two code comments that make
+the overclaim), R11-F3 (the "keyed to the dataset" caveat sits next to the claim
+but not at the `vm.rs` site that would break it), R11-F4 (empty-value semantics
+documented nowhere an operator looks — and `mining.conf.example`, which your
+question named, is the wrong place for it, since a blank there is inert).
+
+**Answers to your four questions:**
+1. **Is the `.or(value)` composition right in every order?** Yes — measured, not
+   trusted. `warn_if_empty` returning `Some(())` unconditionally is what makes
+   `.and(value)` a pass-through, and it prints only when the value is empty:
+   zero warnings across four explicit-value cases, exactly one across five
+   empty-value cases. The `=` form preserves an earlier setting identically.
+2. **Does last-flag-wins still hold?** Yes, and it cannot degrade into "first
+   non-empty wins" because `as_bool(v)` is the *left* operand — a parseable later
+   value always short-circuits. Verified in four orderings plus the env-vs-flag
+   precedence.
+3. **Does the composition test pin what I meant, and is the AUDIT wording
+   accurate?** Yes to both. The AUDIT now says plainly that the arm is a guard
+   for future edits and not live in the current binary, which is exactly right.
+   The two *code* comments were not given the same treatment (R11-F2).
+4. **Is the framing condition where a future author would encounter it?**
+   Partly — it is beside the claim, which is right, but the grep is exhaustive:
+   three lines, all in `ShareVerifier::rekey`. The author who would break it is
+   editing `vm.rs`'s `match dataset`, which says nothing (R11-F3).
+
+**Mergeable: yes**, with no caveat this time. Nothing outstanding across rounds
+5-11 can produce a wrong hash, a withheld valid share, or an out-of-bounds
+access; the four round-11 minors are all things a reader or an operator would
+want improved, not things the miner does wrong.
+
+## Remaining work if this review is interrupted
+- **Round 11 is complete.** All four priorities plus both lower-priority items
+  answered, four minors filed, full suite and both clippy targets run against
+  `309cfda`'s source.
+- Order I would take the minors: **R11-F1** (one line: warn on an empty
+  environment value, so the two shell idioms behave alike), then **R11-F3** (one
+  line at `vm.rs:1321`, where the breaking edit would be made), then **R11-F2**
+  (a clause in the two code comments), then **R11-F4** (a sentence in `--help`,
+  *not* in `mining.conf.example`).
+- Unchanged and still open by choice: R5-F2, R5-F4, R5-F6, issue #1 (R5-F7),
+  issue #2 (ARM64 CI), `worker_loop` testability. Issue #2 remains the only one
+  I would not leave open indefinitely.

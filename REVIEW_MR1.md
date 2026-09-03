@@ -117,7 +117,7 @@ confirm rather than trust.
 | # | Item | Status |
 |---|---|---|
 | 1 | `verify_effective` vs `worker_loop` consistency | DONE — R13-F1 |
-| 2 | R12-F1 fix — four combinations, both targets | TODO |
+| 2 | R12-F1 fix — four combinations, both targets | DONE — R13-VC1, R13-F2 |
 | 3 | R12-F2 fix — help layout | TODO |
 | 4 | "unconditional" removed from comments + AUDIT | TODO |
 | 5 | Test + clippy claims reproduced | TODO |
@@ -167,3 +167,71 @@ unambiguous.
 ## Remaining work if this review is interrupted
 
 Round 13 not started.
+
+### R13-VC1 — item 2: the four switch combinations are right on aarch64, and the `DISABLED` warning fires in exactly the right cases.
+On aarch64 `cfg!` is `true`, so `native_effective == native_loop` and
+`verify_effective == verify_shares && native_loop`. Traced against the source at
+`minertim.rs:79-125` and confirmed against a built binary (see R13-VC3):
+
+| NL | VS | line | warnings |
+|---|---|---|---|
+| on | on | `Native-loop JIT: on \| share verification: on` | none |
+| on | off | `on \| off` | verification-DISABLED |
+| off | on | `off \| off` | native-loop-DISABLED only |
+| off | off | `off \| off` | native-loop-DISABLED only |
+
+Row 3 is the one R12-F1 asked about, and it is now right in both halves: the
+line reports `share verification: off`, which **matches** what `worker_loop`
+builds (`verify_shares && native_loop` = `true && false` = disabled), and the
+verification-DISABLED warning correctly does **not** fire — verification is moot
+when the mining path is already the reference path. No spurious warning.
+
+On non-aarch64 the native half is also right (`off (requested on; unavailable on
+this target)`), and only the verification half diverges from behaviour — R13-F1.
+
+One asymmetry, noted and **not** filed as a defect: the native-loop-DISABLED
+warning is keyed to `!native_loop` (requested), not `!native_effective`, so on a
+non-aarch64 build with the switch on nothing warns even though the loop is not
+running. That is defensible — the warning's payload is "unset the flag to
+restore it", which is not actionable advice on a target that has no native loop
+— and the info line already says `unavailable on this target`.
+
+### R13-F2 — R12-F1(b) is closed for the *wrong architecture* but not for the *missing JIT*: on aarch64 the line still reports `Native-loop JIT: on` when the JIT could not be allocated  [MINOR]
+**Where:** `src/bin/minertim.rs:86` (`native_effective`); `src/randomx/vm.rs:1681,1714`
+(`jit: super::jit::JitCompiler::new().ok()`); guard at `src/randomx/vm.rs:1221-1223`.
+
+`execute_vm_inner`'s native-loop guard has four preconditions:
+`use_native_loop && version == V1 && dataset.is_some() && jit.as_mut().is_some()`,
+inside `#[cfg(target_arch = "aarch64")]`. `native_effective` models exactly one
+of them (the `cfg`). Two of the remaining three are pinned by `worker_loop`
+always constructing `RandomXVm::new_full` — V1, dataset present — which I
+verified at `miner.rs:578-583`. **`jit.is_some()` is not pinned.** It is
+`JitCompiler::new().ok()`: if the `mmap(..., MAP_ANON|MAP_PRIVATE|MAP_JIT)` in
+`jit/memory.rs:38-51` fails, the `Err("mmap MAP_JIT failed")` is discarded by
+`.ok()` with no log of any kind, `jit` is `None`, and execution falls through to
+the interpreter (`vm.rs:1248-1252` makes `jit_fn` `None`; there is no panic).
+
+So on the shipping target — macOS / Apple Silicon, the only place this runs —
+the startup line can say `Native-loop JIT: on | share verification: on` while
+the miner is running the **interpreter**. Unlike the arch case in R13-F1, this
+one is reachable on the platform the MR ships to.
+
+**Compounding effect, worth stating separately:** in that state the mining VM
+and `ShareVerifier::reference()`'s `set_native_loop(false)` VM are *both* the
+interpreter, so `verify_failures` reads 0 forever and the operator sees a clean
+verification counter that is comparing a path against itself. `uses_native_loop`'s
+own doc comment at `vm.rs:1735-1743` warns about precisely this shape (it is
+structurally round 5's F1, the A/B benchmark measuring one arm against itself).
+Nothing mis-computes — the interpreter is the reference — but the reassurance
+the counter provides is void.
+
+**Not a wrong-hash or memory-safety risk.** Cost is hashrate (silently, and far
+more than the ~7% the native-loop warning quotes, since the fallback is the
+interpreter rather than the body JIT) plus two false reassurances.
+**Two separable sub-issues, both pre-existing in part:** the silent `.ok()` swallow
+at `vm.rs:1681,1714` is older than this MR and out of its scope; the *report*
+that now asserts effective state is new in `6765b17`, and it is the assertion
+that makes the swallow visible as a defect. A fix that only qualifies the
+startup line would still leave the JIT failure itself unlogged.
+**Confidence:** HIGH on the code path (read end to end); the failure is
+untriggered here — I did not force an mmap failure.

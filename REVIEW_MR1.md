@@ -2790,3 +2790,28 @@ line now reports both switches at startup"*, and the code comment likewise opens
 `// Unconditional:`. It is a `log::info!`, so it is conditional on the log level
 — absent under `RUST_LOG=warn`, where the `DISABLED` warning still appears. The
 substance of the change is right; only the word overstates it.
+
+### R12-VC5 — R11-F2 is fully closed; both code comments now say it plainly.
+The `is_enabled` doc gained *"the arm is still not reachable from `worker_loop`
+as the code stands, because a share cannot exist before `rekey` has run.
+Restoring the distinction makes it reachable *in principle*, so a future edit
+that separates those two facts fails open rather than silently submitting
+unverified"*, and the `worker_loop` call site now says *"It is not reachable in
+this binary today, and the comment says so rather than implying coverage: `vm` is
+assigned only inside the block that calls `rekey`"* — and names the pinning test.
+That is the correction landing where a future author reads it, which was the
+whole of R11-F2. Both statements are accurate: I re-derived the invariant in
+round 10 and it is unchanged.
+
+### R12-VC6 — R11-F3 is fully closed, and better than I asked for.
+The dependency is now recorded at `vm.rs:1317-1327`, immediately above the
+`match dataset` — the site a compute-on-miss change would edit. It states the
+mechanism (`cache_memory`/`ss_programs` are the key's only route into a hash, and
+this is their only read during hashing), the two downstream consequences
+(`new_full` builds no Argon2d cache; the verifier is keyed to the dataset), and
+then **names the test by name**:
+`share_verifier_builds_lazily_and_resets_on_seed_rotation`. Naming it is the
+part I did not think to ask for: it means a `grep` for the test finds the
+constraint, and vice versa, so the link survives someone reading from either
+end. It also cross-references `ShareVerifier::rekey`, closing the loop back to
+the claim.

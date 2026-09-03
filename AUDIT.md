@@ -2559,3 +2559,23 @@ open issue #2 (multi-platform CI) doubly earned.
 ### Not done — awaiting user decision
 R13-F1/F2/F3 are unfixed. The MR is mergeable as it stands; the choice is fix
 now or merge and carry them as follow-ups.
+
+### Follow-up (same day): all six open findings filed on GitLab
+User asked whether the round-13 and older deferred findings were tracked. They
+were not — six items lived only in `REVIEW_MR1.md`, on a feature branch, which
+stops being the obvious place to look once MR !1 merges. Now filed, each
+carrying the reviewer's reasoning and file/line references so it stands without
+the ledger:
+
+| Issue | Finding |
+|---|---|
+| #3 | R13-F1 — report/behaviour disagree on non-aarch64 |
+| #4 | R13-F2 — silent `MAP_JIT` fallback makes verification vacuous |
+| #5 | R13-F3 — `--help` wording carry-overs |
+| #6 | R5-F2 — debug vs release profile gap in the verification evidence |
+| #7 | R5-F4 — ~4.5 GiB test-suite peak |
+| #8 | R5-F6 — no barrier in the multi-thread bench phase |
+
+Pre-existing: #1 (R5-F7, FMOVs), #2 (multi-platform CI). `REVIEW_MR1.md`'s open
+table now links each. The only untracked item left is the `worker_loop` verifier
+glue, which needs a re-check rather than an issue.

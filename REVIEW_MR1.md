@@ -2629,7 +2629,7 @@ aarch64 and x86_64.
 ## Round 12 coverage ledger
 | Area | Status | Notes |
 |---|---|---|
-| P1 — `warn_if_empty` signature change preserves composition | NOT STARTED | |
+| P1 — `warn_if_empty` signature change preserves composition | IN PROGRESS | |
 | P2 — `env_label` argument positions at all call sites | NOT STARTED | |
 | P3 — empty-env warning fires exactly once, right cases | NOT STARTED | |
 | P4 — startup state line: content and placement | NOT STARTED | |

@@ -1944,3 +1944,88 @@ One commit applying all seven round-9 minors.
 | R9-F3 substring; AUDIT accuracy | NOT STARTED | |
 
 ## Round 10 findings
+
+### R10-F1 — R9-F1's fix is correct, but `SubmitVerifierUnavailable` is *still* unreachable in `worker_loop` — for a different reason than before  [MINOR]
+**Where:** `src/miner.rs` — `is_enabled` / `is_armed`, and the `classify_share`
+call site
+**You asked directly whether you moved the problem rather than fixing it. Neither,
+exactly.** The fix does the thing it claims: it restores the *independence* of
+`classify_share`'s two arguments. With `is_enabled()` the requirement for
+`SubmitVerifierUnavailable` is `enabled && dataset.is_none()`, which is a
+satisfiable state — whereas with `is_armed()` the predicate implied the value and
+the branch was unsatisfiable *as a matter of logic*. That is a genuine
+improvement and it is the right shape.
+
+**But the branch still cannot fire in production**, because of an invariant one
+level up that has nothing to do with the predicate:
+```rust
+if job.seed_hash != current_key || vm.is_none() {
+    let dataset = get_or_generate_dataset(..);
+    ...
+    verifier.rekey(&job.seed_hash, dataset);   // dataset always set here
+}
+let rx_vm = vm.as_mut().unwrap();              // so vm.is_some() => rekey ran
+```
+`vm` is assigned *only* inside that block, and `vm.is_none()` forces the block on
+the first pass, so `vm.is_some()` implies `rekey` has run and the verifier holds
+a dataset. There is no path to the share branch with `dataset == None`. I said
+the same thing in round 7 about the original `None` arm; that has not changed.
+So the `log::warn!("...no dataset recorded for the verifier. This should not
+happen.")` remains dead in the shipping binary.
+
+**Why this is still worth having, and what I would not claim:** the branch is now
+defence that *would* engage if `worker_loop` ever changed — a `rekey` moved
+below the first hash, a second construction site for `vm`, an early-continue
+added between them. That is exactly the class of future edit it should catch.
+What the code comment should not imply is that it is reachable *today*: "keeps
+the case reachable so it can fail open loudly" reads as a live guarantee, and
+the guarantee is conditional on a `worker_loop` invariant the comment does not
+mention.
+**Cheap way to make the claim true and pinned:** a test that composes the two —
+`let v = ShareVerifier::new(true);` (no `rekey`), then
+`classify_share(v.is_enabled(), &hash, v.reference(&blob).as_ref())` and assert
+`SubmitVerifierUnavailable`. That pins the composition rather than
+`classify_share` in isolation, needs no dataset, and runs in microseconds. No
+such test exists — `classify_share_covers_every_branch` passes the arguments
+directly rather than deriving them from a `ShareVerifier`.
+**Confidence:** HIGH.
+
+### R10-VC1 — P3: the dataset hoist is clean. Same datasets, still exactly two.
+- `native_loop_test_dataset()` uses the identical key (`b"native loop test key"`)
+  and identical construction (`RandomXVm::new` → `cache_and_programs` →
+  `generate(cache, programs, 8)`) as the `static DS` it replaced.
+- `native_loop_diff_tests::test_dataset()` is now a one-line delegation to
+  `super::native_loop_test_dataset()`, and the module's own `static DS` is
+  **deleted** rather than left alongside. So the differential tests
+  (seeds 1/2/7/78, the 2048 case, the C1 worst case, the zero-iteration test)
+  all still run against byte-identical dataset contents.
+- `grep -n LazyLock src/randomx/tests.rs` returns exactly **two** statics
+  (lines 32 and 45) — `native_loop_test_dataset` and `test_key_000_dataset`.
+  No third allocation.
+- Resolution is correct: `full_hash_tests` opens with `use super::*` (line 370),
+  so the unqualified call in the rotation test binds to the top-level helper.
+
+### R10-VC2 — P4: `vm_is_on_reference_path()` is *not* vacuous on x86_64, and ungating the tests was the right call.
+`RandomXVm.use_native_loop` is a plain `bool` field with **no** `#[cfg]` (only
+`jit` is aarch64-gated), and `set_native_loop` is likewise ungated — it simply
+assigns the field on every architecture. So on x86_64:
+`ShareVerifier::reference` → `v.set_native_loop(false)` → field `false` →
+`uses_native_loop()` → `false` → `vm_is_on_reference_path()` → `Some(true)`.
+The assertion passes, and it passes *for the right reason*.
+
+More importantly it still **fails** on x86_64 if the guarded line is removed: the
+constructor default is `true`, so a dropped `set_native_loop(false)` yields
+`Some(false)` and the assertion trips. The regression R9-F7 describes is a
+source-level one, so checking the field is exactly the right instrument — and
+since CI can never run the JIT (issue #2), this is now one of the few
+native-loop-related regressions CI *can* catch. Ungating both tests was correct.
+
+### R10-VC3 — R9-F2 is fully closed, including a self-check I did not ask for.
+The rotation now goes `test_key_000_dataset()` → `native_loop_test_dataset()`,
+two genuinely distinct `Arc`s, and asserts both directions
+(`holds_dataset(&other)` and `!holds_dataset(&ds)`) — so the `ptr_eq(x, x)`
+vacuity is gone. It then re-hashes after the rotation and compares against a VM
+built on the new dataset, which pins the behaviour and not just the field. The
+`assert_ne!(after, got, "the two datasets produced the same hash; this test
+proves nothing")` is the part I would not have thought to ask for: it guards the
+test against its own premise silently failing. Good.

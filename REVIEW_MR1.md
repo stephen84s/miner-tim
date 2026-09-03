@@ -126,8 +126,8 @@ confirm rather than trust.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | `verify_effective` vs `worker_loop` consistency | DONE — R13-F1 |
-| 2 | R12-F1 fix — four combinations, both targets | DONE — R13-VC1, R13-F2 |
+| 1 | `verify_effective` vs `worker_loop` consistency | DONE — R13-F1, R13-VC6 |
+| 2 | R12-F1 fix — four combinations, both targets | DONE — R13-VC1, R13-VC4, R13-F2 |
 | 3 | R12-F2 fix — help layout | DONE — R13-VC2, R13-F3 |
 | 4 | "unconditional" removed from comments + AUDIT | DONE — R13-VC3 |
 | 5 | Test + clippy claims reproduced | DONE — R13-VC5 |
@@ -171,8 +171,24 @@ platform port re-opens it. There is no fourth consumer: `grep` for
 `verify_shares|native_loop` across `src/` and `benches/` returns only
 `minertim.rs`, `miner.rs`, `vm.rs`, `jit/compiler.rs`, `tests.rs` and the bench,
 and only the two sites above decide whether verification runs.
-**Confidence:** HIGH — read from both sources; `cfg!` is compile-time and
-unambiguous.
+**Confidence:** HIGH — read from both sources, and confirmed on a real x86_64
+build (R13-VC6). `ShareVerifier::new` at `miner.rs:389-391` is a plain
+`Self { vm: None, dataset: None, key: Vec::new(), enabled }` — no `cfg` of its
+own, so the call site's argument is the whole story.
+
+**The same false premise is asserted in two more durable places, both new in
+`6765b17`**, which is why this is worth fixing rather than tolerating:
+- the comment at `minertim.rs:82-85` justifying `verify_effective` — *"verification
+  is skipped when the native loop is off, because the mining path is then already
+  the reference path"*;
+- the round-12 `AUDIT.md` entry, which repeats that sentence and adds *"It now
+  reports effective state."*
+
+Both are true on aarch64 and false on non-aarch64. So the belief was encoded in
+three places — comment, AUDIT, report expression — and the one site that decides
+behaviour (`miner.rs:549`) was left on the old predicate. `AUDIT.md` is the
+project's authoritative append-only record, so a future reader will trust the
+claim rather than re-derive it.
 
 ## Round 13 verdict
 
@@ -240,7 +256,7 @@ fix needs review too" holds. R13-F2 is R12-F1(b) closed only halfway.
 ### R13-VC1 — item 2: the four switch combinations are right on aarch64, and the `DISABLED` warning fires in exactly the right cases.
 On aarch64 `cfg!` is `true`, so `native_effective == native_loop` and
 `verify_effective == verify_shares && native_loop`. Traced against the source at
-`minertim.rs:79-125` and confirmed against a built binary (see R13-VC3):
+`minertim.rs:79-125` and confirmed against a built binary (see R13-VC4):
 
 | NL | VS | line | warnings |
 |---|---|---|---|
@@ -328,7 +344,12 @@ switches in the heading is better than the generic "Switch values" I asked for.
    flag-only (`--native-loop "$VAR"`), while the environment variables warn and
    behave identically and `MINERTIM_NATIVE_LOOP="$NL"` is the shape that was
    silent until round 12's commit. Half a clause.
-2. The usage synopsis reads
+2. On a non-aarch64 build with `--native-loop off`, the native-loop-DISABLED
+   warning fires and advises *"Expect roughly 7% lower hashrate. Unset
+   --native-loop / MINERTIM_NATIVE_LOOP to restore it"* — non-actionable on a
+   target that has no native loop to restore. Same family as the two below;
+   folded in here rather than filed separately.
+3. The usage synopsis reads
    `<pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]` —
    `--verify-shares` is missing from it, though it has a full entry below and is
    the switch that guards share correctness. Pre-existing, not introduced by
@@ -350,6 +371,11 @@ switches in the heading is better than the generic "Switch values" I asked for.
   42 lines below at `:2443` — *"It is not unconditional. It is `log::info!`..."*.
   History plus correction, not a stale claim. **No defect.** The brief's "no
   AUDIT line still claims it" cannot mean rewriting the ledger.
+- **Wider read of the same item — the premise, not just the word:** the *new*
+  comment at `minertim.rs:82-85` and the *new* AUDIT entry both assert
+  "verification is skipped when the native loop is off". That claim is false on
+  non-aarch64. Recorded under R13-F1, since it is the same defect stated three
+  times rather than a separate one.
 
 ### R13-VC4 — item 2, measured: the four combinations behave exactly as traced.
 Run against the freshly built `6765b17` binary at `RUST_LOG=info` (pool refused,
@@ -393,3 +419,9 @@ Native-loop JIT: off (requested on; unavailable on this target) | share verifica
 The native half is right and its qualifier reads well. The verification half says
 `off` while `miner.rs:549` builds `ShareVerifier::new(true && true)` — enabled.
 The report/behaviour split is real, not a reading error.
+
+**The other three x86_64 combinations are not worth running, and a resumed
+reviewer should not redo them.** Divergence requires `verify_shares && native_loop`
+true while `verify_effective` is false, i.e. both switches on and `cfg!` false —
+which is exactly the row above. `NL=off` zeroes both sides; `VS=off` zeroes both
+sides. The remaining three rows are non-divergent by construction.

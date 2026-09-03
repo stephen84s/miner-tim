@@ -1575,3 +1575,66 @@ extraction — the substantive one).
 | AUDIT "no behaviour change" claim | 5fe7eb3 | NOT STARTED | |
 
 ## Round 9 findings
+
+### R9-VC1 — P1: the extraction is behaviour-preserving on the mining path, with one exception (R9-F1).
+I compared the old inline code against the new methods statement by statement:
+- **Drop timing.** `verify_vm = None` sat as the first statement of the
+  seed-change block; `rekey`'s `self.vm = None` is the first statement of
+  `rekey`, called from the same position in the same block. Identical.
+- **Build timing.** Both build via `get_or_insert_with` reached only from the
+  share branch. Identical — a worker that never finds a share still never
+  builds a VM.
+- **The key.** The old code built the VM from `&current_key`, a worker local
+  assigned *after* the verifier reset; the new code snapshots `job.seed_hash`
+  into `self.key` at `rekey` time. Both resolve to the same bytes, because
+  `rekey(&job.seed_hash, ..)` and `current_key = job.seed_hash.clone()` are
+  adjacent statements fed from the same value. The new form is the more robust
+  of the two: it captures the key at rotation rather than reading a mutable
+  local at share time.
+- **The dataset.** Old: `verify_dataset = Some(dataset)` (moving the Arc after
+  two `.clone()`s for the mining VM). New: `verifier.rekey(.., dataset)` in the
+  same position, same move. Identical.
+- **`enabled`.** Old computed `verify_shares && native_loop` per share; new
+  computes it once at construction. Both inputs are immutable locals captured at
+  spawn, so there is no difference.
+- **Guard relationship.** `rekey` is called only inside
+  `if job.seed_hash != current_key || vm.is_none()`, exactly where the three
+  assignments used to be. Because `vm.is_none()` is true on the first pass, the
+  verifier always holds a dataset before any share can be found.
+
+### R9-F1 — The refactor silently retired the `SubmitVerifierUnavailable` branch; it is now provably unreachable, and the AUDIT's "no behaviour change" is not quite right  [MINOR]
+**Where:** `src/miner.rs` — `ShareVerifier::is_armed` / `ShareVerifier::reference`,
+and the `ShareVerdict::SubmitVerifierUnavailable` arm in `worker_loop`
+**Claim:** Before, the predicate and the value were computed independently:
+`verification_applies = verify_shares && native_loop` said nothing about the
+dataset, while `reference` was `None` when `verify_dataset` was `None`. That
+combination — armed but no reference — produced `SubmitVerifierUnavailable` and
+a `log::warn!("...no dataset recorded for the verifier. This should not
+happen.")`.
+
+After, both derive from the same state:
+```
+is_armed()   == enabled && dataset.is_some()
+reference()  == None  iff  !enabled || dataset.is_none()
+```
+so `is_armed() == true` **implies** `reference()` is `Some`. The
+`SubmitVerifierUnavailable` verdict can no longer be produced by `worker_loop`
+at all, and its `log::warn!` is now dead code.
+
+| enabled | dataset | before | after |
+|---|---|---|---|
+| false | any | SubmitUnverified | SubmitUnverified |
+| true | none | **SubmitVerifierUnavailable** (+warn) | **SubmitUnverified** (silent) |
+| true | some | SubmitVerified / Withhold | unchanged |
+
+**Failure scenario:** none in practice — the middle row was already unreachable
+(`rekey` runs before the first hash because `vm.is_none()` forces the block), and
+both verdicts submit, so no share is lost either way. The costs are: (a) the
+AUDIT's "no behaviour change" claim is inaccurate for that row; (b) a
+fail-open safety property we explicitly agreed on in round 7 is now vacuous
+rather than enforced — it cannot fire, so it cannot warn; (c) a future reader
+sees the arm handled and reasonably assumes it is live.
+**I would keep the arm** — it is correct defensive coding if `reference()` ever
+gains another `None` path — but the AUDIT should say the branch became
+unreachable rather than that nothing changed.
+**Confidence:** HIGH — this follows directly from the two method bodies.

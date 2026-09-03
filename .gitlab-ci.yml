@@ -48,7 +48,16 @@ rust:lint:
 rust:audit:
   stage: check
   before_script:
-    - cargo install cargo-audit --locked
+    # The cargo cache is restored across pipelines, so cargo-audit is usually
+    # already in .cargo/bin — and a plain `cargo install` errors out ("binary
+    # already exists in destination") rather than no-opping, which failed this
+    # job on every cached run. Test the path directly: CARGO_HOME is redirected
+    # above but the image only has /usr/local/cargo/bin on PATH, so the cached
+    # binary is invisible to `command -v`. (Do NOT try to fix that by setting
+    # PATH as a CI variable — GitLab does not expand `$PATH`, so the value is
+    # clobbered and the runner cannot even find gitlab-runner-build.) `cargo
+    # audit` still resolves: cargo searches $CARGO_HOME/bin for subcommands.
+    - test -x "$CARGO_HOME/bin/cargo-audit" || cargo install cargo-audit --locked
   script:
     # Scans Cargo.lock against https://rustsec.org advisories.
     - cargo audit

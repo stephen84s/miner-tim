@@ -16,7 +16,7 @@ fn main() {
     if args.len() < 3 || args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
-        eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N]", args[0]);
+        eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]", args[0]);
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} pool.supportxmr.com:443 4...address 4", args[0]);
@@ -33,6 +33,22 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
+        eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
+        eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
+        eprintln!("                    if shares start being rejected, turn it off and restart to");
+        eprintln!("                    rule the JIT out without rebuilding. aarch64 rx/0 full mode");
+        eprintln!("                    only; ignored everywhere else.");
+        eprintln!("  --verify-shares on|off  Re-check every candidate share on the reference");
+        eprintln!("                    path before submitting, and withhold any the two paths");
+        eprintln!("                    disagree on (default: on). Costs ~0.005% of mining time");
+        eprintln!("                    because shares are rare. Catches faults in the native-loop");
+        eprintln!("                    machinery; both paths share an instruction generator, so a");
+        eprintln!("                    fault common to both would pass. Also MINERTIM_VERIFY_SHARES.");
+        eprintln!();
+        eprintln!("Switch values (--native-loop, --verify-shares):");
+        eprintln!("  on/off, true/false, yes/no, 1/0. An empty value is treated as unset: it is");
+        eprintln!("  ignored with a warning rather than overriding an earlier setting, so");
+        eprintln!("  `--native-loop \"$VAR\"` with $VAR unset will not silently undo one.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -43,6 +59,8 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
+    let native_loop = parse_native_loop(&args);
+    let verify_shares = parse_verify_shares(&args);
 
     let mining_active = Arc::new(AtomicBool::new(false));
 
@@ -58,7 +76,53 @@ fn main() {
     })
     .expect("Failed to set Ctrl+C handler");
 
+    let on_off = |b: bool| if b { "on" } else { "off" };
+
+    // Report the EFFECTIVE state, not the requested one. The native loop is
+    // aarch64-only, so a build elsewhere would otherwise announce "on" while
+    // running the interpreter; and verification is skipped when the native loop
+    // is off, because the mining path is then already the reference path
+    // (review round 12, R12-F1).
+    let native_effective = native_loop && cfg!(target_arch = "aarch64");
+    let verify_effective = verify_shares && native_effective;
+
+    // Emitted at info, which is the default filter — but it is NOT
+    // unconditional, and an earlier comment wrongly said so: `RUST_LOG=warn`
+    // suppresses it. The warnings below fire only in the non-default direction,
+    // so at that level the state is again inferable from the absence of a line.
+    // Anyone running at warn should read the switch back from their own config.
+    log::info!(
+        "Native-loop JIT: {}{} | share verification: {}",
+        on_off(native_effective),
+        if native_loop && !native_effective {
+            " (requested on; unavailable on this target)"
+        } else {
+            ""
+        },
+        on_off(verify_effective),
+    );
+
     let mut miner = Miner::new(mining_active.clone());
+    miner.set_native_loop(native_loop);
+    miner.set_verify_shares(verify_shares);
+    if !verify_shares && native_effective {
+        log::warn!(
+            "Share verification DISABLED while the native-loop JIT is on. A \
+             native-loop defect would now be submitted to the pool as a wrong \
+             share instead of being withheld, and the only symptom would be \
+             rejects climbing on the pool side."
+        );
+    }
+    if !native_loop {
+        // Logged at warn, not info: this halves nothing and breaks nothing, but
+        // it silently gives up ~7% hashrate, and someone who set it during an
+        // incident should not discover it months later in a config file.
+        log::warn!(
+            "Native-loop JIT DISABLED — running the per-iteration body JIT. \
+             Expect roughly 7% lower hashrate. Unset --native-loop / \
+             MINERTIM_NATIVE_LOOP to restore it."
+        );
+    }
 
     log::info!(
         "Donation: donate-level {}% of mining time, split 50/50 between the MinerTim \
@@ -92,6 +156,7 @@ fn main() {
         let snap = miner.snapshot_hashrates();
         let accepted = miner.get_accepted_shares();
         let rejected = miner.get_rejected_shares();
+        let verify_failures = miner.get_verify_failures();
         let difficulty = miner.get_difficulty();
         let best = miner.get_best_hash_val();
         let share_stats = miner.get_share_stats();
@@ -128,6 +193,17 @@ fn main() {
         } else {
             "waiting".to_string()
         };
+
+        // Only ever non-zero if the JIT is miscomputing. Appended to the normal
+        // stats line so it cannot be missed by someone watching the miner rather
+        // than the pool dashboard.
+        if verify_failures > 0 {
+            log::error!(
+                "{} share(s) WITHHELD so far because the native-loop JIT disagreed with \
+                 the reference path. Restart with --native-loop off and report this.",
+                verify_failures
+            );
+        }
 
         let share_label = if share_stats.total_found > 0 {
             "since last share"
@@ -178,6 +254,146 @@ fn parse_donate_level(args: &[String]) -> u8 {
     donate::clamp_level(level)
 }
 
+/// Resolve an `--flag on|off` switch with an environment-variable fallback.
+///
+/// Precedence: the flag beats `env`, which beats `default_on`. Values are
+/// `on/off`, `true/false`, `yes/no`, `1/0`, case-insensitively. The last
+/// occurrence of the flag wins, so a wrapper script can append an override.
+///
+/// # Malformed input resolves to `fail_safe`, never aborts
+///
+/// A bad value must not stop the miner booting — these are the switches someone
+/// reaches for during an incident, and refusing to start over a typo would be
+/// the wrong failure mode. But it must not resolve to `default_on` either: if
+/// the value failed to parse, we already know the operator was trying to
+/// *change* something, so the default is the one answer they probably did not
+/// want.
+///
+/// `fail_safe` is per-switch because the conservative direction differs, and
+/// getting this backwards is easy — it was, until review round 7 (R7-F2):
+///
+/// * `--native-loop` -> `false`. Off is slower but cannot mine wrong hashes.
+/// * `--verify-shares` -> `true`. This one is a *safety net*, so off is the
+///   dangerous direction; a malformed value must leave the net in place.
+///
+/// The "no value at all" case (`--flag` as the final argument, or a script
+/// writing `--flag $VAR` with `$VAR` unset) is treated the same way, and warns.
+/// Previously it was silently ignored, which was the one shape that could leave
+/// an operator believing they had changed a setting when they had not.
+fn parse_switch(args: &[String], flag: &str, env: &str, default_on: bool, fail_safe: bool) -> bool {
+    parse_switch_with(args, flag, env, std::env::var(env).ok().as_deref(), default_on, fail_safe)
+}
+
+/// The switch logic, with the environment value injected.
+///
+/// Split out so tests never call `std::env::set_var`. That call is unsound if
+/// any other thread is inside `getenv` while it reallocates `environ`, and this
+/// binary's other switch tests all reach `std::env::var` through
+/// `parse_switch` — so an earlier "no other test reads the environment"
+/// justification was simply wrong (review round 9, R9-F5). Injection removes
+/// the hazard rather than reasoning about it.
+/// Warn when a switch is handed an empty value.
+///
+/// Silence is what made R10-F2 hard to notice: the operator wrote an explicit
+/// setting, it was discarded, and nothing said so. `label` is the flag or the
+/// environment variable name — **both** arms warn, because
+/// `--native-loop "$NL"` and `MINERTIM_NATIVE_LOOP="$NL"` come from the same
+/// shell idiom and one warning without the other is arbitrary (R11-F1).
+fn warn_if_empty(label: &str, v: &str) {
+    if v.trim().is_empty() {
+        eprintln!(
+            "warning: {label} given an empty value - ignoring it; the previous \
+             setting or the default applies. Use on|off."
+        );
+    }
+}
+
+fn parse_switch_with(
+    args: &[String],
+    flag: &str,
+    env_label: &str,
+    env_value: Option<&str>,
+    default_on: bool,
+    fail_safe: bool,
+) -> bool {
+    let word = if fail_safe { "ON" } else { "OFF" };
+    let as_bool = |v: &str| -> Option<bool> {
+        // An empty value is "unset" — it declines to have an opinion rather
+        // than failing to parse. The path that produces one is a wrapper script
+        // writing `--native-loop "$NL"` with `$NL` unset: quoted, the shell
+        // leaves an empty argument. (Unquoted, the token vanishes entirely and
+        // hits the warned bare-flag arm below.) `NATIVE_LOOP=` in mining.conf
+        // does NOT reach here — that is a Makefile variable, and
+        // `$(if $(NATIVE_LOOP),...)` suppresses the flag altogether.
+        //
+        // Returning `None` here is only safe because both call sites below
+        // preserve any previously resolved value with `.or(value)`. Without
+        // that, an empty token ERASES an explicit setting: `--native-loop off
+        // --native-loop ""` resolved to `on`, silently (review round 10,
+        // R10-F2).
+        if v.trim().is_empty() {
+            return None;
+        }
+        match v.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" => Some(true),
+            "off" | "false" | "no" | "0" => Some(false),
+            _ => {
+                eprintln!(
+                    "warning: unrecognised {flag} value {v:?} - assuming {word} \
+                     (the safe direction); use on|off"
+                );
+                Some(fail_safe)
+            }
+        }
+    };
+
+    let mut value = env_value.and_then(|v| {
+        warn_if_empty(env_label, v);
+        as_bool(v)
+    });
+    let eq_prefix = format!("{flag}=");
+
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix(&eq_prefix) {
+            warn_if_empty(flag, v);
+            // `.or(value)`: an empty value must not erase an earlier one.
+            value = as_bool(v).or(value);
+        } else if args[i] == flag {
+            match args.get(i + 1) {
+                Some(v) => {
+                    warn_if_empty(flag, v);
+                    value = as_bool(v).or(value);
+                }
+                None => {
+                    eprintln!(
+                        "warning: {flag} given with no value - assuming {word} \
+                         (the safe direction); use on|off"
+                    );
+                    value = Some(fail_safe);
+                }
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+
+    value.unwrap_or(default_on)
+}
+
+/// The native-loop JIT switch. Malformed input falls back to **off**: slower,
+/// but it cannot mine wrong hashes.
+fn parse_native_loop(args: &[String]) -> bool {
+    parse_switch(args, "--native-loop", "MINERTIM_NATIVE_LOOP", true, false)
+}
+
+/// The share-verification switch. Malformed input falls back to **on**: this is
+/// a safety net, so leaving it in place is the conservative direction.
+fn parse_verify_shares(args: &[String]) -> bool {
+    parse_switch(args, "--verify-shares", "MINERTIM_VERIFY_SHARES", true, true)
+}
+
+
 fn format_duration(secs: f64) -> String {
     let secs = secs.max(0.0) as u64;
     if secs < 60 {
@@ -186,5 +402,132 @@ fn format_duration(secs: f64) -> String {
         format!("{}m{}s", secs / 60, secs % 60)
     } else {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_native_loop, parse_switch_with, parse_verify_shares};
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut v = vec!["minertim".to_string(), "pool:1".into(), "wallet".into()];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn native_loop_defaults_on() {
+        assert!(parse_native_loop(&args(&[])));
+    }
+
+    #[test]
+    fn native_loop_accepts_the_documented_spellings() {
+        for off in ["off", "OFF", "false", "no", "0"] {
+            assert!(!parse_native_loop(&args(&["--native-loop", off])), "{off}");
+            assert!(
+                !parse_native_loop(&args(&[&format!("--native-loop={off}")])),
+                "{off} (= form)"
+            );
+        }
+        for on in ["on", "true", "yes", "1"] {
+            assert!(parse_native_loop(&args(&["--native-loop", on])), "{on}");
+        }
+    }
+
+    /// A typo must not refuse to boot, but it must fail SAFE — resolving to
+    /// `on` would continue the exact behaviour the operator was trying to stop.
+    #[test]
+    fn native_loop_unrecognised_value_fails_safe_to_off() {
+        assert!(!parse_native_loop(&args(&["--native-loop", "maybe"])));
+        assert!(!parse_native_loop(&args(&["--native-loop=maybe"])));
+    }
+
+    /// Bare `--native-loop` with no value used to be silently ignored, leaving
+    /// the JIT ON with no diagnostic — the one shape that could leave an
+    /// operator believing they had turned it off. Reachable by a wrapper script
+    /// writing `--native-loop $NL` with $NL unset.
+    #[test]
+    fn native_loop_with_no_value_fails_safe_to_off() {
+        assert!(!parse_native_loop(&args(&["--native-loop"])));
+    }
+
+    /// An empty value declines to have an opinion; it must NOT erase one.
+    ///
+    /// Introduced as a regression by the round-9 fix and caught in round 10
+    /// (R10-F2): `--native-loop off --native-loop ""` resolved to **on**,
+    /// silently. The realistic source is a wrapper writing
+    /// `--native-loop "$NL"` with `$NL` unset — and the *careful* quoting style
+    /// is the one that breaks, since unquoted the token vanishes and hits the
+    /// warned bare-flag path instead. Two opposite outcomes decided by quoting.
+    #[test]
+    fn an_empty_value_does_not_erase_an_explicit_setting() {
+        // Explicit flag, then an empty one: the explicit setting stands.
+        assert!(!parse_native_loop(&args(&["--native-loop", "off", "--native-loop", ""])));
+        assert!(!parse_native_loop(&args(&["--native-loop=off", "--native-loop="])));
+        // An explicit `on` likewise survives.
+        assert!(parse_native_loop(&args(&["--native-loop", "on", "--native-loop", ""])));
+
+        // An empty environment value must not erase an explicit flag either,
+        // nor vice versa.
+        assert!(
+            !parse_switch_with(&args(&["--x", ""]), "--x", "X_ENV", Some("off"), true, false),
+            "an empty flag erased an explicit environment setting"
+        );
+
+        // With nothing else to fall back on, empty means "unset" -> default.
+        assert!(parse_native_loop(&args(&["--native-loop", ""])));
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", Some(""), true, false));
+    }
+
+    /// Last flag wins, so a wrapper script can append an override.
+    #[test]
+    fn native_loop_last_flag_wins() {
+        assert!(parse_native_loop(&args(&["--native-loop", "off", "--native-loop", "on"])));
+        assert!(!parse_native_loop(&args(&["--native-loop=on", "--native-loop=off"])));
+    }
+
+    /// The environment-variable branch, and that an explicit flag beats it.
+    ///
+    /// Injects the value rather than calling `std::env::set_var`, which is
+    /// unsound under a concurrent `getenv` — and every other switch test in
+    /// this binary reaches `std::env::var` through `parse_switch` (R9-F5).
+    #[test]
+    fn switch_reads_the_environment_and_the_flag_overrides_it() {
+        fn env(v: &str) -> Option<&str> {
+            Some(v)
+        }
+        assert!(!parse_switch_with(&args(&[]), "--x", "X_ENV", env("off"), true, false), "env beats default");
+        assert!(
+            parse_switch_with(&args(&["--x", "on"]), "--x", "X_ENV", env("off"), true, false),
+            "flag beats env"
+        );
+
+        // An unparseable env value takes the switch's fail-safe direction, not
+        // the default — and that direction is per-switch (R7-F2).
+        assert!(!parse_switch_with(&args(&[]), "--x", "X_ENV", env("wat"), true, false));
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env("wat"), true, true));
+
+        // An EMPTY value is "unset", not a typo. `NATIVE_LOOP=` in mining.conf
+        // and an unset shell variable both land here, and neither expresses an
+        // intent to change anything — so both must fall through to the default
+        // rather than to the fail-safe direction, which would silently disable
+        // the native loop for anyone who left the key blank.
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env(""), true, false), "empty env is unset");
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", env("  "), true, false), "blank env is unset");
+
+        assert!(parse_switch_with(&args(&[]), "--x", "X_ENV", None, true, false), "default applies unset");
+    }
+
+    #[test]
+    fn verify_shares_fails_safe_on_because_it_is_a_safety_net() {
+        // Real switch, real fail-safe direction: ON, because it is a safety net.
+        assert!(parse_verify_shares(&args(&[])));
+        assert!(!parse_verify_shares(&args(&["--verify-shares", "off"])));
+        assert!(parse_verify_shares(&args(&["--verify-shares=yes"])));
+        // R7-F2: a typo must NOT switch the safety net off.
+        assert!(parse_verify_shares(&args(&["--verify-shares", "nonsense"])));
+        assert!(parse_verify_shares(&args(&["--verify-shares"])));
+        // ...whereas the native-loop switch fails safe the other way.
+        assert!(!parse_native_loop(&args(&["--native-loop", "nonsense"])));
     }
 }

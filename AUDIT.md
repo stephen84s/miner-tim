@@ -1304,3 +1304,1278 @@ removes real allocation work. Neither is claimed to make the miner faster.
 ### Verification
 - Full suite **96 passed, 0 failed** (87 v1 vectors bit-identical, v2 vectors,
   commitment vectors); `cargo clippy --all-targets -- -D warnings` clean.
+
+---
+
+## 2026-09-01 - JIT native iteration loop, stages A-C (branch `feat/jit-native-loop`, MR !1)
+
+### Request / goal
+"Extract more performance… improve on the work xmrig have done", executed under
+the branch + merge-request workflow with independent subagent review. The
+performance finding this implements is #1 from the 2026-08-29 investigation: the
+2048-iteration RandomX loop is driven from Rust, so the whole register file is
+spilled to `nreg` and reloaded on every iteration — 8 r-registers, 8 f and 8 e
+halves, 2048 times per chain, 16384 times per hash. Moving the loop itself into
+emitted ARM64 keeps the register file resident.
+
+### Design first (`DESIGN_JIT_NATIVE_LOOP.md`)
+Written and reviewed before any code. The review caught a wrong-hash ordering
+defect (D1: `mx ^= spMix2` must happen *before* the dataset XOR of the
+r-registers, because `spMix2` is computed from the pre-XOR registers) and a hole
+in the proposed safety gate that would have hidden it (D2: comparing only the
+register file and scratchpad cannot detect an `ma`/`mx` ordering error, because
+neither is consumed until the *following* iteration — hence `LoopState` is
+returned and compared). Nine constraints C1-C9 are recorded there; C1 (the
+dataset read has no runtime bound check) is now pinned by a `const _: () =
+assert!(…)` in `vm.rs` so it holds in every build profile.
+
+### Files changed
+- `src/randomx/jit/aarch64.rs` — six new assembler-verified encoders: `subs_imm`
+  (`0xF1000000`; note `sub_imm` `0xD1000000` does *not* set flags), `eor_reg_w`,
+  `prfm_reg`, `prfm_imm`, `stp_fp_imm`, `ldp_fp_imm`. Every encoding was checked
+  against `as -arch arm64` output before use. `D25`-`D31` constants;
+  `Emitter::clear()`.
+- `src/randomx/jit/compiler.rs` — `compile_native_loop()` plus
+  `emit_loop_prologue` / `emit_iteration_pre` / `emit_iteration_post` /
+  `emit_loop_epilogue`. New `CompiledKind` enum: `JitMemory::as_fn` is a
+  `transmute_copy` guarded only by a pointer-size assert, and both function
+  signatures are pointer-sized, so nothing would have caught calling native-loop
+  code through the 3-argument body ABI — x2 (a dataset pointer) would have been
+  dereferenced as a `*const ProgramConfiguration`. Asserted on every fetch, with
+  `assert_eq!` not `debug_assert_eq!` so release builds are covered too.
+- `src/randomx/vm.rs` — `LoopState`, `derive_program_params()` (extracted so the
+  JIT and the interpreter provably agree on `ma`/`mx`/`e_mask`/`dataset_offset`
+  rather than deriving them twice), `execute_vm_inner` now takes `iterations` and
+  returns `LoopState`, native-loop dispatch, `RandomXVm::set_native_loop()`.
+- `src/randomx/tests.rs` — `native_loop_diff_tests` module and two known-answer
+  tests (below).
+
+### Behaviour / API changes
+- `RandomXVm::set_native_loop(bool)` — new public knob, **default off**. Takes
+  effect only where every precondition the emitted code assumes holds: aarch64,
+  rx/0, full mode. Elsewhere silently ignored, execution stays on the existing
+  per-iteration body JIT / interpreter.
+- Nothing in the shipping mining path changes yet. `Miner` never calls the new
+  setter, so the default build behaves exactly as before. Stage D measures the
+  path and decides the default.
+- The emitted loop is **v1 + full mode only**, asserted in `compile_native_loop`.
+  `emit_iteration_post` hard-codes v1's `f ^= e` and v1's `mx` aliasing; v2 needs
+  the AES F/E mix and `mp` aliasing, and light mode has no dataset to read.
+  Neither mistake is detectable by the differential test, so it is asserted at
+  the compile boundary rather than left to the caller.
+
+### Verification
+- **Differential** (`native_loop_matches_interpreter`): native loop vs the real
+  interpreter/body-JIT loop — not a re-implementation of it, which could share
+  the bug under test. Compares the full register file, the entire 2 MiB
+  scratchpad, the full-u64 `LoopState`, and the final FPCR. Seeds 1/2/7/78 at
+  N=1, 2 and 3 (N=1 cannot catch an `mx`-ordering error; N=2 is the minimum
+  meaningful comparison) and seed 11 at the full N=2048.
+- **Known-answer, the stage-C gate** (`test_native_loop_known_answer`,
+  `test_native_loop_known_answer_pipelined`): a complete full-mode RandomX hash
+  driven through the native loop must equal
+  `639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f` for key
+  `test key 000` / input `This is a test`. Both reviewers independently flagged
+  that the differential tests say nothing if both paths are wrong in the same
+  way; this is the only test that anchors emitted native-loop code to a real
+  RandomX result, and the only one that exercises FPCR carry-over across all
+  eight chains and the `serialize_register_file` -> `blake2b_512` ->
+  next-program plumbing. It is asserted on **both** `calculate_hash` and
+  `calculate_hash_pipelined`, because the latter is the path the miner actually
+  runs and the former is used by nothing in production.
+- `test_vm_calculate_hash_jit` is retained unchanged with the flag off, as the
+  control proving the default path did not move.
+- Full suite: **105 passed, 0 failed, 2 ignored** (release).
+  `cargo clippy --all-targets -- -D warnings` clean on aarch64 *and* on
+  `x86_64-apple-darwin`.
+
+### Review findings applied (four rounds, independent subagents)
+1. `mx`/dataset-XOR ordering (design D1) — caught before implementation.
+2. `LoopState` returned and compared, closing the D2 blind spot.
+3. v1-only assertion; differential tests un-ignored.
+4. Release-build ABI guards (`assert_eq!`); a `CBZ x28` zero-iteration guard —
+   the emitted loop is a do-while, so `iterations == 0` wrapped the counter to
+   `u64::MAX` and ran ~2^64 times; removal of 8 redundant FMOVs per iteration
+   (131,072 per hash) by writing masked e-values straight to their destination;
+   imm7 range asserts on `stp/ldp_fp_imm`.
+
+Two reviewer claims were checked and **rejected**: that the dataset margin is
+exactly zero (it is 64 bytes — `DATASET_EXTRA_ITEMS` is 524287 while
+`DATASET_EXTRA_SIZE/64` is 524288), and that the C9 bitmask assertion had been
+undone (it is present at `aarch64.rs:813`).
+
+### CI repair (pre-existing, unrelated to the native loop)
+Every pipeline on `main` and on this branch has been failing, so no MR on this
+project was actually being validated. Two independent causes, both fixed here:
+- `rust:lint` — 125 errors on x86_64 that no local aarch64 build can produce.
+  121 were `E0133` in the AES-NI paths of `aes_hash.rs`: the four `*_aesni`
+  functions never got the `unsafe fn f() { unsafe { … } }` treatment the NEON
+  functions received during the edition-2021 -> 2024 migration
+  (`unsafe_op_in_unsafe_fn`). Plus three deprecated `_mm_setcsr`/`_mm_getcsr`
+  calls (allowance kept deliberately: the whole MXCSR word, not just the
+  rounding bits, is consensus-relevant, so hand-rolled asm is the riskier
+  option on a path Apple Silicon never executes), one `too_many_arguments`, and
+  aarch64-only test hooks that were `#[cfg(test)]` rather than
+  `#[cfg(all(test, target_arch = "aarch64"))]`.
+- `rust:audit` — `cargo install cargo-audit --locked` fails with "binary already
+  exists in destination" whenever the cargo cache is restored, which is every
+  run after the first. Guarded by testing `$CARGO_HOME/bin/cargo-audit` directly;
+  `command -v` does **not** work here because `CARGO_HOME` is redirected into the
+  project but the image only has `/usr/local/cargo/bin` on PATH. Fixing *that*
+  by setting `PATH` as a CI variable is a trap that was tried and reverted:
+  GitLab does not expand `$PATH` in variable values, so the value is clobbered
+  and the runner cannot prepare the environment at all ("exec:
+  gitlab-runner-build: not found"). It is unnecessary anyway — cargo searches
+  `$CARGO_HOME/bin` for `cargo-*` subcommands.
+
+**Result: pipeline #59 green on all three jobs.** `rust:test` in particular had
+been *skipped*, never executed, on every recent pipeline — it is in the `test`
+stage and the `check` stage always failed first. It now runs: 41 passed, 0
+failed, 2 ignored on x86_64 Linux.
+
+### Assumptions / constraints
+- CI runs on x86_64 Linux and therefore **can never execute the JIT tests** —
+  `randomx::jit` is `#[cfg(target_arch = "aarch64")]`. The differential and
+  known-answer tests are a mandatory *local* gate (`make test` on Apple
+  Silicon); a green pipeline says nothing about emitted ARM64.
+- No performance claim is made yet. Per the 2026-08-29 methodology finding this
+  machine cannot resolve wall-clock hashrate differences below ~10%, so stage D
+  must judge the change by deterministic proxies (emitted-instruction counts,
+  hardware counters), not by comparing two mining runs.
+
+---
+
+## 2026-09-01 - JIT native iteration loop, stage D: measured, default flipped ON
+
+### Request / goal
+Complete stage D of `DESIGN_JIT_NATIVE_LOOP.md`: measure the native loop against
+the per-iteration body JIT and decide whether it becomes the default. Constrained
+by the 2026-08-29 methodology finding that this machine cannot resolve wall-clock
+hashrate differences below ~10% *between binaries*.
+
+### Result: +9.01% at 11 threads. Default flipped to ON.
+
+| Phase | body JIT | native loop | paired diff | 95% CI | verdict |
+|---|---|---|---|---|---|
+| 1 thread | 337.5 H/s | 358.3 H/s | +6.06% | +0.79% .. +11.33% | faster, but see below |
+| **11 threads (aggregate)** | **4262.3 H/s** | **4646.2 H/s** | **+9.01%** | **+8.70% .. +9.32%** | **faster** |
+
+All 24 paired differences at 11 threads are positive, spanning +7.9% to +10.7%.
+
+**The single-thread number is not the headline and should not be quoted as one.**
+Its mean is skewed by four outliers (+41.7%, +36.3%, +22.0%, +18.8%); the *median*
+paired difference is only about +2.1%, and the two arms' medians are nearly equal
+(324.2 vs 325.7 H/s). Eleven threads is both the configuration the miner runs and,
+by a wide margin, the cleaner measurement.
+
+The direction is consistent with the mechanism: the native loop's win is removing
+per-iteration register spill/reload traffic to `nreg`, and that traffic costs most
+when every core is competing for the same cache and memory bandwidth — which is
+exactly the multi-threaded case.
+
+### Methodology (this supersedes the 2026-08-29 pessimism, for paired tests only)
+`benches/nativeloop_ab.rs` gets a 95% CI of **±0.31%** where binary-vs-binary
+comparison could not resolve 10%. The difference is not more samples, it is
+removing the dominant noise source rather than averaging over it:
+
+- **Both arms in one process**, sharing one `Arc<RandomXDataset>` — no second
+  dataset build, no second thermal ramp, no page-cache difference.
+- **A-B-B-A round ordering**, so drift linear in time over a block contributes
+  equally to both arms instead of accumulating into the difference.
+- **Paired differences** as the statistic, not two independent means. The noise
+  that swamped the two-binary comparison is drift *shared* by both arms of a
+  pair, and differencing cancels it.
+- **Two `RandomXVm` instances**, each with the flag fixed at construction, rather
+  than one VM toggled between rounds. Each VM owns a `JitCompiler` with its own
+  MAP_JIT region; toggling one VM would rewrite that region and re-invalidate
+  icache on every switch, and the two arms emit very differently sized blobs — so
+  a toggled design would have measured icache/iTLB residency alongside the change
+  under test.
+
+The 2026-08-29 finding stands unchanged for what it actually covered: comparing
+two mining runs of two binaries. It is not a general limit on this machine.
+
+**Read the 11-thread CI for what it is.** It is a CI on the *aggregate* hashrate
+difference: per-round rates are summed across threads and the pairing is done on
+the sums, over n=24 rounds. Aggregate throughput is genuinely steadier than any
+one thread, so ±0.31% is a fair interval for the quantity the miner cares about —
+but it is *not* a statement about per-thread effect size, and it should not be
+compared like-for-like against the single-thread phase's ±5%. The claim this
+supports is "aggregate hashrate is ~9% higher", nothing narrower.
+
+### Correctness evidence gathered as a side effect
+The two arms are fed an identical blob sequence from an identical starting
+scratchpad, so every hash must be bit-identical; the harness asserts this every
+round and fails loudly rather than reporting a benchmark number. Across both
+phases that is roughly **147,000 hashes verified identical** — 12,288
+single-threaded plus 135,168 across 11 threads — covering thousands of distinct
+RandomX programs, entropy blocks and `dataset_offset` values.
+
+This matters more than the timing. The stage-C known-answer tests pin exactly one
+program stream; flipping the default turns the native loop on for every seed a
+pool sends, and this is the only evidence that spans that space.
+
+### C1 re-verified before flipping
+`compile_native_loop` asserts `dataset_offset <= DATASET_EXTRA_ITEMS * 64` in
+release. Since stage D enables the path for arbitrary pool work, a reachable
+violation would panic a worker mid-hash rather than mine garbage. It is
+**unreachable by construction**: `derive_program_params` computes
+`(entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE`, whose maximum is
+exactly `524287 * 64`. The assert previously wrote that bound as a literal while
+the derivation used the constant; it now uses the constant, so the two cannot
+drift apart.
+
+### Files changed
+- `benches/nativeloop_ab.rs` (new), `Cargo.toml` — the paired A/B harness.
+- `src/randomx/vm.rs` — `use_native_loop` now defaults to `true`;
+  `DATASET_EXTRA_ITEMS` made `pub(crate)`.
+- `src/randomx/jit/compiler.rs` — C1 assert expressed via the shared constant;
+  new `native_loop_emitted_instruction_accounting` test.
+- `src/randomx/tests.rs` — `test_vm_calculate_hash_jit` now calls
+  `set_native_loop(false)` explicitly. It is no longer the default path, but it
+  is still a shipping one (forced off, non-aarch64, or light mode), so it keeps
+  its own known-answer vector rather than being deleted.
+
+### The instruction-count proxy was the wrong instrument — recorded, not hidden
+The stage-D gate in the design said "instructions-retired check". Only *emitted*
+words are countable, and the body-JIT path also executes Rust-compiled loop code
+that no `Emitter` sees, so any "native vs body" word count compares a superset
+against a subset and looks like a large win regardless of the truth.
+
+What is apples-to-apples, and what the new test reports and guards:
+
+| | per iteration | per hash (16,384 iterations) |
+|---|---|---|
+| body ABI prologue+epilogue **eliminated** | 83 words | 1,359,872 |
+| native loop pre+post+2 **added** | 168 words | 2,752,512 |
+
+The eliminated column is exact and is pure register save/restore overhead. The
+added column is emitted code replacing Rust work of unknown size. **Their
+difference is not a net instruction saving and must not be quoted as one.** The
+static proxy was inconclusive on direction; the benchmark decided it.
+
+### Verification
+- Full suite **106 passed, 0 failed, 2 ignored** with the native loop as the
+  default; `cargo clippy --all-targets -- -D warnings` clean.
+- The stage-C known-answer tests still pass, now exercising the default path.
+
+### Scope note
+Unchanged: the native loop is v1 + full mode + aarch64 only. Light mode, rx/2 and
+non-aarch64 targets still run the body JIT or the interpreter, and
+`set_native_loop(false)` forces the old path back on any build.
+
+---
+
+## 2026-09-02 - CORRECTION: stage D's +9.01% is retracted. Real figure +6.76%.
+
+### What was wrong
+Independent review round 5 (see `REVIEW_MR1.md`, finding F1) found that
+`benches/nativeloop_ab.rs` built its **baseline** arm with `RandomXVm::new_full`
+and relied on the constructor default for it, calling `set_native_loop` only on
+the native arm. That was correct when the harness was written — the default was
+`false` — but the *same commit* (260bc89) flipped the default to `true`. From the
+committed tree the "baseline" was a second native-loop arm, so the benchmark
+measured the native loop against itself. The reviewer re-ran it and got -0.02%,
+"NO MEASURABLE DIFFERENCE".
+
+**Root cause, stated so it is not repeated: an experiment arm was inferred from a
+default that another change was free to move.** Both arms now set the flag
+explicitly, and the comment in the harness says why.
+
+### Corrected measurement (both arms explicit, machine quiet)
+
+| Phase | body JIT | native loop | paired diff | 95% CI |
+|---|---|---|---|---|
+| 1 thread | 570.0 H/s | 604.9 H/s | **+6.12%** | +6.02% .. +6.22% |
+| 11 threads (aggregate) | 4756.1 H/s | 5077.1 H/s | **+6.76%** | +6.20% .. +7.32% |
+
+24 of 24 paired differences positive in **both** phases.
+
+### Two things changed, not one — and the second is the more instructive
+1. The invalid baseline (above).
+2. **The original run was taken on a contended machine.** Its absolute baseline
+   was 337.5 H/s single-threaded where the clean re-run gets 570.0 H/s — a 69%
+   difference in the *baseline itself* — and its per-pair differences ranged
+   -13.8% to +41.7%, versus +5.8% to +6.8% now. The original 1-thread CI
+   (+0.79%..+11.33%) was correctly reporting that noise; the 11-thread aggregate
+   CI (+-0.31%) was not, because summing 11 threads before differencing hid it.
+   That is exactly the failure mode the 2026-09-01 entry already warned about in
+   its own caveat paragraph, and it still got quoted as the headline.
+
+**Lesson for future benchmarking here, beyond the earlier 2026-08-29 finding:** a
+tight CI is not evidence of a quiet machine. Check the absolute rates against a
+known-good baseline before trusting an interval. A run whose baseline is 40%
+below what the same harness produces on an idle machine should be discarded
+regardless of how tight its interval looks.
+
+### What this does NOT change
+The direction and the decision. The native loop is faster in every one of the 48
+paired rounds across both phases, and the default stays ON. The claim moves from
+"+9.01% at 11 threads" to "+6.1% single-threaded, +6.8% at 11 threads" — smaller,
+and now measured against a genuine baseline.
+
+### Correctness evidence is restored, not merely re-run
+The harness asserts both arms produce bit-identical hashes every round. While the
+baseline was silently the native loop, that assertion compared the native loop
+with itself and was vacuous — so the "~147,000 hashes verified identical" claim
+in the 2026-09-01 entry was, for that run, worthless. The corrected run makes it
+real: ~147,000 hashes across thousands of distinct programs, entropy blocks and
+`dataset_offset` values, verified between two genuinely different execution
+paths. This is the evidence that justifies the default being ON, and it only
+exists as of this entry.
+
+### Other review findings applied
+- **F3** — the CBZ zero-guard back-patch masked its offset (`skip & 0x7FFFF`)
+  with no range assert, while the back-branch two lines away was asserted. Added.
+  Unreachable today (~1.2k-word blob vs a 2^18 limit).
+- **F5** — `mean_ci95` hardcoded t=2.09 while `pairs` is a CLI argument, making
+  the interval ~19% too narrow at n=6. Replaced with a t-table by df.
+
+### Deferred, with reasons
+- **F2** `make test` runs debug while AUDIT verified in release, so the new
+  `debug_assert!`s never ran in the verified profile. No live bug — the reviewer
+  proved the CBRANCH invariant holds by construction — but the gap is real.
+- **F4** two 2 GiB `LazyLock` datasets can be resident at once (~4.5 GiB peak).
+- **F6** the 11-thread phase has no barrier, so "round i is concurrent across
+  threads" is assumed rather than enforced. Dilutes the effect, does not inflate.
+- **F7** 8 FMOVs per iteration remain in the f-load path — the same optimisation
+  review round 4 applied to the e path. A real follow-up win, but it changes
+  emitted ARM64 and so needs its own review round rather than riding along here.
+
+### Review round 5: no blockers
+The reviewer disassembled the emitted loop end to end and independently
+confirmed 13 items, including D1 ordering, the f stride-8-load/stride-16-store
+asymmetry, C1 (recomputed from scratch: 64 bytes margin, three guards), exact
+scratchpad masking, AAPCS64 conformance (10 push/10 pop, 16-byte aligned, x18
+untouched), C3 FPCR containment, and all six new encoders bit-compared against
+`as -arch arm64`. Full detail in `REVIEW_MR1.md`.
+
+### Verification
+- Corrected benchmark run above; 6/6 native-loop tests pass in release.
+- `cargo clippy --all-targets -- -D warnings` clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-02 - Runtime fallback switch for the native-loop JIT
+
+### Request / goal
+Before merging MR !1, give operators a way to turn the native loop off **without
+rebuilding**. Until now the path was chosen purely by a compiled-in default:
+`miner.rs` called `RandomXVm::new_full` and never touched `set_native_loop`.
+
+### Why this is worth a config key rather than a rebuild
+The failure mode is silent and costs money. A JIT defect here does not panic and
+does not corrupt memory — it produces a wrong-but-plausible hash. The miner keeps
+running, reports a healthy hashrate, submits shares, and the pool rejects them.
+The only symptom is the reject rate on a pool dashboard, which nothing in the
+miner surfaces. So the operator needs to be able to *bisect the miner against the
+pool* in one restart, not a toolchain install and a build.
+
+Residual risks that motivate it, none of them known defects:
+1. **Program-space coverage is finite.** ~147,000 hashes verified identical is
+   thousands of distinct RandomX programs, against an astronomically larger
+   space. Inherently unfalsifiable by testing; only field exposure closes it.
+2. **Nothing outside one machine has run this code.** CI cannot (see issue #2);
+   every correctness claim traces to a single M2 Max. No other Apple Silicon
+   generation has executed a single instruction of the emitted loop.
+3. **FPCR carry-over is deliberately not ABI-clean.** `emit_loop_epilogue` leaves
+   the rounding mode modified because RandomX requires it to persist across
+   chains; containment rests entirely on the save/restore pair at the outer hash
+   boundary. Correct today and verified in review round 5, but exactly the kind
+   of invariant a future change to calling code could quietly break.
+4. **`compile_native_loop` asserts in release.** C1 is unreachable by
+   construction, but a future change to `derive_program_params` would turn that
+   into a panicking worker mid-hash rather than a graceful degrade.
+
+### Files changed
+- `src/miner.rs` — `Miner::set_native_loop()`; the value is captured per worker
+  at spawn and applied to each `RandomXVm` on first construction (`reinit` keeps
+  the flag, so it is not re-applied on seed change).
+- `src/bin/minertim.rs` — `--native-loop on|off` and `MINERTIM_NATIVE_LOOP`,
+  plus four unit tests for the parser.
+- `Makefile` — passes `--native-loop` through when `NATIVE_LOOP` is set.
+- `mining.conf.example` — documents `NATIVE_LOOP` and, importantly, *when to
+  reach for it*: shares being rejected while hashrate still looks fine.
+
+### Behaviour
+- Precedence: `--native-loop` > `MINERTIM_NATIVE_LOOP` > default (on). Last flag
+  wins, so a wrapper script can append an override.
+- Accepts `on/off`, `true/false`, `yes/no`, `1/0`, case-insensitively.
+- **An unrecognised value warns and is ignored rather than being fatal.** This is
+  the switch someone reaches for during an incident; refusing to boot over a typo
+  would be the wrong failure mode.
+- Disabling logs at **warn**, not info: it silently forfeits ~7% hashrate, and
+  someone who set it during an incident should not rediscover it months later by
+  reading a config file.
+
+### Verification
+- Smoke-tested all four paths against the real binary: flag off, env off, flag
+  overriding env, and the silent default; plus a typo warning without refusing to
+  boot.
+- 106 lib tests + 4 new bin tests pass; clippy clean on aarch64 and x86_64.
+
+### Not done
+No runtime *hot* toggle — the value is read once per worker at spawn, so changing
+it needs a restart. A restart is the right granularity here: mid-hash switching
+would mean tearing down a VM whose scratchpad is live.
+
+---
+
+## 2026-09-02 - Review round 6 findings applied + verify-before-submit
+
+### Review round 6 (delta review of d49535a..HEAD)
+The reviewer was asked to check the fixes it had itself prompted. It found real
+defects **in those fixes** — recorded here because the pattern (a fix that looks
+right and is subtly wrong) is the argument for delta reviews existing at all.
+
+- **R6-F1** — the CBZ range assert added for round 5's F3 used `skip < (1 << 19)`
+  and claimed to be "the same imm19 range the back-branch is checked against".
+  It is not: CBZ's imm19 is **signed**, so a forward branch only reaches
+  `2^18 - 1`. A `skip` in `[2^18, 2^19)` would pass the assert, survive
+  `& 0x7FFFF` unchanged, then sign-extend to a *negative* offset and branch
+  backwards into the loop. Corrected to `1 << 18`. Unreachable today (~1.2k-word
+  blob), but the assert existed specifically to pin this bound.
+- **R6-F2** — the t-table added for round 5's F5 bucketed `20..=29 => 2.045`,
+  `30..=59 => 2.001`, `_ => 1.96`, i.e. the value for the *highest* df in each
+  bucket, so every df below the top got an interval that was too narrow —
+  including the default run (n=24, df=23, true t = 2.069). The fix for an
+  understated CI still understated it. Buckets now take the lowest df.
+- **R6-F3** — a bare `--native-loop` with no value was silently ignored: no
+  warning, no change, JIT left **on**. The one input shape that could leave an
+  operator believing they had disabled it, reachable from a wrapper script
+  writing `--native-loop $NL` with `$NL` unset. Now warns and resolves to off.
+- **R6-Q1** — the reviewer pushed back on the "unrecognised value is ignored"
+  policy and was right. **Accepted and changed.** The two outcomes are
+  asymmetric: if the value failed to parse, we already know the operator was
+  trying to *change* the setting, so resolving to `on` is the one answer we can
+  be confident they did not want, and its cost is continued rejected shares.
+  Resolving to `off` costs ~7% hashrate if they meant "on" and never leaves a
+  suspected-bad JIT running while someone is trying to stop it. Still never
+  fatal.
+
+### R6-F4 (MAJOR): the published CI did not describe the published quantity
+The reviewer independently re-ran the corrected harness on the same machine and
+got **+7.42% (CI +7.14%..+7.70%)** against the recorded **+6.76% (CI
++6.20%..+7.32%)**. The intervals barely touch and the point estimates differ by
+more than either half-width. Absolute rates moved too (baseline 4756 -> 5020),
+i.e. a level shift the paired design cancels *most* but not all of.
+
+So the interval was describing within-run round scatter of an already-smoothed
+aggregate, not the reproducibility of the number being published. **This is the
+same class of error as the round-5 retraction, one iteration later** — a
+too-confident interval quoted as fact — which is why it was raised as MAJOR
+despite the underlying decision being correct.
+
+**The claim is now a range, not an interval: +6.8% to +7.4% at 11 threads across
+two independent runs, 96 of 96 paired rounds positive.** Restated in all four
+user-visible places (this file, `DESIGN_JIT_NATIVE_LOOP.md`, `CLAUDE.md`,
+and the `use_native_loop` doc comment).
+
+**Standing rule for this repo:** do not publish a benchmark interval from a
+single run. Either replicate and publish the range, or publish the point
+estimate and say it is unreplicated.
+
+### Verify-before-submit (the substantive addition)
+Prompted by the question "so if the fast code is generating wrong hashes we will
+not know unless we check on the pool side?". Largely yes, and the local signal
+(rejected-share count in the stats line) is weak: slow, because shares are rare;
+ambiguous, because stale-job rejects look identical; and unwatched.
+
+The old path is the reference — 87 vectors validate it — and shares are rare, so
+the miner now checks its own work before submitting. On finding a share, the
+worker recomputes that one hash on a reference-path VM (`set_native_loop(false)`)
+and compares. Mismatch => the share is **withheld**, a loud error names both
+hashes and tells the operator to restart with `--native-loop off`, and a counter
+is reported on every stats tick — as its own `log::error!` immediately before
+the stats line rather than appended to it, which is louder than "surfaced in the
+stats line" as an earlier draft of this entry described it (R7-F5).
+
+Cost: one extra hash per share found. At 5,077 H/s and pool difficulties of
+10k-100k that is a share every ~2-20 s, so ~0.0008%-0.008% of mining time —
+against a ~7% gain, and against losing *100%* of revenue for as long as a silent
+JIT fault goes unnoticed. The verifier VM is built lazily on the first share, so
+a worker that never finds one never pays its 2 MiB scratchpad, and it is dropped
+on seed rotation.
+
+Deliberate limits, stated so they are not mistaken for guarantees:
+- It only verifies shares actually submitted. A fault that never produced a
+  share would go unseen — but would also cost nothing, since only submitted
+  shares earn.
+- It is skipped when the native loop is off, where the mining path already *is*
+  the reference path and the check would compare it against itself.
+- `VERIFY_SHARES=off` exists for the case where verification itself misbehaves,
+  and warns loudly when set while the native loop is on.
+
+### Files changed
+`src/miner.rs` (verifier + `verify_failures` counter + `set_verify_shares`),
+`src/bin/minertim.rs` (`--verify-shares`, generic `parse_switch`, fail-safe
+parsing, stats surfacing, 6 parser tests), `src/randomx/jit/compiler.rs`
+(R6-F1), `benches/nativeloop_ab.rs` (R6-F2), `Makefile`,
+`mining.conf.example`, plus the R6-F4 restatement.
+
+### Verification
+106 lib tests + 6 bin tests pass; clippy clean on aarch64 and x86_64; all
+switch behaviours smoke-tested against the shipped binary (bare flag, typo,
+verify-off warning, silent default).
+
+### Not verified
+The verifier's mismatch branch has never executed — there is no fault to trigger
+it. It is straight-line code reached only when two hashes differ, but it is
+untested in the strict sense. A fault-injection test (force a divergence and
+assert the share is withheld and counted) would close that and is worth adding.
+
+---
+
+## 2026-09-02 - Branch coverage for the new code (117 lib + 7 bin tests)
+
+### Request
+"Ensure all code branches are tested." Scoped to the code this MR adds — full
+branch coverage of the whole miner (pool I/O, reconnect, job handling, donation
+rotation) is a much larger piece of work and is **not** claimed here.
+
+### The structural problem, and the fix
+The share-verification decision was written inside `worker_loop`, a function that
+needs a live pool connection and a 2 GiB dataset. Its branches were therefore
+unreachable from any test — including the one that matters, the mismatch path,
+which by definition never runs without a JIT fault. It would have shipped having
+never executed.
+
+`ShareVerdict` + `classify_share` were extracted so the decision is a pure
+function and only the expensive recomputation stays in the worker. All four
+branches are now covered:
+
+| Branch | Meaning | Test |
+|---|---|---|
+| `!applies` | verification off, or native loop off (mining path *is* the reference) | `classify_share_covers_every_branch` |
+| `applies`, no reference | verifier unavailable — **fails open** | same |
+| `applies`, hashes equal | normal case | same |
+| `applies`, hashes differ | **withhold** | same, plus `a_single_differing_byte_is_enough_to_withhold` |
+
+`only_a_mismatch_blocks_submission` pins the verdict-to-action mapping
+separately, so a future variant cannot be added and silently default to blocking
+shares — the failure mode that costs money.
+
+### The most valuable test is not a branch test
+`pipelined_hash_matches_calculate_hash_for_the_preceding_blob` reproduces the
+worker's exact call pattern — `prepare_scratchpad(blob0)` then
+`calculate_hash_pipelined(next)` — and asserts the returned hash equals
+`calculate_hash(current)` on a separate reference VM, for three successive
+nonces.
+
+This covers the assumption the whole feature rests on. `calculate_hash_pipelined`
+returns the hash of the *previous* input, so if `job_blob_current` were off by
+one, **every share would be withheld as a false mismatch** — worse than having no
+verification, because it would look exactly like a JIT fault while costing 100%
+of revenue. Nothing else covered it: the known-answer tests each use a single
+blob, where an off-by-one is invisible.
+
+### Guard branches that only fire on panic
+These are the asserts protecting against wrong-hash and memory-safety failures.
+All existed untested, because nothing in normal operation trips them:
+
+- `compile_native_loop_rejects_v2` — the v1-only guard. `emit_iteration_post`
+  hard-codes v1's `f ^= e` and mx aliasing, and the differential test only ever
+  exercises v1, so this assert is the only thing between a v2 caller and
+  silently wrong hashes.
+- `compile_native_loop_rejects_an_out_of_range_dataset_offset` — the C1 bound.
+- `compile_native_loop_accepts_the_maximum_real_dataset_offset` — the other
+  direction. An off-by-one here would panic a worker mid-hash on roughly one
+  program in 524,288, which is the kind of thing that shows up weeks later.
+- `get_fn_rejects_native_loop_code` / `get_loop_fn_rejects_body_code` — the
+  `CompiledKind` ABI guard, both directions. Calling native-loop code through
+  the 3-argument body ABI would dereference a dataset pointer as a
+  `*const ProgramConfiguration`.
+
+### Switch parsing
+`switch_reads_the_environment_and_the_flag_overrides_it` covers the env-var
+branch, flag-beats-env, an unparseable env value failing safe, and the default
+applying once unset. Plus the earlier six: defaults, every accepted spelling,
+fail-safe on a typo, fail-safe on a bare flag, last-flag-wins.
+
+### STILL NOT COVERED — stated plainly
+1. **The verifier's lazy construction and seed-rotation reset.** `get_or_insert_with`
+   and `verify_vm = None` on seed change live in `worker_loop` and need a live
+   pool. If the reset were wrong, the verifier would be keyed to a stale seed and
+   every share would be withheld after the first rotation. Reviewed by eye, not
+   tested. **This is the highest-value remaining gap.**
+2. **The stats-loop error print** when `verify_failures > 0`, in `main`.
+3. **`worker_loop` generally** — pool I/O, reconnect, job switching, nonce
+   interleaving. Pre-existing, unchanged by this MR.
+
+Closing (1) properly means making `worker_loop` testable against a fake pool,
+which is a refactor worth its own MR rather than a rider on this one.
+
+### Verification
+117 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-02 - Review round 7 applied: 5.5 GiB of dead memory removed
+
+Round 7 reviewed the verify-before-submit feature. **No blockers**, and it
+answered the three questions put to it: no off-by-one (proved by replicating
+`worker_loop`'s call pattern — 24 comparisons, 0 mismatches), no constructible
+false positive, and the counter does reach the operator by three independent
+signals. But it found one MAJOR and several minors, all applied here.
+
+### R7-F1 (MAJOR): the verifier cost ~100x what its own comment claimed
+The comment said a worker that never finds a share "never pays the 2 MiB
+scratchpad". True but irrelevant: `RandomXVm::new_full` opens with
+`argon2d_cache(key)` — a 256 MiB, 3-pass Argon2d fill. Measured at
+**0.37-0.43 s and 256 MiB per verifier**, appearing gradually as each worker
+found its first share, so it would have looked like a leak.
+
+**The root cause is not the verifier.** `cache_memory` is read in exactly one
+place — `init_dataset_item`, on the `dataset == None` arm — so a VM that owns a
+dataset never touches it. Every full-mode VM has been building and holding
+256 MiB it can never read, since long before this MR. At 11 workers that is
+**2.75 GiB**, and the verifiers would have doubled it to 5.5 GiB.
+
+Fixed at the source: `new_full_versioned` allocates no cache, and `reinit` only
+builds one when switching to light mode. Two tests pin both directions
+(`full_mode_vm_allocates_no_argon2d_cache`,
+`light_mode_vm_still_allocates_its_cache`). This also removes ~0.4 s of startup
+per worker.
+
+### R7-F2: the fail-safe direction was inverted for `--verify-shares`
+Round 6 established that a malformed switch value should resolve to the
+conservative direction rather than the default. Round 7 caught that the generic
+`parse_switch` applied `false` to *both* switches, and `false` is not
+conservative for a safety net — it disarms it. `MINERTIM_VERIFY_SHARES=` (empty)
+reaches that path with no typo at all.
+
+`fail_safe` is now a per-switch parameter, documented with the reasoning:
+- `--native-loop` -> `false`: off is slower but cannot mine wrong hashes.
+- `--verify-shares` -> `true`: off is the dangerous direction.
+
+Confirmed on the shipped binary: a typo or a bare `--verify-shares` now prints
+"assuming ON (the safe direction)" and leaves verification armed, while
+`--native-loop nonsense` still disables the JIT.
+
+### R7-F3 / R7-F4: parser duplication and a re-parented doc block
+Adding `parse_switch` had left `parse_native_loop`'s doc comment attached to the
+wrong function and the two parsers byte-identical. `parse_native_loop` and the
+new `parse_verify_shares` are now one-line wrappers over `parse_switch`, and the
+policy is documented once, where it is implemented.
+
+### R7-F6: the reference path is NOT independent — recorded as a limit
+Both paths run `emit_body`, so a defect in the shared instruction emitter
+produces the same wrong hash on both sides and passes verification. What this
+catches is defects in the **native-loop scaffolding** — prologue, per-iteration
+pre/post, loop control, register residency — which is where all the new code in
+this MR lives. Now stated in the code comment so nobody mistakes it for a
+general correctness net.
+
+### Verification
+119 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64; all
+four switch behaviours re-confirmed against a freshly built binary (the first
+smoke run was against a stale one and would have reported a false pass).
+
+---
+
+## 2026-09-02 - Remaining round 5/7 items closed; open items listed explicitly
+
+Answering "have we addressed all reviewer concerns?" — **not all, and the
+remainder is listed below rather than left implicit.**
+
+### Closed in this batch
+- **R7-F5(a)** — AUDIT claimed the verify-failure counter is "surfaced in the
+  periodic stats line". It is its own `log::error!` immediately *before* that
+  line. Functionally louder than described; wording corrected.
+- **R7-F5(b)** — the design's stage-D table recorded the 1-thread run 2 as `—`.
+  The reviewer's independent run did produce one: **+6.45%** against run 1's
+  +6.12%. That makes the 1-thread row the *stronger* replication of the two (the
+  two baselines agreed to within 0.03%), and leaving it blank understated the
+  evidence. Row now reads `+6.12% | +6.45% | +6.1% to +6.5%`.
+- **R7-Q1 (framing)** — user-visible text described this as catching "a JIT
+  defect", which is broader than the mechanism. The reference path is itself
+  JIT-emitted and shares `emit_body`, so the check detects divergence in the
+  **native-loop machinery** and is blind to a fault common to both paths.
+  Corrected in `mining.conf.example`, the `--help` text and the runtime warning.
+- **R7-Q1 (option 2)** — the reviewer's sharper point was that nothing proved
+  the comparison is wired up at all: if the decision were refactored to
+  unconditionally submit, every test would still pass and the feature would be a
+  silent no-op. `verifier_withholds_a_hash_that_does_not_match_the_reference`
+  drives the withhold path with two *genuine* RandomX hashes for adjacent
+  nonces — the realistic shape of a divergence — rather than synthetic bytes.
+- **Round 5 "remaining work" (b)** — the C1 memory-safety worst case was, in the
+  reviewer's words, "only argued, never executed". It is now executed:
+  `native_loop_at_the_c1_worst_case_dataset_address` forces `entropy(13)` to the
+  maximum `dataset_offset` and `entropy(8)` so `ma` masks to `0x7FFF_FFC0`, then
+  runs the full differential comparison at that address. A seed reaches this
+  case roughly once in 524,288, so it would never have been hit by chance. The
+  differential helper was split so a test can pin entropy words rather than hope
+  a seed lands where it wants.
+
+### STILL OPEN — deliberately, with reasons
+- **R5-F2** — `make test` runs `cargo test` (debug) while every verification in
+  this log was done in release, so the `debug_assert!` guards added for the
+  native loop never execute in the profile that gets verified. No live bug, but
+  the gap is real. Folded into issue #2's interim mitigations.
+- **R5-F4** — two 2 GiB `LazyLock` datasets (different keys) can be resident at
+  once, ~4.5 GiB peak in the test binary. Test-only.
+- **R5-F6 / R7 open** — the 11-thread benchmark phase has no barrier, so "round
+  i is concurrent across threads" is assumed rather than enforced. Dilutes the
+  measured effect rather than inflating it, so it cannot have manufactured the
+  result.
+- **R5-F7** — 8 redundant FMOVs per iteration in the f-load path. Filed as
+  **issue #1**; changes emitted ARM64, so it needs its own review round.
+- **CI cannot validate any of this** — filed as **issue #2**.
+- **`worker_loop` remains untestable** — the verifier's lazy construction and
+  seed-rotation reset are reviewed by eye (round 7 traced them and found them
+  correct) but not tested. Closing this means a fake-pool seam, which deserves
+  its own MR.
+
+### Verification
+121 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 8: no blockers, no majors. MR !1 declared mergeable.
+
+The first round in four without a major. Independent verification of the three
+previously-unreviewed commits (`e6724ce`, `3fcc388`, `3c281dc`).
+
+**Correction to my own brief:** I asked for a review of "three commits" in
+`3fcc388..3c281dc`. That range contains **one**. The reviewer spotted it,
+worked out which three I meant, and reviewed all of them — `e6724ce` had landed
+before its round-7 doc commit and so fell outside the range I gave. Recorded
+because a reviewer silently accepting a wrong scope is how a commit goes
+unreviewed while everyone believes it was covered.
+
+### What it confirmed, having been asked to attack it
+- **The C1 worst-case test genuinely reaches the worst case.** `ENTROPY_OFFSET`
+  is 0, so `pb[13*8..]` and `pb[8*8..]` are exactly the words
+  `derive_program_params` reads; neither collides with entropy 0-7, 10, 12 or
+  14/15; both writes stay inside the entropy block. The values are true maxima
+  (`0xFFFF_FFFF & 0x7FFF_FFC0 == 0x7FFF_FFC0`, `524287 % 524288 == 524287`), and
+  the extreme is executed on **iteration 1 in both arms**.
+  **But my comment credited the wrong detector.** It says a failure shows up as
+  "a segfault or a mismatch". A segfault is unlikely — 64 bytes past a 2 GiB
+  `Vec` is almost certainly mapped. The real detectors are the register
+  mismatch and the *reference* arm's bounds-checked `get_item`.
+- **The helper split changed no coverage.** Seeds 1/2/7/78 and the 2048-iteration
+  case run on byte-identical program bytes and scratchpads; every rename was in
+  an assertion message. The `str.replace` collateral I caught and reverted is
+  clean.
+- **The no-cache reasoning holds under attack.** The reviewer enumerated every
+  reader of `cache_memory` and identified the load-bearing question correctly:
+  can `dataset` become `None` on a cacheless VM? It cannot — `self.dataset` is
+  assigned in exactly one place, inside `reinit`, which rebuilds the cache on
+  that same branch. Fields are private; there is no `set_dataset`. All five
+  `cache_and_programs()` callers build a light VM first.
+  **Measured payoff:** verifier construction is now **0.6-0.8 ms and 0 bytes**,
+  against 372-432 ms and 256 MiB before — roughly 500x less latency in the share
+  submission path, and 5.5 GiB reclaimed.
+
+### R8-F1 (minor, fixed): the public accessor became a trap
+`cache_and_programs()` is `pub`, still documented as "for dataset generation",
+and now returns an empty slice for full-mode VMs — the tuple is asymmetric
+(`.0` conditionally empty, `.1` never), and the reason lived only in the
+constructor body. A future caller would get an out-of-bounds index inside
+`generate`'s spawned worker threads.
+
+Fixed at both ends: the accessor documents the asymmetry and says which VM to
+call it on, and `RandomXDataset::generate` asserts a non-empty cache with a
+message naming the mistake. `dataset_generation_rejects_a_full_mode_vms_empty_cache`
+pins it.
+
+### R8-F2 (minor, fixed): a SAFETY comment justifying the wrong invariant
+The env-var test said "a name unique to this test; no other thread reads it".
+The hazard is not name collision — it is `setenv` reallocating `environ` while
+another parallel test sits in `getenv`. A unique name avoids clobbering another
+test's value but does not make the call sound. Rewritten to state the real
+invariant and the reason it holds here (nothing else in this binary reads the
+environment: `parse_switch` is the only reader, and `env_logger` initialises in
+`main`, which tests never run), plus what would invalidate it. An incorrect
+SAFETY comment is worse than none, because it stops the next reader checking.
+
+### Residual gap the reviewer restated honestly
+Its round-7 wording was "if `verified` became unconditionally `true`, no test
+would notice". The new tests pin the *decision*; that specific mutation lives in
+three lines of `worker_loop` glue and still would not be caught. It read them
+and found them correct. Not a blocker — straight-line code in a function needing
+a live pool — and both the commit message and this log name it rather than
+implying coverage.
+
+### On the deferred items
+None should block. The reviewer singled out **issue #2 (CI cannot validate the
+JIT)** as the one to not defer indefinitely, since every ARM64 correctness claim
+rests on one machine plus a manual `make test` — while noting this MR *adds* a
+runtime backstop. It also flagged that **R5-F4 matters more than its severity
+suggests**: two 2 GiB test datasets mean a contributor on a 16 GB machine may
+not be able to run the mandatory local gate at all.
+
+### Verdict
+**Mergeable.** 122 lib + 7 bin tests pass in release; clippy clean on aarch64
+and x86_64.
+
+---
+
+## 2026-09-03 - Follow-up: a mangled panic message, and how it got there
+
+The reviewer's polling job surfaced a cosmetic defect in the round-8 fix
+*while it was still uncommitted*, and it is worth recording because of the
+mechanism rather than the severity.
+
+`dataset.rs`'s new precondition message rendered as:
+
+    ... Argon2d cache; got an              empty one ...
+
+**Cause:** the edit was applied with a Python script using a triple-quoted
+string containing a Rust `\`-newline continuation. Python treats a trailing
+backslash inside a triple-quoted literal as *its own* line continuation, so it
+consumed the backslash, joined the lines, and kept the source indentation as
+14 literal spaces. The Rust literal was then valid and compiled cleanly.
+
+**Why it matters more than it looks:** this is the text an operator reads at the
+moment something has already gone wrong, and nothing catches it — not the
+compiler, not clippy, not the `should_panic` test, whose expected substring sits
+before the damage.
+
+Fixed, and the branch was swept for the same pattern
+(`git diff main...HEAD` over `*.rs`, looking for runs of 3+ spaces inside string
+literals). One instance only; every other hit is intentional column alignment in
+`println!` output.
+
+**Process note:** earlier edits in this session escaped the backslash (`\\` in
+the Python source) and were unaffected. The single-backslash form is the trap.
+Prefer a heredoc written straight to the file, or verify the rendered literal
+after any scripted edit that contains one.
+
+122 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - worker_loop testability: the verifier's state machine is now covered
+
+### The gap this closes
+Every review round since the verifier landed listed the same open item: its lazy
+construction and its reset on seed rotation lived as three loose locals inside
+`worker_loop`, a function that needs a live pool connection and a 2 GiB dataset.
+Round 7 traced them by eye and found them correct; nothing tested them.
+
+That gap mattered more than its size. **A verifier surviving a seed rotation
+would withhold every share from that point on** — in full mode the dataset
+determines the hash, so a stale one disagrees with everything the miner finds,
+and the symptom is indistinguishable from the JIT fault the feature exists to
+detect. The operator would see the "WITHHELD a share" error, follow its advice,
+restart with `--native-loop off`, and the rejects would continue.
+
+### What changed
+`ShareVerifier` now owns that state (`vm`, `dataset`, `key`, `enabled`) with
+three methods — `rekey`, `reference`, `is_armed` — and `worker_loop` holds one
+value instead of three locals. No behaviour change: `rekey` drops the cached VM
+exactly as the inline code did, and `reference` performs the same lazy build.
+
+The point is that the state machine is now reachable from a test.
+
+### Tests
+- `share_verifier_builds_lazily_and_resets_on_seed_rotation` walks the whole
+  lifecycle: unarmed with no dataset and no VM built; armed after `rekey` but
+  **still** no VM (the laziness is the reason a worker that never finds a share
+  pays nothing); VM built on first `reference`, and that reference equal to an
+  independently constructed reference-path VM's hash — which pins that it uses
+  the right dataset *and* that `set_native_loop(false)` was applied; then a
+  rotation dropping the cached VM and adopting the new dataset.
+- `disabled_share_verifier_does_no_work` — a disabled verifier never reports
+  itself armed, never returns a reference and never builds a VM, so
+  `VERIFY_SHARES=off` really is free.
+
+Test-only accessors (`has_cached_vm`, `holds_dataset`) are gated
+`#[cfg(all(test, target_arch = "aarch64"))]` — a plain `#[cfg(test)]` made them
+dead code on x86_64 and failed `rust:lint`, which is the same cfg-skew that
+broke CI before and is invisible to any local aarch64 build.
+
+### Still not covered
+The three lines of `worker_loop` glue that call `verifier.reference(...)` and
+act on the verdict. Round 7's point stands: if that call were removed the
+feature would be a silent no-op and no test would notice. It is straight-line
+code in a function still needing a live pool; closing it means a fake-pool seam.
+Named here rather than implied to be covered.
+
+### Verification
+124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 9 applied: seven minors, one of which outranked its severity
+
+Round 9 covered the four previously-unreviewed commits. **No blockers, no
+majors**, and it independently confirmed the `ShareVerifier` extraction is
+behaviour-preserving on every reachable path (drop timing, build timing, key
+derivation, dataset move, and the relationship to the
+`job.seed_hash != current_key || vm.is_none()` guard).
+
+### The reviewer measured something that reframes the whole feature
+**In full mode the key has no effect on the hash at all.** Two different keys
+over the same dataset produce byte-identical hashes — because the 2026-09-02
+change removed the Argon2d cache and `ss_programs` are light-mode only. So the
+*dataset* is the sole thing that can make a verifier stale. Every description of
+this as "keyed to the seed" was imprecise; it is keyed to the dataset.
+
+### R9-F7 — the one to act on first: an arm assumed rather than asserted
+Nothing asserted that the verifier's VM is on the **reference** path. The
+rotation test compared its output against a freshly built
+`set_native_loop(false)` VM — but that assertion *cannot fail* if
+`ShareVerifier::reference` lost its `set_native_loop(false)` line, because both
+paths produce identical hashes by construction. Verification would compare the
+native loop against itself, report a clean counter forever, and every test,
+clippy and CI would stay green.
+
+**That is structurally the round-5 F1 defect** — the A/B benchmark measuring one
+arm against itself — in the code rather than the benchmark. The line is present
+and correct; this was a missing guard. Added
+`RandomXVm::uses_native_loop()` and `ShareVerifier::vm_is_on_reference_path()`,
+asserted in the rotation test.
+
+### R9-F1/R9-F6 — `is_armed()` silently retired the fail-open branch
+Passing `is_armed()` to `classify_share` made `is_armed() == true` imply
+`reference()` is `Some`, so `SubmitVerifierUnavailable` became unreachable and
+its `log::warn!` dead. No share was ever at risk (both verdicts submit), but a
+defence that cannot be reached is not a defence, and AUDIT's "no behaviour
+change" was inaccurate for that row. `worker_loop` now passes `is_enabled()`;
+`is_armed()` is retained as a test-only predicate.
+
+### R9-F2 — the rotation test could not distinguish "adopted" from "ignored"
+It re-keyed with the *same* `Arc`, making `holds_dataset` a `ptr_eq(x, x)`. Given
+the finding above — that the dataset is the only staleness vector — the test's
+emphasis was inverted relative to the risk: the untested half that sounds
+frightening (the key) is inert, and the one that sounds like bookkeeping is
+load-bearing. The fix cost nothing: both 2 GiB datasets already existed as
+`LazyLock` statics in the same binary. `native_loop_test_dataset()` is hoisted to
+the top level, the rotation now goes between two genuinely different datasets,
+and the test asserts the post-rotation hash matches the *new* dataset, differs
+from the pre-rotation hash, and that the old `Arc` is no longer held.
+
+### R9-F5 — a SAFETY comment that was wrong twice
+Round 8 corrected the comment to name concurrency as the hazard, then justified
+it with "no other test in this binary reads the environment". **Six do** — every
+switch test reaches `std::env::var` through `parse_switch`. Rather than write a
+third justification, the hazard is removed: `parse_switch_with` takes the
+environment value as a parameter, `parse_switch` is a thin wrapper that reads it,
+and no test calls `std::env::set_var` at all.
+
+That refactor also surfaced a real behaviour question the old test had encoded
+backwards: **an empty value is "unset", not a parse failure.** `NATIVE_LOOP=` in
+`mining.conf` and an unset shell variable both arrive as an empty string, and
+neither expresses an intent to change anything — so both now fall through to the
+default rather than to the fail-safe direction, which would have silently
+disabled the native loop for anyone leaving the key blank. The shipped
+`mining.conf.example` has `NATIVE_LOOP=` blank by default, so this was reachable
+by simply copying the example file.
+
+### R9-F3 — the `should_panic` substring stopped short of the repaired text
+The same blind spot that let the mangled panic message through: the expected
+substring ended before the damage. It now deliberately spans the line break.
+
+### R9-F4 — tests gated on aarch64 for a reason that is not true
+The `ShareVerifier` tests were gated on the stated grounds that full mode needs
+the JIT. It does not — full mode runs the interpreter on other targets. The gate
+also saved nothing, since two ungated tests already force the same dataset on
+CI. Ungated: these are among the few new tests CI *can* actually validate.
+
+### Verification
+124 lib + 7 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 10: caught a regression I introduced while fixing round 9
+
+Round 10 was sent automatically rather than on request, per the new standing
+practice. It closed six of the seven round-9 minors cleanly and found one major
+— **a regression created by the round-9 fix itself**.
+
+### R10-F2 (MAJOR, fixed): an empty value erased an explicit setting
+Round 9 made `as_bool` return `None` for an empty value ("unset", not a parse
+failure). That was the right semantics but the wrong mechanics: round 7 had
+earlier replaced `value = as_bool(v).or(value)` with a bare assignment, which
+was safe *only because* `as_bool` could never return `None` at the time. Making
+it return `None` without restoring `.or(value)` meant an empty token no longer
+declined to have an opinion — it **erased** the previous one.
+
+Measured on the shipped binary before the fix:
+
+| Input | Result |
+|---|---|
+| `MINERTIM_NATIVE_LOOP=off --native-loop ""` | native loop **ON**, silently |
+| `--native-loop off --native-loop ""` | native loop **ON**, silently |
+
+The operator set the switch explicitly to `off` and got `on`, with no
+diagnostic. The realistic source is a wrapper writing `--native-loop "$NL"` with
+`$NL` unset — and **the careful quoting style is the broken one**: quoted, the
+shell leaves an empty argument; unquoted, the token vanishes and correctly hits
+the warned bare-flag path. Two opposite outcomes decided by quoting.
+
+Fixed by restoring `.or(value)` on both flag arms and warning on an empty value,
+since silence was what made it hard to notice. All six cases re-verified against
+a freshly built binary, and `an_empty_value_does_not_erase_an_explicit_setting`
+pins them.
+
+**Also corrected:** my code comment claimed `NATIVE_LOOP=` in `mining.conf`
+reaches this path. It does not — that is a Makefile variable, and
+`$(if $(NATIVE_LOOP),...)` suppresses the flag entirely. The other half of the
+reasoning (unset shell variable) is real and is the path that misfired. The
+reviewer verified this against the Makefile rather than accepting the comment.
+
+### R10-F1 (minor, fixed): a defence that is real only for future edits
+Passing `is_enabled()` did restore the *logical* independence of
+`classify_share`'s arguments. But `SubmitVerifierUnavailable` is still
+unreachable in `worker_loop` for an unrelated reason: `vm` is assigned only
+inside the block that calls `rekey`, so `vm.is_some()` implies a dataset exists.
+The AUDIT and comments read as though the arm were live. It is not — it is a
+guard against future edits, which is worth having but should be described
+honestly. `an_enabled_but_unfed_verifier_fails_open` now pins the composition in
+microseconds with no dataset.
+
+### Confirmed, having asked for it to be attacked
+- **I did not invert R7-F2.** An empty `MINERTIM_VERIFY_SHARES=` still leaves
+  the safety net on — measured, not reasoned.
+- **The "keyed to the dataset" framing is correct**, and the reviewer enumerated
+  every route rather than relying on its earlier measurement: the key reaches
+  `RandomXVm` only via `cache_memory` and `ss_programs`, and the single read of
+  either during hashing is the light-mode arm of one `match`. True for rx/2 too.
+  **One condition now recorded in the code:** this holds only while the
+  full/light split stays absolute. A future lazily-filled dataset with a
+  compute-on-miss path would make the key load-bearing again and silently weaken
+  the rotation test.
+- The dataset hoist is clean — same key, same construction, exactly two
+  `LazyLock`s, differential tests on byte-identical data.
+- `vm_is_on_reference_path()` is **not** vacuous on x86_64: the field and setter
+  are ungated, so it passes for the right reason and still fails if the guarded
+  line is dropped. Since CI can never run the JIT, this is one of the few
+  native-loop regressions CI *can* catch — ungating it was right.
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64.
+
+---
+
+## 2026-09-03 - Review round 11 applied. No blockers, no majors, mergeable.
+
+Round 11 resumed cleanly from the on-disk brief and ledger after the second
+usage-limit interruption — the persistence protocol did its job. It confirmed
+the R10-F2 fix introduces no regression of its own (the first round in three
+where the fix was clean) and raised four minors, all applied.
+
+### Confirmed by measurement, not reasoning
+- **The `.or(value)` composition is correct in every order** — twelve cases
+  against a freshly built binary, including both the `--flag v` and `--flag=v`
+  forms. Neither arm is privileged.
+- **Last-flag-wins cannot degrade into first-non-empty-wins**: `as_bool(v)` is
+  the *left* operand, so any parseable later value short-circuits and only an
+  empty one defers.
+
+### R11-F1 (fixed): the erasure was fixed for flags but the silence only half
+`MINERTIM_NATIVE_LOOP=` still resolved silently, because the environment arm
+never called `warn_if_empty`. `--native-loop "$NL"` and
+`MINERTIM_NATIVE_LOOP="$NL"` come from the same shell idiom, so warning on one
+and not the other was arbitrary. Both arms warn now, naming the flag or the
+variable. `warn_if_empty` also became a plain statement rather than an
+`Option<()>` threaded through `.and(value)` — that trick was denser than the
+thing it replaced, which is how R10-F2 hid in the first place.
+
+### R11-F2 (fixed): the honest wording was in AUDIT but not at the code
+Round 10 established that `SubmitVerifierUnavailable` is a guard for future
+edits rather than a live path. That correction landed here but not in the two
+comments that make the claim — and a future author edits the comment three lines
+above the call, not a September audit entry. Both now state it plainly.
+
+### R11-F3 (fixed): the condition was beside the claim, not the break site
+The "keyed to the dataset" reasoning was documented on `ShareVerifier::rekey`.
+But someone adding a compute-on-miss path edits `vm.rs`'s `match dataset`, whose
+comment read only "Full mode: array lookup. Light mode: compute on-the-fly" —
+no hint that anything depended on that split staying absolute. The dependency is
+now recorded there, naming the test it would silently weaken.
+
+### R11-F4 (fixed) — and my question named the wrong file
+I asked whether the empty-value semantics should be documented in
+`mining.conf.example`. The reviewer pointed out a blank there is inert (the
+Makefile's `$(if ...)` suppresses the flag), so documenting it would describe a
+case that file cannot produce. `--help` is the right place, and that is where it
+went.
+
+### Also adopted: state the resolved switch state, do not imply it
+The warnings only fire in the non-default direction, so the resolved state was
+inferable *only from the absence of a line* — which is precisely how an
+accidentally-flipped switch stays unnoticed. One unconditional line now reports
+both switches at startup:
+
+    Native-loop JIT: on | share verification: on
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64. All
+switch behaviours re-verified against a freshly built binary: empty env warns,
+empty flag warns, an explicit setting survives an empty one in either order, and
+last-flag-wins holds.
+
+### Reviewer's closing position
+Mergeable, no caveat. Nothing outstanding across rounds 5-11 can produce a wrong
+hash, a withheld valid share, or an out-of-bounds access.
+
+---
+
+## 2026-09-03 - Review round 12: two minors, both about honesty of reporting
+
+Second consecutive round in which the applied fixes introduced no regression.
+Round 12 re-derived the `warn_if_empty` rewrite rather than trusting my summary
+and confirmed it behaviour-identical: `warn_if_empty` returned `Some(())`
+unconditionally, so `.and(value)` always evaluated to `value` — the old
+expression *was* `as_bool(v).or(value)` plus a conditional print. The one
+difference (the print now precedes `as_bool`) is unobservable because the two
+printers are mutually exclusive: `as_bool` warns only for unrecognised
+**non-empty** values, `warn_if_empty` only for **empty** ones.
+
+It also checked all ten `parse_switch_with` call sites after the `env_label`
+parameter was inserted by regex — the behavioural risk (`default_on`/`fail_safe`,
+both `bool`) is intact, and the single `true, true` site is the one that carried
+it before.
+
+**One suggestion of mine it declined, correctly.** I had listed double-warning
+as something to avoid when both an env value and a flag are empty. It kept it:
+those are two distinct empty inputs from two distinct sources, and suppressing
+either hides a fact the operator can act on. The labelling added in round 11 is
+what makes the pair readable.
+
+### R12-F1 (fixed): the state line claimed more than it delivered
+Two problems with the startup line added last round.
+
+1. **It is not unconditional.** It is `log::info!`, so `RUST_LOG=warn`
+   suppresses it while the `DISABLED` warning survives — putting that operator
+   back to inferring "on" from the absence of a line, the exact thing the line
+   was added to remove. The comment and the AUDIT both called it unconditional.
+   Wording corrected rather than the level changed: `info` is the default
+   filter, and someone who lowered it asked for less.
+2. **It reported the *requested* setting, not the effective one.** On a
+   non-aarch64 build it would have announced `Native-loop JIT: on` while the
+   interpreter ran. It now reports effective state, and says
+   `(requested on; unavailable on this target)` when those differ.
+
+The same correction applies to verification: it is skipped when the native loop
+is off, because the mining path is then already the reference path — so
+reporting `share verification: on` in that case was misleading. The "verification
+DISABLED" warning is now keyed to the effective state too, and no longer fires
+when the native loop is already off and verification is therefore moot.
+
+### R12-F2 (fixed): the help note read as an option
+The empty-value note was formatted as an entry in the flag list — first line in
+the flag column, continuations in the description column — so it parsed as an
+option named "Switch values are on/off, true/false, yes/no, 1/0." It also
+appeared *before* the two switches it described, so "Switch values" had no
+antecedent. Moved below both and reformatted as a titled paragraph.
+
+### On R11-F3, which the reviewer rated better than what it asked for
+The note at `vm.rs`'s `match dataset` names the test
+`share_verifier_builds_lazily_and_resets_on_seed_rotation` explicitly, so a grep
+from either end finds the other. Worth repeating as a pattern: when a constraint
+in one file is enforced by a test in another, name the test.
+
+### Verification
+125 lib + 8 bin tests pass in release; clippy clean on aarch64 and x86_64. Four
+switch/report combinations re-verified against a freshly built binary, including
+that no spurious verification warning fires when the native loop is already off.
+
+### Reviewer's position
+Mergeable, no caveat. Nothing outstanding across rounds 5-12 can produce a wrong
+hash, a withheld valid share, or an out-of-bounds access.
+
+---
+
+## 2026-09-03 — Review-cost diagnosis, ledger split, and MR !1 round 13
+
+### Request
+User: "can you check why the token usage is high ... we are unable to finish MR!1
+review", then "resume the reviewer".
+
+### What was actually wrong
+Measured from the session transcripts, deduplicated by API message id:
+
+| | requests | cache writes | cache reads |
+|---|---|---|---|
+| Main session (since 2026-08-11) | 730 | 16.8M | 175.3M |
+| All subagents | 475 | 6.9M | 103.3M |
+| — of which the MR !1 reviewer alone | 285 | 5.1M | **88.9M** |
+
+The reviewer (`agent-a59599aad393b5e96`) was being **resumed** each round rather
+than respawned, per the then-current `feedback_auto_review` memory note. Its
+context grew 35k → 560k tokens across rounds 5–12. Because work gaps (5–8 h)
+exceed the prompt-cache TTL, every resume first rewrote ~550k tokens cold and
+then re-read them on each internal turn. Its last 60 requests cost 27.9M read
+tokens; round 13 could not start. Its final log line is a 541,993-token cold
+write followed by nothing.
+
+Not a contributing factor: tool discipline. 558 shell calls averaged 0.8 KB of
+output; all tool results across the session totalled 0.55 MB.
+
+### Fix
+- `REVIEW_MR1.md` split (`ea86ec9`): **175 KB → 6.5 KB**. Head keeps the standing
+  protocol, status, open-items table, a one-line index of every closed finding
+  R5-F1…R12-F2, and the current round's brief and ledger. Full round transcripts
+  moved verbatim to `REVIEW_MR1_ARCHIVE.md`, to be grepped by finding ID.
+- Round 13 run on a **cold-spawned** reviewer with an explicit context budget
+  (do not read the archive or AUDIT.md whole; scope to the diff).
+- **Result: 92k tokens for the full round**, versus ~15M for a resume. ~160x.
+- `feedback_auto_review` memory note rewritten: spawn cold each round, carry
+  continuity in a small file. The note previously said the opposite, and that is
+  what produced this. Both halves recorded — continuity still matters, because
+  every round from 5 on found a defect in the previous round's *fix*.
+
+### Round 13 outcome (`74c8186..6765b17`)
+**Mergeable. No blockers, no majors.** Three new findings, all open:
+
+- **R13-F1 (MINOR)** — answers round 13's priority 1: the two expressions **do**
+  disagree, on non-aarch64 only. `minertim.rs:87` reports
+  `verify_shares && native_loop && cfg!(aarch64)`; `miner.rs:549` builds
+  `ShareVerifier::new(verify_shares && native_loop)`. Confirmed on a real
+  `x86_64-apple-darwin` build: prints `share verification: off`, then constructs
+  `ShareVerifier::new(true)`. Direction is an *under*claim. The same false
+  premise ("verification is skipped when the native loop is off") is now also
+  asserted in the new code comment and in this file's round-12 entry.
+- **R13-F2 (MINOR)** — R12-F1(b) closed the wrong-architecture case but not the
+  missing-JIT case. `native_effective` models only one of the four preconditions
+  in `execute_vm_inner`'s guard; `jit.is_some()` comes from
+  `JitCompiler::new().ok()` at `vm.rs:1681,1714`, which discards a
+  `mmap MAP_JIT failed` error with no log. On the shipping platform the startup
+  line can say `Native-loop JIT: on` while the interpreter runs — and the
+  verifier then compares the interpreter against itself and reports
+  `verify_failures = 0` forever. Structurally identical to round 5's F1.
+- **R13-F3 (TRIVIAL)** — `--help` synopsis omits `--verify-shares`; empty-value
+  example is flag-only; the native-loop-DISABLED warning gives non-actionable
+  advice on non-aarch64.
+
+Priorities 2–4 answered: R12-F1's fix is correct in all four combinations on
+aarch64 (traced and measured against the built binary, no spurious warning);
+R12-F2 fully closed; "unconditional" is gone from the code, and the one
+remaining hit in this file is the round-11 entry, correctly left under the
+append-only rule and corrected below it.
+
+### Verification
+Reviewer reproduced: 125 lib + 8 bin tests pass in release (92.67 s, 2
+long-running dataset tests ignored as before); clippy clean on aarch64 and
+x86_64. It also recorded that **nothing in the test suite exercises the startup
+reporting path on either target** — which is what let R13-F1 through, and makes
+open issue #2 (multi-platform CI) doubly earned.
+
+### Not done — awaiting user decision
+R13-F1/F2/F3 are unfixed. The MR is mergeable as it stands; the choice is fix
+now or merge and carry them as follow-ups.
+
+### Follow-up (same day): all six open findings filed on GitLab
+User asked whether the round-13 and older deferred findings were tracked. They
+were not — six items lived only in `REVIEW_MR1.md`, on a feature branch, which
+stops being the obvious place to look once MR !1 merges. Now filed, each
+carrying the reviewer's reasoning and file/line references so it stands without
+the ledger:
+
+| Issue | Finding |
+|---|---|
+| #3 | R13-F1 — report/behaviour disagree on non-aarch64 |
+| #4 | R13-F2 — silent `MAP_JIT` fallback makes verification vacuous |
+| #5 | R13-F3 — `--help` wording carry-overs |
+| #6 | R5-F2 — debug vs release profile gap in the verification evidence |
+| #7 | R5-F4 — ~4.5 GiB test-suite peak |
+| #8 | R5-F6 — no barrier in the multi-thread bench phase |
+
+Pre-existing: #1 (R5-F7, FMOVs), #2 (multi-platform CI). `REVIEW_MR1.md`'s open
+table now links each. The only untracked item left is the `worker_loop` verifier
+glue, which needs a re-check rather than an issue.

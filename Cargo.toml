@@ -32,6 +32,10 @@ harness = false
 name = "fullmode"
 harness = false
 
+[[bench]]
+name = "nativeloop_ab"
+harness = false
+
 [profile.release]
 lto = true
 opt-level = 3

@@ -24,6 +24,33 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// The full dataset for `b"native loop test key"` — the second of the two the
+/// test binary builds. Hoisted to the top level so the native-loop differential
+/// tests and the verifier-rotation test share one build rather than forcing a
+/// third 2 GiB allocation.
+fn native_loop_test_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
+    static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
+        std::sync::LazyLock::new(|| {
+            let vm_light = vm::RandomXVm::new(b"native loop test key");
+            let (cache, programs) = vm_light.cache_and_programs();
+            std::sync::Arc::new(super::dataset::RandomXDataset::generate(cache, programs, 8))
+        });
+    DS.clone()
+}
+
+/// The full dataset for `b"test key 000"` — the key behind every known-answer
+/// vector in this file. It is 2 GiB and three tests need it, so it is built
+/// once per test binary rather than once per test.
+fn test_key_000_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
+    static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
+        std::sync::LazyLock::new(|| {
+            let vm_light = vm::RandomXVm::new(b"test key 000");
+            let (cache, programs) = vm_light.cache_and_programs();
+            std::sync::Arc::new(super::dataset::RandomXDataset::generate(cache, programs, 8))
+        });
+    DS.clone()
+}
+
 // ============================================================================
 // Phase 1: Blake2b (RFC 7693)
 // ============================================================================
@@ -397,20 +424,17 @@ mod full_hash_tests {
     /// Uses full mode (precomputed dataset) for speed.
     #[test]
     fn test_vm_calculate_hash_jit() {
-        use std::sync::Arc;
-        use super::dataset::RandomXDataset;
-
         let key = b"test key 000";
         let input = b"This is a test";
         let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
 
-        // Build dataset (full mode)
-        let vm_light = vm::RandomXVm::new(key);
-        let (cache, programs) = vm_light.cache_and_programs();
-        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
-
-        // Full mode VM (uses JIT on aarch64)
-        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        // Forced onto the per-iteration body JIT. Since stage D made the
+        // native loop the default, this is no longer the default path — but it
+        // is still a shipping one (`set_native_loop(false)` selects it, and so
+        // does any non-aarch64 or light-mode build), so it keeps its own
+        // known-answer vector rather than being deleted.
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(false);
         let hash = vm_full.calculate_hash(input);
 
         assert_eq!(
@@ -420,13 +444,289 @@ mod full_hash_tests {
         );
     }
 
+    /// Known-answer hash through the **native loop** (DESIGN_JIT_NATIVE_LOOP.md
+    /// stage C gate).
+    ///
+    /// The differential tests in `native_loop_diff_tests` prove the native loop
+    /// agrees with the interpreter, which says nothing if both are wrong in the
+    /// same way. This is the only test that anchors emitted native-loop code to
+    /// a real RandomX result, and the only one that exercises FPCR carry-over
+    /// across all eight chains and the
+    /// `serialize_register_file` -> `blake2b_512` -> next-program plumbing with
+    /// the native loop in the path.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_native_loop_known_answer() {
+        let key = b"test key 000";
+        let input = b"This is a test";
+        let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
+
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(true);
+
+        assert_eq!(
+            hex_encode(&vm_full.calculate_hash(input)),
+            expected,
+            "native-loop hash must match the reference test vector"
+        );
+    }
+
+    /// The same gate on the path the miner actually runs. `calculate_hash` is
+    /// used by nothing in production: workers call `prepare_scratchpad` once and
+    /// then loop on `calculate_hash_pipelined`, which overlaps the AES fill with
+    /// the chains. Same input, so the same vector must come out.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_native_loop_known_answer_pipelined() {
+        let key = b"test key 000";
+        let input = b"This is a test";
+        let expected = "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f";
+
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
+        vm_full.set_native_loop(true);
+
+        vm_full.prepare_scratchpad(input);
+        // `next_input` only seeds the *following* scratchpad; the returned hash
+        // is the one for `input`.
+        assert_eq!(
+            hex_encode(&vm_full.calculate_hash_pipelined(b"unused next blob")),
+            expected,
+            "native-loop pipelined hash must match the reference test vector"
+        );
+    }
+
+    /// Full mode must not build an Argon2d cache. `cache_memory` is read in
+    /// exactly one place — `init_dataset_item`, on the `dataset == None` arm —
+    /// so a VM that owns a dataset never touches it, and building one cost
+    /// 256 MiB and ~0.4 s per VM. At 11 workers plus 11 verifiers that was
+    /// 5.5 GiB resident and never read. (MR !1 review round 7, R7-F1.)
+    #[test]
+    fn full_mode_vm_allocates_no_argon2d_cache() {
+        let vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        assert!(
+            vm_full.cache_and_programs().0.is_empty(),
+            "full-mode VM built a 256 MiB cache it can never read"
+        );
+    }
+
+    /// Passing a full-mode VM's empty cache to dataset generation is a
+    /// programmer error, and must fail with a message that names the mistake
+    /// rather than as an out-of-bounds index inside a spawned worker thread
+    /// (MR !1 review round 8, R8-F1).
+    #[test]
+    // The expected substring deliberately spans the line break in the message.
+    // The previous one stopped short of it, which is exactly why a 14-space run
+    // in that literal went undetected by this very test (review round 9, R9-F3).
+    #[should_panic(expected = "Argon2d cache; got an empty one")]
+    fn dataset_generation_rejects_a_full_mode_vms_empty_cache() {
+        let vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        let (cache, programs) = vm_full.cache_and_programs();
+        let _ = super::dataset::RandomXDataset::generate(cache, programs, 1);
+    }
+
+    /// ...but light mode still must, since it computes dataset items on the fly.
+    #[test]
+    fn light_mode_vm_still_allocates_its_cache() {
+        let vm_light = vm::RandomXVm::new(b"test key 000");
+        assert!(
+            !vm_light.cache_and_programs().0.is_empty(),
+            "light mode needs the cache to compute dataset items"
+        );
+    }
+
+    /// The assumption the share verifier rests on: in the miner's exact usage
+    /// pattern, `calculate_hash_pipelined(next)` returns the hash of the
+    /// *current* blob, so recomputing `job_blob_current` with `calculate_hash`
+    /// reproduces it.
+    ///
+    /// If this were off by one, every share would be withheld as a false
+    /// mismatch — worse than having no verification at all, because it would
+    /// look like a JIT fault and cost 100% of revenue. Nothing else covers it:
+    /// the known-answer tests each use a single blob, where an off-by-one is
+    /// invisible.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn pipelined_hash_matches_calculate_hash_for_the_preceding_blob() {
+        let key = b"test key 000";
+        let ds = test_key_000_dataset();
+
+        // Mirror `worker_loop`: a 76-byte blob with a little-endian nonce at
+        // 39..43, advanced every iteration.
+        let blob_for = |nonce: u32| {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b[39..43].copy_from_slice(&nonce.to_le_bytes());
+            b
+        };
+
+        let mut mining_vm = vm::RandomXVm::new_full(key, ds.clone());
+        mining_vm.set_native_loop(true);
+        let mut verify_vm = vm::RandomXVm::new_full(key, ds);
+        verify_vm.set_native_loop(false);
+
+        // Worker startup: prepare on the current blob, then each call passes
+        // the *next* blob and returns the hash of the current one.
+        let mut current = blob_for(0);
+        mining_vm.prepare_scratchpad(&current);
+
+        for nonce in 1..4u32 {
+            let next = blob_for(nonce);
+            let mined = mining_vm.calculate_hash_pipelined(&next);
+            let reference = verify_vm.calculate_hash(&current);
+            assert_eq!(
+                hex_encode(&mined),
+                hex_encode(&reference),
+                "pipelined hash at nonce {} is not the hash of the blob the worker \
+                 would pass to the verifier — the verifier is off by one",
+                nonce - 1
+            );
+            current = next;
+        }
+    }
+
+    /// The share verifier's withhold path, driven by two *genuine* RandomX
+    /// hashes rather than synthetic byte patterns.
+    ///
+    /// Review round 7 (R7-Q1) argued the important gap was not "the mismatch
+    /// branch never runs" but "nothing proves the comparison is wired up at
+    /// all" — if the decision were refactored to be unconditionally submit,
+    /// every other test would still pass and the feature would be a silent
+    /// no-op. Hashes for adjacent nonces are the realistic shape of a
+    /// divergence, so this feeds one in and asserts the share is withheld.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn verifier_withholds_a_hash_that_does_not_match_the_reference() {
+        use crate::miner::{classify_share, ShareVerdict};
+
+        let mut vm_full = vm::RandomXVm::new_full(b"test key 000", test_key_000_dataset());
+        let blob = |nonce: u32| {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b[39..43].copy_from_slice(&nonce.to_le_bytes());
+            b
+        };
+        let h0 = vm_full.calculate_hash(&blob(0));
+        let h1 = vm_full.calculate_hash(&blob(1));
+        assert_ne!(h0, h1, "adjacent nonces produced the same hash");
+
+        assert_eq!(
+            classify_share(true, &h0, Some(&h0)),
+            ShareVerdict::SubmitVerified,
+            "a matching reference must submit"
+        );
+        assert_eq!(
+            classify_share(true, &h0, Some(&h1)),
+            ShareVerdict::Withhold,
+            "a genuine divergence must withhold the share"
+        );
+    }
+
+    /// The verifier's state machine — the two things that previously lived as
+    /// loose locals inside `worker_loop` and so could not be tested at all.
+    ///
+    /// The failure that matters is a verifier surviving a seed rotation: in
+    /// full mode the dataset determines the hash, so a stale one would disagree
+    /// with **every** share from that point on, looking exactly like the JIT
+    /// fault it is supposed to detect.
+    #[test]
+    fn share_verifier_builds_lazily_and_resets_on_seed_rotation() {
+        use crate::miner::ShareVerifier;
+
+        let ds = test_key_000_dataset();
+        let blob = {
+            let mut b = vec![0u8; 76];
+            b[0] = 16;
+            b
+        };
+
+        let mut v = ShareVerifier::new(true);
+
+        // Before any job: nothing to verify against, and no VM built.
+        assert!(!v.is_armed(), "armed with no dataset");
+        assert_eq!(v.reference(&blob), None, "produced a reference with no dataset");
+        assert!(!v.has_cached_vm());
+
+        v.rekey(b"test key 000", ds.clone());
+        assert!(v.is_armed());
+        assert!(v.holds_dataset(&ds));
+        // Lazy: a worker that never finds a share never pays for a VM.
+        assert!(!v.has_cached_vm(), "VM built before the first share");
+
+        // First reference builds the VM and must equal a reference-path hash.
+        let got = v.reference(&blob).expect("armed verifier returned no reference");
+        assert!(v.has_cached_vm(), "VM not cached after first use");
+
+        let mut expected_vm = vm::RandomXVm::new_full(b"test key 000", ds.clone());
+        expected_vm.set_native_loop(false);
+        assert_eq!(
+            hex_encode(&got),
+            hex_encode(&expected_vm.calculate_hash(&blob)),
+            "verifier is not computing the reference-path hash"
+        );
+
+        // The verifier must be on the REFERENCE path. Nothing else can catch
+        // this: both paths produce identical hashes, so the comparison above
+        // still passes if `set_native_loop(false)` were dropped — at which
+        // point verification compares the native loop against itself and
+        // reports a clean counter forever (review round 9, R9-F7).
+        assert_eq!(
+            v.vm_is_on_reference_path(),
+            Some(true),
+            "the verifier's VM is not on the reference path — verification \
+             would be comparing the native loop against itself"
+        );
+
+        // A rotation must drop the cached VM and adopt the new dataset. Rotate
+        // to a genuinely DIFFERENT dataset: re-keying with the same `Arc` made
+        // `holds_dataset` a `ptr_eq(x, x)` that could not tell "adopted" from
+        // "ignored the argument" (R9-F2). The dataset is the only thing that
+        // can make a verifier stale — in full mode the key does not affect the
+        // hash at all, since the Argon2d cache is not built and the
+        // SuperscalarHash programs are light-mode only.
+        let other = native_loop_test_dataset();
+        v.rekey(b"native loop test key", other.clone());
+        assert!(
+            !v.has_cached_vm(),
+            "cached VM survived a seed rotation — it would verify against the \
+             previous seed's dataset and withhold every share"
+        );
+        assert!(v.holds_dataset(&other), "the new dataset was not adopted");
+        assert!(!v.holds_dataset(&ds), "still holding the old dataset");
+
+        // And it must now hash against the new dataset, not the old one.
+        let after = v.reference(&blob).expect("no reference after rotation");
+        let mut other_vm = vm::RandomXVm::new_full(b"native loop test key", other);
+        other_vm.set_native_loop(false);
+        assert_eq!(
+            hex_encode(&after),
+            hex_encode(&other_vm.calculate_hash(&blob)),
+            "verifier is still hashing against the pre-rotation dataset"
+        );
+        assert_ne!(
+            hex_encode(&after),
+            hex_encode(&got),
+            "the two datasets produced the same hash; this test proves nothing"
+        );
+    }
+
+    /// A disabled verifier must never build a VM or produce a reference, so the
+    /// fallback switch really does cost nothing.
+    #[test]
+    fn disabled_share_verifier_does_no_work() {
+        use crate::miner::ShareVerifier;
+
+        let mut v = ShareVerifier::new(false);
+        v.rekey(b"test key 000", test_key_000_dataset());
+        assert!(!v.is_armed(), "a disabled verifier reported itself armed");
+        assert_eq!(v.reference(&[0u8; 76]), None);
+        assert!(!v.has_cached_vm(), "a disabled verifier built a VM");
+    }
+
     /// Verify full mode (precomputed dataset) produces identical hashes to light mode.
     /// This test allocates ~2 GiB and takes 30-120s, so it's ignored by default.
     #[test]
     #[ignore]
     fn test_full_mode_matches_light_mode() {
-        use std::sync::Arc;
-        use super::dataset::RandomXDataset;
 
         let key = b"test key 000";
         let input = b"This is a test";
@@ -439,10 +739,7 @@ mod full_hash_tests {
         );
 
         // Full mode hash
-        let vm_light = vm::RandomXVm::new(key);
-        let (cache, programs) = vm_light.cache_and_programs();
-        let dataset = Arc::new(RandomXDataset::generate(cache, programs, 4));
-        let mut vm_full = vm::RandomXVm::new_full(key, dataset);
+        let mut vm_full = vm::RandomXVm::new_full(key, test_key_000_dataset());
         let full_hash = vm_full.calculate_hash(input);
 
         assert_eq!(
@@ -704,5 +1001,296 @@ mod v2_jit_tests {
             hex_encode(&vm1.calculate_hash(b"This is a test")),
             "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f"
         );
+    }
+}
+
+// ============================================================================
+// Native-loop JIT: differential test against the interpreter
+// (DESIGN_JIT_NATIVE_LOOP.md stage B)
+// ============================================================================
+#[cfg(all(test, target_arch = "aarch64"))]
+mod native_loop_diff_tests {
+    use crate::randomx::dataset::RandomXDataset;
+    use crate::randomx::jit::JitCompiler;
+    use crate::randomx::vm::{
+        self, BytecodeInstruction, NativeRegisterFile, RxVersion, RANDOMX_PROGRAM_SIZE,
+        RANDOMX_PROGRAM_SIZE_MAX,
+    };
+    use std::sync::Arc;
+
+
+    /// Deterministic pseudo-random program bytes + scratchpad, so both paths
+    /// start from byte-identical state.
+    fn make_program_bytes(seed: u8) -> Vec<u8> {
+        use crate::randomx::blake2gen::Blake2Generator;
+        let mut pb = vec![0u8; 128 + RANDOMX_PROGRAM_SIZE * 8];
+        let mut g = Blake2Generator::new(&[seed; 32], 0);
+        for b in pb.iter_mut() {
+            *b = g.get_byte();
+        }
+        pb
+    }
+
+    fn make_scratchpad(seed: u8) -> Vec<u8> {
+        use crate::randomx::blake2gen::Blake2Generator;
+        let mut sp = vec![0u8; vm::scratchpad_size()];
+        let mut g = Blake2Generator::new(&[seed ^ 0xA5; 32], 0);
+        // Fills the whole 2 MiB deterministically (~32k Blake2b compressions,
+        // ~10 ms). A partially-zero scratchpad would weaken the comparison,
+        // since masked addresses roam the entire region.
+        for b in sp.iter_mut() {
+            *b = g.get_byte();
+        }
+        sp
+    }
+
+    /// Run both paths for `iters` iterations from identical state and assert
+    /// the register file, scratchpad and loop-carried state all match exactly.
+    fn assert_paths_agree(seed: u8, iters: usize, dataset: &Arc<RandomXDataset>) {
+        let program_bytes = make_program_bytes(seed);
+        assert_paths_agree_with(&program_bytes, seed, iters, dataset);
+    }
+
+    /// As `assert_paths_agree`, but on caller-supplied program bytes, so a test
+    /// can pin specific entropy words rather than hoping a seed lands on the
+    /// case it wants.
+    fn assert_paths_agree_with(
+        program_bytes: &[u8],
+        sp_seed: u8,
+        iters: usize,
+        dataset: &Arc<RandomXDataset>,
+    ) {
+        let (config, ma, mx, dataset_offset) = vm::derive_program_params(program_bytes);
+
+        let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut register_usage = [0i32; 8];
+        vm::compile_program(
+            program_bytes,
+            &mut register_usage,
+            &mut bytecode,
+            RANDOMX_PROGRAM_SIZE,
+        );
+
+        // ---- reference: the interpreter/body-JIT path ----
+        // Both paths must start from the same FP rounding mode. CFROUND writes
+        // FPCR and never restores it (by design — the mode carries across
+        // chains), so without this the second path inherits the first path's
+        // final mode and FP results differ by 1 ULP.
+        vm::reset_rounding_mode_for_test();
+        let mut ref_nreg = NativeRegisterFile::new();
+        let mut ref_sp = make_scratchpad(sp_seed);
+        let mut ref_bc: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut ref_jit = JitCompiler::new().expect("jit");
+        let ref_state = vm::execute_vm_for_test(
+            &mut ref_nreg,
+            &mut ref_sp,
+            program_bytes,
+            Some(dataset),
+            &mut ref_bc,
+            Some(&mut ref_jit),
+            RxVersion::V1,
+            iters,
+        );
+        let ref_fpcr = vm::read_rounding_mode_for_test();
+
+        // ---- native loop ----
+        vm::reset_rounding_mode_for_test();
+        let mut jit = JitCompiler::new().expect("jit");
+        jit.compile_native_loop(
+            &bytecode[..RANDOMX_PROGRAM_SIZE],
+            RxVersion::V1,
+            &config,
+            ma,
+            mx,
+            dataset_offset,
+        );
+        let mut new_nreg = NativeRegisterFile::new();
+        // a-registers are the loop's only live input besides r; seed them the
+        // same way execute_vm_inner does, from the program entropy.
+        vm::init_registers_from_entropy_for_test(&mut new_nreg, program_bytes);
+        let mut new_sp = make_scratchpad(sp_seed);
+        let mut out = [0u64; 4];
+        unsafe {
+            let f = jit.get_loop_fn();
+            f(
+                &mut new_nreg as *mut NativeRegisterFile,
+                new_sp.as_mut_ptr(),
+                dataset.as_ptr_for_test(),
+                iters as u64,
+                out.as_mut_ptr(),
+            );
+        }
+        let native_fpcr = vm::read_rounding_mode_for_test();
+
+        // ---- compare ----
+        assert_eq!(
+            new_nreg.r, ref_nreg.r,
+            "seed {sp_seed}, {iters} iters: r-registers diverged"
+        );
+        for i in 0..4 {
+            assert_eq!(
+                (new_nreg.f[i].0.to_bits(), new_nreg.f[i].1.to_bits()),
+                (ref_nreg.f[i].0.to_bits(), ref_nreg.f[i].1.to_bits()),
+                "seed {sp_seed}, {iters} iters: f[{i}] diverged"
+            );
+            assert_eq!(
+                (new_nreg.e[i].0.to_bits(), new_nreg.e[i].1.to_bits()),
+                (ref_nreg.e[i].0.to_bits(), ref_nreg.e[i].1.to_bits()),
+                "seed {sp_seed}, {iters} iters: e[{i}] diverged"
+            );
+        }
+        assert!(
+            new_sp == ref_sp,
+            "seed {sp_seed}, {iters} iters: scratchpad diverged"
+        );
+        // D2: ma/mx are not consumed until the *following* iteration, so
+        // comparing only nreg+scratchpad cannot detect an ordering error. These
+        // carry the real signal.
+        //
+        // NOTE: sp_addr0/sp_addr1 are zeroed at the end of every iteration on
+        // both sides, so those two comparisons are structurally 0 == 0. They
+        // are kept as a guard against that zeroing being dropped, but they
+        // prove nothing about addressing — do not read them as coverage.
+        assert_eq!(
+            // Compare the FULL u64. Truncating to u32 here would let a 64-bit
+            // EOR on ma/mx pass — the exact C5 violation this out-pointer
+            // exists to detect.
+            (out[0], out[1], out[2], out[3]),
+            (
+                ref_state.ma as u64,
+                ref_state.mx as u64,
+                ref_state.sp_addr0 as u64,
+                ref_state.sp_addr1 as u64
+            ),
+            "seed {sp_seed}, {iters} iters: loop state (ma, mx, sp_addr0, sp_addr1) diverged"
+        );
+        // The rounding mode must evolve identically. An epilogue that saved and
+        // restored FPCR — the C3 violation the design warns about — would pass
+        // every assertion above and only surface as a wrong hash across chains.
+        assert_eq!(
+            native_fpcr, ref_fpcr,
+            "seed {sp_seed}, {iters} iters: final FP rounding mode diverged"
+        );
+    }
+
+    /// The 2 GiB dataset, built once for the whole module. Previously built
+    /// per test function, which meant two concurrent 2 GiB allocations plus two
+    /// 256 MiB Argon2d caches when both tests ran.
+    fn test_dataset() -> Arc<RandomXDataset> {
+        super::native_loop_test_dataset()
+    }
+
+    /// The C1 memory-safety worst case, executed rather than argued.
+    ///
+    /// The emitted dataset read is `base + dataset_offset + (ma & 0x7FFF_FFC0)`
+    /// with **no runtime bounds check**, and the safety argument is that the
+    /// largest reachable address still lands inside the allocation with 64
+    /// bytes to spare. Until now that was only ever argued on paper and pinned
+    /// by a `const` assert — no test had actually driven the emitted code at
+    /// that address, and a seed lands there roughly once in 524,288.
+    ///
+    /// Both entropy words are forced to their extremes: `entropy(13)` to the
+    /// maximum `dataset_offset`, and `entropy(8)` so `ma` masks to the largest
+    /// possible value. If the address arithmetic is wrong at the top of the
+    /// range this reads out of bounds, which under a test harness means a
+    /// segfault or a mismatch rather than a silent wrong hash in production.
+    #[test]
+    fn native_loop_at_the_c1_worst_case_dataset_address() {
+        let ds = test_dataset();
+        let mut pb = make_program_bytes(3);
+
+        // entropy(13) -> dataset_offset = (e % (DATASET_EXTRA_ITEMS + 1)) * 64.
+        pb[13 * 8..13 * 8 + 8].copy_from_slice(&vm::DATASET_EXTRA_ITEMS.to_le_bytes());
+        // entropy(8) -> ma = (e as u32) & CACHE_LINE_ALIGN_MASK.
+        pb[8 * 8..8 * 8 + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        let (_, ma, _, dataset_offset) = vm::derive_program_params(&pb);
+        assert_eq!(ma, 0x7FFF_FFC0, "ma is not at its maximum");
+        assert_eq!(
+            dataset_offset,
+            vm::DATASET_EXTRA_ITEMS * 64,
+            "dataset_offset is not at its maximum"
+        );
+
+        // Several iterations: `ma` is XORed each pass, so only the first read
+        // is at the pinned extreme, but the bound applies to every one.
+        assert_paths_agree_with(&pb, 3, 4, &ds);
+    }
+
+    /// The headline gate. N=1 cannot catch an mx-ordering error (design D2), so
+    /// N=2 is the minimum meaningful comparison; N=3 guards the steady state.
+    #[test]
+    fn native_loop_matches_interpreter() {
+        let ds = test_dataset();
+        // seed 78 has dataset_offset at 99.67% of its maximum, exercising the
+        // widest address arithmetic reachable; the others spread readReg0..3.
+        for seed in [1u8, 2, 7, 78] {
+            assert_paths_agree(seed, 1, &ds);
+            assert_paths_agree(seed, 2, &ds);
+            assert_paths_agree(seed, 3, &ds);
+        }
+    }
+
+    /// The emitted loop is a do-while: without the CBZ guard, `iterations == 0`
+    /// wraps the counter to u64::MAX and runs ~2^64 times, scribbling the
+    /// scratchpad throughout. If this test hangs, that guard has regressed.
+    #[test]
+    fn native_loop_zero_iterations_terminates() {
+        let ds = test_dataset();
+        let program_bytes = make_program_bytes(3);
+        let (config, ma, mx, dataset_offset) = vm::derive_program_params(&program_bytes);
+        let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
+            Box::new(std::array::from_fn(|_| BytecodeInstruction::new()));
+        let mut register_usage = [0i32; 8];
+        vm::compile_program(
+            &program_bytes,
+            &mut register_usage,
+            &mut bytecode,
+            RANDOMX_PROGRAM_SIZE,
+        );
+        let mut jit = JitCompiler::new().expect("jit");
+        jit.compile_native_loop(
+            &bytecode[..RANDOMX_PROGRAM_SIZE],
+            RxVersion::V1,
+            &config,
+            ma,
+            mx,
+            dataset_offset,
+        );
+        let mut nreg = NativeRegisterFile::new();
+        vm::init_registers_from_entropy_for_test(&mut nreg, &program_bytes);
+        let r_before = nreg.r;
+        let mut sp = make_scratchpad(3);
+        let sp_before = sp.clone();
+        let mut out = [0u64; 4];
+        unsafe {
+            let f = jit.get_loop_fn();
+            f(
+                &mut nreg as *mut NativeRegisterFile,
+                sp.as_mut_ptr(),
+                ds.as_ptr_for_test(),
+                0,
+                out.as_mut_ptr(),
+            );
+        }
+        // Reaching here at all is the assertion. The r-registers and scratchpad
+        // must be untouched; f/e are deliberately not checked (the prologue does
+        // not load them, so with zero iterations they are written back as
+        // whatever was in d0-d15).
+        assert_eq!(nreg.r, r_before, "zero-iteration run modified r-registers");
+        assert!(sp == sp_before, "zero-iteration run modified the scratchpad");
+        assert_eq!(
+            (out[0] as u32, out[1] as u32),
+            (ma, mx),
+            "zero-iteration run should leave ma/mx at their seeds"
+        );
+    }
+
+    #[test]
+    fn native_loop_matches_interpreter_full_program() {
+        let ds = test_dataset();
+        assert_paths_agree(11, 2048, &ds);
     }
 }

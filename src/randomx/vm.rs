@@ -35,7 +35,18 @@ const SCRATCHPAD_L3_MASK64: u32 = (SCRATCHPAD_L3_SIZE / 64 - 1) as u32 * 64;
 
 const CACHE_LINE_SIZE: usize = 64;
 const CACHE_LINE_ALIGN_MASK: u32 = 0x7FFFFFC0; // Verified against C++ reference
-const DATASET_EXTRA_ITEMS: u64 = 524287;
+pub(crate) const DATASET_EXTRA_ITEMS: u64 = 524287;
+
+// Memory-safety invariant for the native-loop JIT (DESIGN §5a C1): the emitted
+// dataset read has no runtime bounds check, so the worst-case address must be
+// provably inside the allocation. Checked at compile time in every profile —
+// a debug_assert would be absent from the shipping miner.
+const _: () = assert!(
+    (DATASET_EXTRA_ITEMS as usize * CACHE_LINE_SIZE + CACHE_LINE_ALIGN_MASK as usize)
+        / CACHE_LINE_SIZE
+        < super::dataset::DATASET_ITEM_COUNT,
+    "worst-case dataset read would fall outside the allocation"
+);
 
 const CONDITION_OFFSET: u32 = 8; // RANDOMX_JUMP_OFFSET
 const CONDITION_MASK: u32 = (1 << 8) - 1; // (1 << RANDOMX_JUMP_BITS) - 1
@@ -55,6 +66,19 @@ const DYNAMIC_MANTISSA_MASK: u64 = (1u64 << (MANTISSA_SIZE + DYNAMIC_EXPONENT_BI
 // V1: 2176 bytes, V2: 3200 bytes. C++ layout: entropyBuffer[16] first, then programBuffer[].
 const ENTROPY_OFFSET: usize = 0; // entropy at the start
 const INSTRUCTIONS_OFFSET: usize = 16 * 8; // 128 bytes after entropy
+
+/// Loop-carried state of `execute_vm_inner`, returned so the native-loop JIT
+/// can be differentially tested against the interpreter. `ma`/`mx` are not
+/// consumed until the *following* iteration's dataset read, so comparing only
+/// the register file and scratchpad cannot detect an ordering error — see
+/// DESIGN_JIT_NATIVE_LOOP.md defect D2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LoopState {
+    pub ma: u32,
+    pub mx: u32,
+    pub sp_addr0: u32,
+    pub sp_addr1: u32,
+}
 
 /// RandomX algorithm version. `V1` = rx/0 (current mainnet), `V2` = rx/2
 /// (Monero HF v17, tevador/RandomX#317). See RANDOMX_V2_SEMANTICS.md.
@@ -336,7 +360,13 @@ fn is_zero_or_power_of_2(x: u64) -> bool {
 const RX_MXCSR_DEFAULT: u32 = 0x9FC0;
 
 /// Set hardware FP state for RandomX (FTZ, DAZ, exception masks, rounding mode).
+///
+/// `_mm_setcsr`/`_mm_getcsr` are deprecated in favour of inline assembly, but
+/// the whole MXCSR word — not just the rounding bits — is consensus-relevant
+/// here (FTZ and DAZ change results), so the allowance is preferred over
+/// hand-rolled asm on a path no Apple Silicon build ever executes.
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn set_rounding_mode(mode: u32) {
     unsafe {
         core::arch::x86_64::_mm_setcsr(RX_MXCSR_DEFAULT | ((mode & 3) << 13));
@@ -344,11 +374,13 @@ fn set_rounding_mode(mode: u32) {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn save_rounding_mode() -> u32 {
     unsafe { core::arch::x86_64::_mm_getcsr() }
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(deprecated)]
 fn restore_rounding_mode(saved: u32) {
     unsafe { core::arch::x86_64::_mm_setcsr(saved); }
 }
@@ -524,7 +556,7 @@ fn serialize_register_file(nreg: &NativeRegisterFile) -> [u8; 256] {
 // Program compilation (opcode -> bytecode)
 // ============================================================================
 
-fn compile_program(
+pub(crate) fn compile_program(
     program_bytes: &[u8], // raw program bytes (instructions start at offset 128)
     register_usage: &mut [i32; REGISTERS_COUNT],
     bytecode: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
@@ -1073,11 +1105,14 @@ fn execute_vm(
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
-) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version)
+    iterations: usize,
+    use_native_loop: bool,
+) -> LoopState {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, jit, version, iterations, use_native_loop)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
 fn execute_vm(
     nreg: &mut NativeRegisterFile,
     scratchpad: &mut [u8],
@@ -1087,8 +1122,41 @@ fn execute_vm(
     dataset: Option<&RandomXDataset>,
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     version: RxVersion,
-) {
-    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version)
+    iterations: usize,
+    _use_native_loop: bool,
+) -> LoopState {
+    execute_vm_inner(nreg, scratchpad, program_bytes, cache_memory, ss_programs, dataset, bytecode_buf, version, iterations)
+}
+
+
+/// Derive the per-program parameters that the entropy block encodes.
+///
+/// Extracted so the native-loop JIT and the interpreter provably agree on them
+/// — the JIT bakes these in at compile time, so a divergent derivation would be
+/// invisible until hashes came out wrong.
+pub(crate) fn derive_program_params(
+    program_bytes: &[u8],
+) -> (ProgramConfiguration, u32, u32, u64) {
+    let entropy = |idx: usize| -> u64 {
+        let off = ENTROPY_OFFSET + idx * 8;
+        u64::from_le_bytes(program_bytes[off..off + 8].try_into().unwrap())
+    };
+
+    let ma = (entropy(8) as u32) & CACHE_LINE_ALIGN_MASK;
+    let mx = entropy(10) as u32;
+
+    let address_registers = entropy(12);
+    let config = ProgramConfiguration {
+        e_mask: [get_float_mask(entropy(14)), get_float_mask(entropy(15))],
+        read_reg0: (address_registers & 1) as usize,
+        read_reg1: 2 + ((address_registers >> 1) & 1) as usize,
+        read_reg2: 4 + ((address_registers >> 2) & 1) as usize,
+        read_reg3: 6 + ((address_registers >> 3) & 1) as usize,
+    };
+
+    let dataset_offset = (entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE as u64;
+
+    (config, ma, mx, dataset_offset)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,7 +1170,12 @@ fn execute_vm_inner(
     bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
     #[cfg(target_arch = "aarch64")] mut jit: Option<&mut super::jit::JitCompiler>,
     version: RxVersion,
-) {
+    iterations: usize,
+    // Opt in to the self-driving native loop (DESIGN_JIT_NATIVE_LOOP.md stage
+    // C). Ignored unless every precondition the emitted code assumes holds:
+    // v1, full mode, aarch64 JIT present.
+    #[cfg(target_arch = "aarch64")] use_native_loop: bool,
+) -> LoopState {
     // NOTE: Rounding mode is NOT reset per-chain. C++ resets once before all chains,
     // and lets CFROUND changes carry over between chains. Caller must call set_rounding_mode(0)
     // once before the chain loop.
@@ -1129,31 +1202,47 @@ fn execute_vm_inner(
         );
     }
 
-    let ma = (entropy(8) as u32) & CACHE_LINE_ALIGN_MASK;
-    let mx = entropy(10) as u32;
-
-    let address_registers = entropy(12);
-    let read_reg0 = (address_registers & 1) as usize;
-    let read_reg1 = 2 + ((address_registers >> 1) & 1) as usize;
-    let read_reg2 = 4 + ((address_registers >> 2) & 1) as usize;
-    let read_reg3 = 6 + ((address_registers >> 3) & 1) as usize;
-
-    let dataset_offset =
-        (entropy(13) % (DATASET_EXTRA_ITEMS + 1)) * CACHE_LINE_SIZE as u64;
-
-    let config = ProgramConfiguration {
-        e_mask: [get_float_mask(entropy(14)), get_float_mask(entropy(15))],
-        read_reg0,
-        read_reg1,
-        read_reg2,
-        read_reg3,
-    };
+    let (config, ma, mx, dataset_offset) = derive_program_params(program_bytes);
 
     // Compile program into pre-allocated buffer
     let program_size = version.program_size();
     let mut register_usage = [0i32; REGISTERS_COUNT];
     compile_program(program_bytes, &mut register_usage, bytecode_buf, program_size);
     let bytecode = &bytecode_buf[..program_size];
+
+    // Native loop: the emitted code drives all `iterations` itself, keeping the
+    // register file in ARM64 registers across iterations instead of spilling it
+    // to `nreg` and reloading 2048 times. Only valid for v1 + full mode — the
+    // emitted iteration tail hard-codes v1's `f ^= e` and mx-aliasing and reads
+    // the dataset with no light-mode fallback, so anything else falls through
+    // to the per-iteration body JIT below. `compile_native_loop` asserts the
+    // version too, so a miswired caller trips there rather than mining garbage.
+    #[cfg(target_arch = "aarch64")]
+    if use_native_loop
+        && version == RxVersion::V1
+        && let (Some(ds), Some(jit)) = (dataset, jit.as_mut())
+    {
+        jit.compile_native_loop(bytecode, version, &config, ma, mx, dataset_offset);
+        let f = unsafe { jit.get_loop_fn() };
+        // Must be a real 32-byte buffer: the epilogue stores ma/mx/sp_addr0/
+        // sp_addr1 through this pointer unconditionally.
+        let mut out = [0u64; 4];
+        unsafe {
+            f(
+                nreg as *mut NativeRegisterFile,
+                scratchpad.as_mut_ptr(),
+                ds.as_ptr(),
+                iterations as u64,
+                out.as_mut_ptr(),
+            );
+        }
+        return LoopState {
+            ma: out[0] as u32,
+            mx: out[1] as u32,
+            sp_addr0: out[2] as u32,
+            sp_addr1: out[3] as u32,
+        };
+    }
 
     // JIT compile the bytecode to native code (aarch64 only)
     #[cfg(target_arch = "aarch64")]
@@ -1169,7 +1258,7 @@ fn execute_vm_inner(
 
     // Main execution loop — all register accesses are unchecked since indices
     // are always valid (read_reg0..3 are 0-7, loop i is 0-7 or 0-3).
-    for _ic in 0..RANDOMX_PROGRAM_ITERATIONS {
+    for _ic in 0..iterations {
         unsafe {
         let sp_mix = nreg.r(config.read_reg0) ^ nreg.r(config.read_reg1);
         sp_addr0 ^= sp_mix as u32;
@@ -1226,6 +1315,17 @@ fn execute_vm_inner(
         }
 
         // Full mode: array lookup. Light mode: compute on-the-fly.
+        //
+        // This split is load-bearing beyond performance, and the dependency is
+        // not local. `cache_memory` and `ss_programs` are the only route by
+        // which the cache key influences a hash, and this is their only read
+        // during hashing — which is why `RandomXVm::new_full` builds no Argon2d
+        // cache at all, and why the share verifier is documented as keyed to
+        // the *dataset* rather than the seed. A lazily-filled dataset with a
+        // compute-on-miss path here would make the key load-bearing again and
+        // silently weaken `share_verifier_builds_lazily_and_resets_on_seed_rotation`,
+        // which leans on the dataset being the only staleness vector.
+        // See `ShareVerifier::rekey` (review round 11, R11-F3).
         let item_number = read_ptr / CACHE_LINE_SIZE as u64;
         let dataset_line = match dataset {
             Some(ds) => *ds.get_item(item_number),
@@ -1306,6 +1406,103 @@ fn execute_vm_inner(
         sp_addr1 = 0;
         } // unsafe
     }
+
+    LoopState { ma: mem_ma, mx: mem_mx, sp_addr0, sp_addr1 }
+}
+
+
+// ---------------------------------------------------------------------------
+// Test-only hooks for the native-loop differential test
+// (DESIGN_JIT_NATIVE_LOOP.md stage B). These exist so the test exercises the
+// real interpreter loop rather than a re-implementation of it, which could
+// share the very bug under test.
+// ---------------------------------------------------------------------------
+
+/// Reset the FP rounding mode, mirroring `calculate_hash`'s
+/// `set_rounding_mode(0)` at the start of a hash. Both paths in the
+/// differential test must start from the same mode: CFROUND writes FPCR and
+/// deliberately never restores it (the mode carries across program chains), so
+/// running one path leaves the mode altered for the next.
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(crate) fn reset_rounding_mode_for_test() {
+    set_rounding_mode(0);
+}
+
+/// Scratchpad size, so tests size their buffers from the same constant the JIT
+/// masks against rather than a local copy that could drift.
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(crate) fn scratchpad_size() -> usize {
+    SCRATCHPAD_L3_SIZE
+}
+
+/// Read the current FP rounding mode, so the differential test can confirm
+/// both paths leave it in the same state (design C3).
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(crate) fn read_rounding_mode_for_test() -> u64 {
+    // save_rounding_mode returns u32 on x86_64 and u64 on aarch64; widen.
+    #[allow(clippy::useless_conversion)]
+    {
+        save_rounding_mode() as u64
+    }
+}
+
+/// Seed the loop's live inputs exactly as `execute_vm_inner` does: r zeroed,
+/// a-registers from the program entropy. The native-loop prologue reads both
+/// from `nreg`, so the JIT path must start from the same state.
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(crate) fn init_registers_from_entropy_for_test(
+    nreg: &mut NativeRegisterFile,
+    program_bytes: &[u8],
+) {
+    let entropy = |idx: usize| -> u64 {
+        let off = ENTROPY_OFFSET + idx * 8;
+        u64::from_le_bytes(program_bytes[off..off + 8].try_into().unwrap())
+    };
+    nreg.r = [0u64; REGISTERS_COUNT];
+    for i in 0..REGISTER_COUNT_FLT {
+        nreg.a[i] = (
+            f64::from_bits(get_small_positive_float_bits(entropy(i * 2))),
+            f64::from_bits(get_small_positive_float_bits(entropy(i * 2 + 1))),
+        );
+    }
+}
+
+/// Run the real interpreter/body-JIT loop for `iterations` and return its
+/// loop-carried state.
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_vm_for_test(
+    nreg: &mut NativeRegisterFile,
+    scratchpad: &mut [u8],
+    program_bytes: &[u8],
+    dataset: Option<&std::sync::Arc<RandomXDataset>>,
+    bytecode_buf: &mut [BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX],
+    jit: Option<&mut super::jit::JitCompiler>,
+    version: RxVersion,
+    iterations: usize,
+) -> LoopState {
+    // Unused when `dataset` is Some (they only feed light mode's
+    // init_dataset_item), but the signature requires them.
+    let cache: Vec<u8> = Vec::new();
+    let mut ss_gen = Blake2Generator::new(b"diff-test", 0);
+    let dummy_programs: [SuperscalarProgram; 8] =
+        std::array::from_fn(|_| generate_superscalar(&mut ss_gen));
+    execute_vm(
+        nreg,
+        scratchpad,
+        program_bytes,
+        &cache,
+        &dummy_programs,
+        dataset.map(|d| d.as_ref()),
+        bytecode_buf,
+        jit,
+        version,
+        iterations,
+        // The differential test drives the native loop itself, via
+        // `compile_native_loop`; this hook is the interpreter/body-JIT side of
+        // the comparison and must never take the native path.
+        false,
+    )
 }
 
 // ============================================================================
@@ -1394,6 +1591,8 @@ fn calculate_hash_versioned(key: &[u8], input: &[u8], version: RxVersion) -> [u8
             #[cfg(target_arch = "aarch64")]
             None,
             version,
+            RANDOMX_PROGRAM_ITERATIONS,
+            false, // light mode: no dataset for the native loop to read
         );
 
         if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1447,6 +1646,14 @@ pub struct RandomXVm {
     pipeline_state: [u8; 64],
     #[cfg(target_arch = "aarch64")]
     jit: Option<super::jit::JitCompiler>,
+    /// Whether to use the self-driving native loop. **On by default** as of
+    /// stage D: **+6.8% to +7.4%** at 11 threads across two independent runs
+    /// (96 of 96 paired rounds positive). The per-run CIs are much tighter than
+    /// that spread and do NOT describe run-to-run reproducibility — see
+    /// AUDIT.md 2026-09-02. Only takes effect on aarch64 +
+    /// rx/0 + full mode; `set_native_loop(false)` forces the per-iteration body
+    /// JIT back on. See DESIGN_JIT_NATIVE_LOOP.md and AUDIT.md 2026-09-01.
+    use_native_loop: bool,
 }
 
 impl RandomXVm {
@@ -1472,6 +1679,7 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
+            use_native_loop: true,
         }
     }
 
@@ -1483,7 +1691,13 @@ impl RandomXVm {
     /// Full-mode VM for a specific RandomX version. Dataset contents are
     /// version-independent (same seed -> same dataset for rx/0 and rx/2).
     pub fn new_full_versioned(key: &[u8], dataset: Arc<RandomXDataset>, version: RxVersion) -> Self {
-        let cache_memory = argon2d_cache(key);
+        // No Argon2d cache in full mode. `cache_memory` is read in exactly one
+        // place — `init_dataset_item` on the `dataset == None` arm — so a VM
+        // that owns a dataset never touches it. Building it anyway cost 256 MiB
+        // and ~0.4 s *per VM*: at 11 workers that is 2.75 GiB resident and
+        // never read. `reinit` still builds one if the VM is switched to light
+        // mode. Found by MR !1 review round 7 (R7-F1).
+        let cache_memory = Vec::new();
         let mut generator = Blake2Generator::new(key, 0);
         let ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         RandomXVm {
@@ -1498,18 +1712,58 @@ impl RandomXVm {
             version,
             #[cfg(target_arch = "aarch64")]
             jit: super::jit::JitCompiler::new().ok(),
+            use_native_loop: true,
         }
     }
 
     /// Reinitialize for a new key. Pass `Some(dataset)` for full mode, `None` for light mode.
     pub fn reinit(&mut self, key: &[u8], dataset: Option<Arc<RandomXDataset>>) {
-        self.cache_memory = argon2d_cache(key);
+        // Only light mode reads the cache; see `new_full_versioned`. Dropping
+        // any existing one keeps a VM that was light and is now full from
+        // holding 256 MiB it will never read again.
+        self.cache_memory = match dataset {
+            Some(_) => Vec::new(),
+            None => argon2d_cache(key),
+        };
         let mut generator = Blake2Generator::new(key, 0);
         self.ss_programs = std::array::from_fn(|_| generate_superscalar(&mut generator));
         self.dataset = dataset;
     }
 
-    /// Get references to cache and programs (for dataset generation).
+    /// Whether this VM would use the native loop. Test-only, and it exists for
+    /// one specific reason: the share verifier's whole premise is that its VM is
+    /// on the *reference* path, and no test could detect that premise breaking.
+    /// Both paths produce identical hashes, so a comparison against a reference
+    /// VM still passes if the verifier silently switched to the native loop —
+    /// at which point verification compares the native loop against itself and
+    /// reports a clean counter forever. That is structurally the same defect as
+    /// the A/B benchmark measuring one arm against itself (review round 5, F1).
+    #[cfg(test)]
+    pub(crate) fn uses_native_loop(&self) -> bool {
+        self.use_native_loop
+    }
+
+    /// Enable or disable the native-loop JIT path.
+    ///
+    /// Takes effect only where every precondition the emitted code assumes
+    /// holds: aarch64, rx/0, full mode. Elsewhere it is silently ignored and
+    /// execution stays on the per-iteration body JIT / interpreter.
+    pub fn set_native_loop(&mut self, enabled: bool) {
+        self.use_native_loop = enabled;
+    }
+
+    /// Get references to the Argon2d cache and the SuperscalarHash programs.
+    ///
+    /// **The cache is empty for a full-mode VM.** It is read only by
+    /// `init_dataset_item`, which full mode never calls, so `new_full` does not
+    /// build one — see `new_full_versioned`. The two halves of the tuple are
+    /// therefore not symmetric: `.1` is always populated, `.0` only in light
+    /// mode.
+    ///
+    /// Call this on a **light-mode** VM (`RandomXVm::new`) when generating a
+    /// dataset. Passing a full-mode VM's empty cache to
+    /// `RandomXDataset::generate` is a programmer error, and `generate` says so
+    /// rather than failing inside its worker threads.
     pub fn cache_and_programs(&self) -> (&[u8], &[SuperscalarProgram; 8]) {
         (&self.cache_memory, &self.ss_programs)
     }
@@ -1551,6 +1805,8 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1614,6 +1870,8 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
 
             if chain < RANDOMX_PROGRAM_COUNT - 1 {
@@ -1728,6 +1986,8 @@ impl RandomXVm {
                 #[cfg(target_arch = "aarch64")]
                 self.jit.as_mut(),
                 self.version,
+                RANDOMX_PROGRAM_ITERATIONS,
+                self.use_native_loop,
             );
             total_execute_vm += t.elapsed();
 

@@ -2096,3 +2096,56 @@ one-line wrapper doing `std::env::var(env).ok().as_deref()`. No test calls
 way to answer a soundness objection. The temporary `Option<String>` in the
 wrapper lives to the end of the call expression, so the `as_deref()` borrow is
 sound. Production behaviour is unchanged: the env is still read once per switch.
+
+### R10-VC5 — "keyed to the dataset, not the seed" is the right conclusion. I looked for a route you had not considered and there is none.
+You asked me to check this specifically, so I enumerated every path by which the
+key could reach a full-mode hash rather than relying on the round-9 measurement.
+
+The key enters `RandomXVm` in exactly two places, both in the constructors:
+`cache_memory = argon2d_cache(key)` (now `Vec::new()` for full mode) and
+`ss_programs` from `Blake2Generator::new(key, 0)`. Tracing both:
+- **`cache_memory`** — read at `vm.rs:1321` only.
+- **`ss_programs`** — `grep -rn ss_programs src/` gives 20 hits; every one is a
+  constructor (`:1658`, `:1691`, `:1718`), the accessor (`:1757`), a pass-through
+  parameter on the three `execute_vm` call sites (`:1791`, `:1856`, `:1972`),
+  dataset generation (`miner.rs:751/757`), or the standalone
+  `calculate_hash_versioned` which builds its own (`:1537/:1577`). The **only**
+  read during hashing is `vm.rs:1321`.
+- `vm.rs:1321` is `None => init_dataset_item(cache_memory, ss_programs, ..)`,
+  the `None` arm of the single `match dataset` on the hash path (`vm.rs:1319`).
+  A full-mode VM has `dataset: Some(_)`, so that arm is never taken.
+
+No other field of `RandomXVm` derives from the key. So the key's *only* channel
+to a full-mode hash is the dataset that was generated from it — which is exactly
+your framing. It also holds for rx/2 (the AES F/E mix and `mp` aliasing read the
+dataset, not `ss_programs`), and the verifier is V1 regardless
+(`new_full` → `new_full_versioned(.., RxVersion::V1)`).
+
+**One condition worth writing down, since the framing now carries weight:** this
+is true because the full/light split is absolute — full mode *never* falls back
+to `init_dataset_item`. If a future change introduced a partial or lazily-filled
+dataset with a compute-on-miss path, the key would become load-bearing again and
+the rotation test would silently weaken. That is a constraint on future work, not
+a defect now.
+
+**Small doc gap:** `ShareVerifier.key` is still stored and refreshed by `rekey`,
+and it is genuinely inert — `new_full` needs *a* key argument but ignores it in
+full mode. The field's comment does not say so, so a reader who has absorbed
+"keyed to the dataset" will wonder why a key is tracked at all. One line would
+settle it.
+
+### R10-VC6 — R9-F3 is closed properly.
+`#[should_panic(expected = "Argon2d cache; got an empty one")]` now spans the
+`\`-join in the literal — the exact point where the 14 spaces were injected. A
+recurrence of the scripted-edit accident would break this match, which the old
+prefix could not. The comment above it explains why the substring is chosen that
+way, so a future edit is less likely to shorten it back.
+
+### R10-VC7 — the AUDIT describes the `is_armed`/`is_enabled` split accurately, with one omission.
+The entry states the problem, the mechanism and the fix correctly, and it
+retracts the earlier "no behaviour change" claim explicitly. What it does not
+say is that `SubmitVerifierUnavailable` is *still* unreachable from
+`worker_loop` for an unrelated reason (R10-F1) — the entry reads as though the
+defence is now live. Adding a clause such as "reachable at the `classify_share`
+boundary; still unreachable in `worker_loop` today because `rekey` always
+precedes the first hash" would make it exact.

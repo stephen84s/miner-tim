@@ -15,11 +15,11 @@ deletions across `AUDIT.md`, `CLAUDE.md`, `src/bin/minertim.rs`,
 | 4 | Are the six new tests testing what is claimed | **done — F2, F3** |
 | 5 | x86_64 behaviour change, honesty in `AUDIT.md` | **done — correct and honestly recorded** |
 | 6 | Self-reported limits | **done — F2b, F4** |
-| R | Reproduce: clippy (both targets), `make check`, `cargo test --release` | in progress |
+| R | Reproduce: clippy (both targets), `make check`, `cargo test --release` | **done — all green, claims reproduce** |
 
-## Verdict (provisional, pending item R)
+## Verdict
 
-**No wrong-hash risk. No memory-safety risk. No blocker.** Four findings, all
+**Mergeable.** No wrong-hash risk. No memory-safety risk. No blocker.** Four findings, all
 minor: two orphaned doc comments (F1), a coverage gap whose stated justification
 in `AUDIT.md` is factually wrong (F2/F2b), a test assertion that cannot fail
 (F3), and a misleading `error!` string when the *verifier's* VM is the one whose
@@ -290,3 +290,21 @@ predicate is aarch64-only.
 - **Not self-reported, and it should have been:** F2b — the stated reason for
   omitting the positive-direction test is wrong, and that omission (F2) is the
   one coverage gap with a real, if loud, failure mode.
+
+### R. Reproduction of the implementer's verification claims — ALL REPRODUCE
+
+| Claim | Reproduced |
+|---|---|
+| `cargo clippy --all-targets -- -D warnings` clean (aarch64) | **yes**, exit 0, no diagnostics |
+| `cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings` clean | **yes**, exit 0, 0 warnings — re-run in a *fresh* `CARGO_TARGET_DIR` so the result is not a cached replay, which matters because #3 was a cfg-skew defect. This also type-checks the new test modules on x86_64 |
+| `make check` clean | **yes**, exit 0 |
+| `caffeinate -i` release suite green, 129 lib + 10 bin, 2 ignored | **yes** — `test result: ok. 129 passed; 0 failed; 2 ignored`, then `10 passed`, then 0 doc-tests. Counts match exactly |
+
+Only divergence: the suite finished in **88 s** here, not the reported 306 s.
+Explanation is benign — the two full datasets are `LazyLock`-shared across the
+binary and this run reused a warm build; nothing about it is a red flag.
+
+Note in passing: `native_loop_diff_tests::native_loop_matches_interpreter*` and
+`test_native_loop_known_answer*` do run full-mode native-loop VMs in the default
+suite. They are the natural (and free) home for the missing positive assertion
+in F2.

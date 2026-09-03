@@ -2296,8 +2296,8 @@ aarch64 and x86_64.
 | P1 — `.or(value)` composition in every order | DONE | R11-VC1: correct; R11-F1 on the env arm |
 | P2 — last-flag-wins still holds? | DONE | R11-VC2: holds, verified 4 orders |
 | P3 — R10-F1 composition test + AUDIT wording | DONE | R11-VC3/VC4; R11-F2 on the code comments |
-| P4 — framing condition placement | IN PROGRESS | |
-| Warning text; blank-value docs | NOT STARTED | |
+| P4 — framing condition placement | DONE | R11-F3: at the claim, not at the break site |
+| Warning text; blank-value docs | IN PROGRESS | |
 
 ## Round 11 findings
 
@@ -2425,3 +2425,36 @@ correction is most needed is the place it did not land. A clause such as "—
 reachable at this boundary; not reachable in this function today, because
 `vm.is_some()` implies `rekey` has run" would settle it.
 **Confidence:** HIGH — read both comments in the current tree.
+
+### R11-F3 — P4: the framing condition is stated next to the *claim*, but not at the site that would *break* it  [MINOR]
+**Where:** `src/miner.rs:400-406` (`ShareVerifier::rekey` doc) — and, by
+omission, `src/randomx/vm.rs:1319-1321` and the rotation test.
+**Claim:** You asked whether the condition is somewhere a future author would
+actually encounter it. Partly. `grep -n "full/light\|compute-on-miss\|lazily-filled\|load-bearing"`
+across `src/` returns exactly **three lines, all in `ShareVerifier::rekey`**.
+That is the right place for the *claim* ("keyed to the dataset") — the caveat sits
+directly under it, which is good. But it is the wrong place for the *warning*,
+because it is not where the breaking change would be made.
+
+An author introducing a lazily-filled or partial dataset with a compute-on-miss
+path would be editing:
+- `vm.rs:1319-1321`, the single `match dataset` on the hash path, whose `None`
+  arm *is* the fallback in question. Its comment reads only
+  `// Full mode: array lookup. Light mode: compute on-the-fly.` — nothing about
+  anything depending on that dichotomy staying absolute.
+- `RandomXVm::new_full_versioned`, whose comment does state the invariant
+  (*"`cache_memory` is read in exactly one place — `init_dataset_item` on the
+  `dataset == None` arm"*) but not that a downstream test's validity rests on it.
+
+Neither points back to `ShareVerifier`. Someone working in `randomx/` has no
+reason to open `miner.rs`.
+**Also:** the rotation test — the thing the caveat says would "silently weaken" —
+carries no note of its own. Its comment explains *that* the key does not affect
+the hash, not that this is a conditional property. A reader seeing it pass would
+not know its premise could lapse.
+**Failure scenario:** documentation only, but of the specific kind this caveat
+exists to prevent: a silent weakening that no test reports. One line at
+`vm.rs:1321` ("full mode must never take this arm — `ShareVerifier`'s rotation
+test assumes the dataset is the only staleness vector") would put it in the path
+of the person who would break it.
+**Confidence:** HIGH — the grep is exhaustive over `src/`.

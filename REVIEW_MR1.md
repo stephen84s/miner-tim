@@ -2295,8 +2295,8 @@ aarch64 and x86_64.
 |---|---|---|
 | P1 — `.or(value)` composition in every order | DONE | R11-VC1: correct; R11-F1 on the env arm |
 | P2 — last-flag-wins still holds? | DONE | R11-VC2: holds, verified 4 orders |
-| P3 — R10-F1 composition test + AUDIT wording | IN PROGRESS | |
-| P4 — framing condition placement | NOT STARTED | |
+| P3 — R10-F1 composition test + AUDIT wording | DONE | R11-VC3/VC4; R11-F2 on the code comments |
+| P4 — framing condition placement | IN PROGRESS | |
 | Warning text; blank-value docs | NOT STARTED | |
 
 ## Round 11 findings
@@ -2374,3 +2374,54 @@ does not. One line — `.or(warn_if_empty(flag, v).and(None))` on the env arm, o
 simply calling `warn_if_empty` before `and_then` — closes it.
 **Confidence:** HIGH — measured, and the code path has no call to
 `warn_if_empty`.
+
+### R11-VC3 — P3: `an_enabled_but_unfed_verifier_fails_open` pins exactly what I asked for.
+It is the composition test from R10-F1, built the way I described: a
+`ShareVerifier::new(true)` with **no** `rekey`, `reference()` asserted `None`,
+then `classify_share(v.is_enabled(), &A, reference.as_ref())` asserted to be
+`SubmitVerifierUnavailable` *and* to `should_submit()`. It goes one better than
+my sketch by also asserting `is_enabled()` **and** `!is_armed()` on the same
+value, which pins the distinction between the two predicates — the thing that
+actually regressed in round 9. No dataset, microseconds. Good.
+
+**Scope note, not a finding:** it pins the composition, not the *call site*. If
+`worker_loop` were changed back to `classify_share(verifier.is_armed(), ..)`,
+this test would still pass, because it calls `is_enabled()` itself. That is the
+same standing limitation as R7-Q1/R9-F7 — `worker_loop` cannot be instantiated —
+and it is on the deferred list. If you ever want it closed cheaply, the same move
+that worked for `classify_share` works here: extract
+`fn verdict_for(v: &mut ShareVerifier, blob: &[u8], hash: &[u8; 32]) -> ShareVerdict`
+containing the two lines, have `worker_loop` call it, and point the test at that
+instead.
+
+### R11-VC4 — the AUDIT wording for R10-F1 is now accurate and does not overclaim.
+> *"`SubmitVerifierUnavailable` is still unreachable in `worker_loop` for an
+> unrelated reason: `vm` is assigned only inside the block that calls `rekey`,
+> so `vm.is_some()` implies a dataset exists. The AUDIT and comments read as
+> though the arm were live. It is not — it is a guard against future edits,
+> which is worth having but should be described honestly."*
+
+That is exactly right, including the mechanism. It states the limitation rather
+than softening it, and it does not claim the composition test made the arm live.
+
+### R11-F2 — The honest description landed in AUDIT.md but not in the two code comments that make the overclaim  [MINOR]
+**Where:** `src/miner.rs:672-674` (the `worker_loop` call site) and the
+`is_enabled` doc comment
+**Claim:** R10-F1 asked for the *comment and* the AUDIT to say the arm is not
+live today. The AUDIT was corrected (R11-VC4). The two code comments were not:
+```rust
+// `is_enabled`, not `is_armed`: the distinction is what keeps the
+// "verification wanted but unavailable" case reachable so it can
+// fail open loudly rather than being folded into "not verified".
+```
+and, on `is_enabled`, *"a defence that cannot be reached is not a defence"* —
+both of which read as a statement about the current binary. Neither mentions the
+`worker_loop` invariant (`vm.is_some()` implies `rekey` has run) that keeps the
+arm unreachable.
+**Failure scenario:** documentation only. But note this is the *inverse* of the
+concern you raised in P4: a future author editing `worker_loop` reads the comment
+three lines above the call, not an AUDIT entry from September. The place the
+correction is most needed is the place it did not land. A clause such as "—
+reachable at this boundary; not reachable in this function today, because
+`vm.is_some()` implies `rekey` has run" would settle it.
+**Confidence:** HIGH — read both comments in the current tree.

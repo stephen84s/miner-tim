@@ -1,0 +1,218 @@
+# CI for MinerTim — a CLI-only, pure-Rust Monero miner (root crate at repo root).
+#
+# This workflow is the x86_64 Linux half of CI: it is a genuine regression guard
+# for the interpreter, the Stratum client and everything outside the JIT, and it
+# says *nothing* about emitted ARM64 — on x86_64 `randomx::jit` is cfg'd out of
+# the build entirely (`src/randomx/mod.rs`). The aarch64 JIT is gated by
+# `.github/workflows/jit.yml`, which is the reason this project moved to GitHub
+# at all (issue #9); it runs on separate runners so a slow full suite here does
+# not delay the JIT verdict, and vice versa.
+#
+# Ported from `.gitlab-ci.yml`'s `rust:lint`, `rust:audit` and `rust:test`.
+# NOT ported (deliberately, not an oversight): the `release` job that creates a
+# GitLab Release on a `v*` tag. The release flow — `RELEASING.md`, `make
+# release` and that job — is a separate checklist item in issue #9 and needs
+# decisions (and credentials) that are out of scope for the workflow migration.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded PR runs, but never a run for a commit already on main:
+  # a rapid second push must not silently cancel the verdict for the first.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Matches `.gitlab-ci.yml`'s RUST_VERSION. The JIT is compiler-sensitive and
+  # every recorded verification result on this repo used this exact toolchain.
+  RUST_VERSION: "1.97.1"
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are large, per-machine and worthless in CI, where each
+  # job starts from a restored cache rather than a warm working tree.
+  CARGO_INCREMENTAL: "0"
+  # Bump to invalidate every cache in this workflow by hand (a poisoned or
+  # merely suspect cache should be cheap to discard).
+  CACHE_EPOCH: v1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint — clippy with warnings as errors
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint (clippy, x86_64 linux)
+    # Pinned, not `ubuntu-latest`: the image's core count drives libtest's
+    # default --test-threads, which drives peak RSS (issue #7). A silent image
+    # bump should not be able to change this pipeline's memory profile.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+          cargo clippy --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      - name: Cache target/
+        uses: actions/cache@v4
+        with:
+          path: target
+          # The key carries the job, the toolchain and Cargo.lock. Sharing one
+          # target/ key between jobs would have them race to save and restore
+          # each other's profile; carrying the toolchain means a Rust upgrade
+          # starts cold rather than reusing artifacts built by another rustc.
+          key: ${{ env.CACHE_EPOCH }}-target-lint-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-target-lint-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      # No `cargo fmt --check` gate, and this is a decision rather than an
+      # omission (inherited verbatim in spirit from `.gitlab-ci.yml`): the
+      # RandomX/JIT sources use intentional custom formatting — aligned emitter
+      # comments, compact literals — that aids auditing against the reference
+      # implementation and does not match rustfmt defaults. A fmt gate would
+      # either be permanently red or would destroy that alignment.
+      #
+      # --all-targets compiles lib, bin, tests and benches; -D warnings turns
+      # any clippy or rustc warning into a hard failure.
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Dependency vulnerability scan — RustSec advisory database
+  # ---------------------------------------------------------------------------
+  audit:
+    name: audit (cargo-audit / RustSec)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      # No target/ cache here: this job never builds the crate, only cargo-audit
+      # and the advisory database. The advisory DB is cached for speed but is
+      # refreshed by `cargo audit` on every run, so a cache hit cannot make the
+      # scan stale — it only avoids re-cloning ~100 MB of git history.
+      - name: Cache cargo-audit and the advisory DB
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/advisory-db
+          key: ${{ env.CACHE_EPOCH }}-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      - name: Install cargo-audit (if the cache did not supply it)
+        # Keep the existence test. A plain `cargo install` over a cached binary
+        # errors out ("binary already exists in destination") rather than
+        # no-opping, which failed this job on every cached run under GitLab.
+        # (The GitLab version additionally had to fight a redirected CARGO_HOME
+        # that PATH did not include; that workaround is not needed here, because
+        # this workflow leaves CARGO_HOME at its default and the runner already
+        # has ~/.cargo/bin on PATH.)
+        run: |
+          set -euo pipefail
+          test -x "$HOME/.cargo/bin/cargo-audit" || cargo install cargo-audit --locked
+          cargo audit --version
+
+      # Scans Cargo.lock against https://rustsec.org advisories. Non-zero exit
+      # on any advisory, which fails the workflow.
+      - name: cargo audit
+        run: cargo audit
+
+  # ---------------------------------------------------------------------------
+  # Unit tests — the interpreter-path regression guard (release, for speed)
+  # ---------------------------------------------------------------------------
+  test:
+    name: test (cargo test --release, x86_64 linux)
+    runs-on: ubuntu-24.04
+    # ~19 minutes on GitLab's x86_64 runners; 1h matches the GitLab job's
+    # timeout and leaves room for a cold cache.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      - name: Cache target/
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ env.CACHE_EPOCH }}-target-test-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-target-test-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      # No --test-threads cap here, unlike the macOS JIT gate: this runner has
+      # 16 GB against the 6.23 GB measured at 12 threads (issue #7), and it runs
+      # at 4. The cap exists for the 7 GB macos-14 box, not as house style.
+      #
+      # --locked was added on top of the GitLab command: it fails if the build
+      # would rewrite Cargo.lock, so CI tests the dependency set that is
+      # committed rather than one resolved on the fly.
+      - name: cargo test --release
+        run: cargo test --release --locked

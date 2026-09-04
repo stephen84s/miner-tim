@@ -1,0 +1,198 @@
+# The aarch64 JIT gate — the coverage this repository moved to GitHub to get.
+#
+# `src/randomx/jit` is the highest-risk code here: a defect does not crash, it
+# silently produces wrong hashes, which means rejected shares and lost money.
+# No GitLab SaaS tier can execute it (shared runners are x86_64 Linux; an arm64
+# runner probe returned `no_matching_runner`; and the JIT is not merely aarch64
+# but aarch64 + Darwin — `MAP_JIT`, `pthread_jit_write_protect_np`,
+# `sys_icache_invalidate`). GitHub gives public repositories both runners for
+# free. Issues #2 and #9.
+#
+# Two jobs, both hard gates — no `continue-on-error`, no `|| true`, no summary
+# step that swallows a status. A gate that reports without blocking is the
+# status quo (a human remembering to run `make verify-jit`) with extra steps.
+#
+#   jit-macos      macos-14, Apple Silicon — the shipping platform, the Darwin
+#                  JitMemory path, run via the existing `make verify-jit`.
+#   jit-linux-arm  ubuntu-24.04-arm — native Linux aarch64, a second-OS
+#                  differential check on the same emitted ARM64.
+#
+# `scripts/verify-jit.sh` is the single source of truth for what runs: the test
+# filters and EXPECTED_PASSES=92 live there, so this workflow cannot drift from
+# the local gate. That assertion is load-bearing — libtest exits 0 when a filter
+# matches nothing — so nothing here may weaken or bypass it.
+#
+# Kept separate from ci.yml on purpose: the interpreter suite takes ~19 minutes
+# and must not gate the JIT verdict, nor be gated by it (issue #9).
+
+name: JIT gate (aarch64)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-${{ github.ref }}
+  # See ci.yml: cancel superseded PR runs only, never a verdict for main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_VERSION: "1.97.1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CACHE_EPOCH: v1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS / aarch64 — the platform that mines real money
+  # ---------------------------------------------------------------------------
+  jit-macos:
+    name: jit-macos (aarch64 darwin, make verify-jit)
+    # macos-14 is Apple Silicon (M1), 3 cores, 7 GB RAM. Pinned rather than
+    # macos-latest: both the core count and the RAM are load-bearing here.
+    runs-on: macos-14
+    # The gate is ~185 s debug + ~46 s release on the maintainer's M2 Max, plus
+    # two full builds. A 3-core M1 is materially slower; 120 min is head-room,
+    # not an expectation.
+    timeout-minutes: 120
+    env:
+      # THE MEMORY CONSTRAINT. This runner has 7 GB. Peak RSS of the gate scales
+      # with libtest's --test-threads, because each concurrent test may hold its
+      # own 256 MiB Argon2d cache on top of the one 2 GiB dataset. Measured in
+      # issue #7 / MR !4: 6.23 GB at 12 threads, 4.07 GB at 3, in both profiles.
+      #
+      # Set explicitly rather than left to default to the runner's core count,
+      # so that a future runner image with more cores cannot quietly raise the
+      # peak, and so that this is the one lever to pull if headroom gets tight.
+      # `scripts/verify-jit.sh` passes no --test-threads of its own, so this
+      # env var wins (libtest reads RUST_TEST_THREADS when the flag is absent).
+      #
+      # Treat 4.07 GB as a floor, not a budget: /usr/bin/time -l reports
+      # max-over-waited-children, so the OS, the runner agent and rustc all sit
+      # on top of it. Headroom under 7 GB is roughly 2.9 GB.
+      RUST_TEST_THREADS: "3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host facts (arch, cores, RAM)
+        run: |
+          set -euo pipefail
+          uname -sm
+          sysctl -n machdep.cpu.brand_string
+          echo "cores: $(sysctl -n hw.logicalcpu)"
+          echo "ram:   $(( $(sysctl -n hw.memsize) / 1024 / 1024 )) MiB"
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      - name: Cache target/
+        uses: actions/cache@v4
+        with:
+          # This job builds BOTH profiles, and the release profile is
+          # lto=true / codegen-units=1, so this is the largest target/ in the
+          # repo. Whether restoring it beats rebuilding on a 3-core runner is
+          # unmeasured; if it ever looks like a net loss, delete this step
+          # rather than tuning it — correctness here does not depend on it.
+          path: target
+          key: ${{ env.CACHE_EPOCH }}-target-jit-macos-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-target-jit-macos-${{ env.RUST_VERSION }}-
+
+      # The existing local gate, unmodified: 92 tests in debug (the only profile
+      # where debug_assert! executes) and again in release (what ships), with an
+      # exact pass-count assertion. Non-zero exit fails the workflow.
+      - name: make verify-jit
+        run: make verify-jit
+
+  # ---------------------------------------------------------------------------
+  # Linux / aarch64 — second-OS differential check
+  # ---------------------------------------------------------------------------
+  jit-linux-arm:
+    name: jit-linux-arm (aarch64 linux, scripts/verify-jit.sh)
+    # 4 cores, 16 GB. Pinned for the same reason as ubuntu-24.04 in ci.yml.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host facts (arch, cores, RAM)
+        run: |
+          set -euo pipefail
+          uname -sm
+          echo "cores: $(nproc)"
+          awk '/MemTotal/ {printf "ram:   %.1f GiB\n", $2/1048576}' /proc/meminfo
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+
+      - name: Cache target/
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ env.CACHE_EPOCH }}-target-jit-linux-arm-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CACHE_EPOCH }}-target-jit-linux-arm-${{ env.RUST_VERSION }}-
+
+      # The script directly, NOT `make verify-jit-linux` (issue #9). That target
+      # wraps this same script in a pinned linux/arm64 container under colima and
+      # spends most of its body proving the daemon is genuinely aarch64 rather
+      # than qemu — which is exactly what this runner is, natively. The two
+      # parts of the wrapper that still matter are kept: the toolchain pin
+      # (1.97.1, above — every recorded Linux aarch64 result used it) and the
+      # host-facts print, above. The named docker volumes have no analogue here;
+      # the runner's workspace is already isolated from the maintainer's macOS
+      # target/ dir. The make target stays in the Makefile as a developer
+      # convenience for reproducing this job locally.
+      #
+      # No --test-threads cap: 16 GB against a ~4.07 GB peak at 3 threads.
+      # The script's own `uname -m` guard rejects a non-aarch64 host, so a
+      # runner-label mistake fails loudly instead of passing vacuously.
+      - name: scripts/verify-jit.sh
+        run: ./scripts/verify-jit.sh

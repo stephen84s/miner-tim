@@ -130,9 +130,21 @@ run_group "debug profile (debug_assert! live)" ""
 # ---------------------------------------------------------------------------
 # 2. Release profile — what the miner ships, and what every number refers to.
 # ---------------------------------------------------------------------------
-# Peaks around 4.5 GiB: both 2 GiB test datasets are built in one process
-# (issue #7). Release is authoritative for hash values and for anything quoted
-# as a measurement; debug is authoritative for the assertions.
+# Memory: the binary builds ONE 2 GiB dataset (issue #7 removed the second).
+# Max RSS on an M2 Max for this filtered set, DEBUG profile, at this host's
+# 12-thread default: 6.27 GB before that change, 5.43 GB after — a 0.84 GB
+# saving. (An earlier revision of this comment claimed 6.77 -> 4.50 GB; neither
+# figure reproduced, and the "4.50" corresponds to no thread count at all. The
+# release profile is where the large win is: 8.16 -> 6.23 GB at 12 threads.)
+# At --test-threads=3 both profiles land at ~4.07 GB. All figures are the *test
+# binary* measured directly (`/usr/bin/time -l target/debug/deps/minertim-*
+# <filters>`), not `make verify-jit`, which adds cargo and rustc on top —
+# reproducing it through the target will read higher. Peak scales with libtest's
+# --test-threads, which defaults to the core count, because each concurrent
+# test may hold its own 256 MiB Argon2d cache; pass --test-threads to trade
+# wall time for headroom on a small runner. Release is authoritative for hash
+# values and for anything quoted as a measurement; debug is authoritative for
+# the assertions.
 run_group "release profile (shipping profile)" "--release"
 
 echo

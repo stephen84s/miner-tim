@@ -211,3 +211,64 @@ to `all(aarch64, any(macos, linux))` is defensible: the ~40 `cfg` sites in
 build error with a message that names the file and the fix, which is the right
 failure mode. Newly hard-failing targets that previously compiled: `aarch64-apple-ios`
 and friends (`target_os = "ios"`, not `"macos"`). Nobody ships those here.
+
+### F9 — Mechanical confirmation of F1. (informational)
+
+Not trusting the eyeball diff, I normalised both sides (comments stripped,
+whitespace collapsed) and compared the Darwin-relevant code from
+`main:src/randomx/jit/memory.rs` against the `#[cfg(target_os = "macos")] mod
+platform` arm on HEAD. The two normalised strings differ **only** in wrapping:
+
+- added `use std::ptr;` (the arm is now its own module),
+- `let ptr =` → `pub(super) fn alloc(size) -> Result<*mut u8, _> { let p = ... Ok(p) }`,
+- `self.ptr` / `self.code_len` → the `p` / `code_len` parameters,
+- a new `dealloc` wrapper around the same `munmap(p, size)`.
+
+Every token that reaches the kernel or libSystem is identical: the two
+`unsafe extern "C"` blocks, all seven constants and their values, the six `mmap`
+arguments in order, `p == MAP_FAILED || p.is_null()`, `"mmap MAP_JIT failed"`,
+`pthread_jit_write_protect_np(0)` / `(1)`, and
+`sys_icache_invalidate(<region ptr>, <code_len>)` in that order.
+
+Test-count corroboration: `memory.rs` goes from 2 `#[test]` to 3, and the macOS
+release suite goes 130 → **131**. The delta is exactly the one new test — no
+silent test removal, no drift.
+
+### F10 — The implementer's disclosures: all honest; two of them I was able to narrow. (informational)
+
+| Disclosure | Assessment |
+| :- | :- |
+| Ran `cargo test --release`, not `make test` (debug) | **Honest and accurate.** I reproduced the release run (131 + 10) and additionally ran the **debug** JIT subset on macOS — `cargo test --lib randomx::jit::` → **66 passed**. So the macOS debug gap is now narrowed to the same shape as the Linux one. The full debug suite remains unrun on both platforms; that is issue #6, pre-existing, not caused by this branch. |
+| Clippy evidence is macOS-only (image ships no clippy) | **Was true; now closed.** `rustup component add clippy` in the container is a ~20 s download. I ran `cargo clippy --all-targets -- -D warnings` on Linux aarch64: **exit 0, clean**. The disclosed lint gap does not exist in fact. Recommend the implementer record this. |
+| musl untested; `__clear_cache` availability unchecked | **True, and I could not build it** — `ring`'s build script needs `aarch64-linux-musl-gcc`, the same class of blocker that stopped the Android check. But I settled the important half: **neither** `libcompiler_builtins-*.rlib` for `aarch64-unknown-linux-musl` **nor** the musl `self-contained/libc.a` defines `__clear_cache`. So a musl build's failure mode is a **loud undefined-symbol link error**, not a silently-linked no-op stub. That is the safe failure mode, and it is the specific risk that mattered. |
+| Container had 8 GB; whole suite peaks near 4.5 GiB | **True and relevant.** My container was likewise `-m 8g` / 4 vCPU and completed. Not a defect; issue #7. |
+| `#[ignore]`d tests not run on either platform | **True; it is parity, not a Linux gap.** The macOS release run I did reports `2 ignored` on both sides. |
+
+The AUDIT.md entry is unusually candid — it explicitly retracts an earlier wrong
+claim of its own about clippy covering the benches. I found nothing it hides.
+
+### F11 — Minor (Linux-only, forward-looking): two `mprotect` syscalls per compile.
+
+Not a defect today, but undocumented. `write_code` now issues `mprotect(R|W)` and
+`mprotect(R|X)` on every call. Production hashing compiles 8 programs per hash, so
+a Linux aarch64 *miner* would pay **16 `mprotect` syscalls per hash**, each a
+kernel VMA permission change with the TLB shootdown that implies, against two
+userspace-cheap `pthread_jit_write_protect_np` calls on Darwin. Mature JITs avoid
+this with a dual mapping (one `RW` alias, one `RX` alias of the same memory).
+
+Severity: **minor / informational**. Issue #2 phase 1a is explicitly about making
+the JIT's *tests* runnable on a second OS, not about shipping a Linux miner, and
+the branch adds no Linux release artifact. There is no Linux throughput
+measurement anywhere in the branch and none is claimed. This should simply be
+written down so nobody later reads "the JIT works on Linux" as "the JIT is fast
+on Linux". **Does not block.**
+
+### F12 — Trivial (docs): README is now stale in two places.
+
+- `README.md:14` — "Linux/x86_64 also supported (interpreter fallback, no JIT)".
+  Still true for x86_64, but silent about Linux/aarch64 now having the JIT.
+- `README.md:111` — the tree diagram annotates `memory.rs` as
+  "MAP_JIT memory, W^X toggle (macOS)".
+
+AUDIT.md lists "README/CLAUDE.md platform-coverage wording" as deliberately
+deferred, so this is disclosed rather than missed. **Does not block.**

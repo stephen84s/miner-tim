@@ -2992,3 +2992,27 @@ emulation).** Repo copied into the container with a container-local
 - Not done, deliberately: the arm64 CI job, any `.gitlab-ci.yml` edit, a
   `make verify-jit` target, README/CLAUDE.md platform-coverage wording, and the
   x86_64 backend (phase 2). Issue #2's remaining acceptance criteria stay open.
+
+### Decision (2026-09-04): no arm64 CI job — local gate instead
+Probed empirically before designing anything: a job tagged
+`saas-linux-medium-arm64` on this project fails with `no_matching_runner`
+(job 16298451382). This is a free-tier public project; GitLab SaaS arm64 runners
+are not available to it. The probe branch was deleted.
+
+Four options were put to the user — mirror to GitHub Actions (free arm64 and
+macos-14 runners for public repos), register the developer's Mac as a
+self-hosted runner, local gate only, or pay for GitLab Premium. **User chose:
+local gate only, no CI.**
+
+Consequence, recorded plainly: issue #2's acceptance criterion *"a CI job runs
+the differential and known-answer tests on an arm64 runner and fails the
+pipeline if they fail"* will NOT be met. The JIT stays on a human-run gate. What
+the port does buy is that the gate is now **reproducible on two operating
+systems** rather than resting on one machine's local state, and it is CI-ready
+the day a runner exists. The remaining interim mitigations the issue itself
+lists (a `make verify-jit` target, the debug/release gap, recording gate results
+in the MR) are the next step.
+
+Self-hosted runner was flagged to the user as carrying a real risk on a public
+repo — a fork's merge request can run arbitrary code on the runner host unless
+it is restricted to protected branches and disabled for forks. Not chosen.

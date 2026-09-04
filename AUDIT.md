@@ -3615,3 +3615,72 @@ outside the repo tree to `~/miner-tim-backups/`, and the archive was **verified
 by restoring it**: `git fsck` clean, `main` matching, 184 commits,
 `--show-object-format` still `sha256`. The SHA-256 history also remains intact
 on the archived GitLab project.
+
+## 2026-09-05 — MIGRATE-01: repository moved to GitHub, JIT under CI for the first time
+
+### Outcome
+`github.com/stephen84s/miner-tim`, public, default branch `main`. **181 commits
+and 3 tags**, verified equal to the source. Issues #1–#6 recreated from the six
+open GitLab issues, landing on exactly the planned numbers so the rewritten
+cross-references resolve.
+
+**The milestone: all five jobs green, including both JIT gates.**
+
+```
+Darwin arm64   92 passed, 0 failed   debug 472.58s + release 149.98s   GATE PASSED
+Linux aarch64  92 passed, 0 failed   debug 601.78s + release  70.09s   GATE PASSED
+```
+
+Not a green tick — 92 tests actually executed in both profiles on both
+architectures, with the exact-count assertion satisfied. The Darwin `MAP_JIT` /
+`pthread_jit_write_protect_np` / `sys_icache_invalidate` path is now verified on
+every push, which no GitLab tier could do at any price, and the native loop's
+`debug_assert!` guards now run in CI.
+
+### The first macOS run failed, and the failure had been latent for the project's life
+`ring` refused to compile before a single test ran:
+
+```
+error[E0080]: evaluation panicked: assertion failed:
+  (CAPS_STATIC & MIN_STATIC_FEATURES) == MIN_STATIC_FEATURES
+  evaluation of `cpu::arm::darwin::_AARCH64_APPLE_TARGETS_EXPECTED_FEATURES`
+```
+
+`.cargo/config.toml` sets `-C target-cpu=native` for `aarch64-apple-darwin`.
+That is correct for local mining and **wrong on a virtualised runner**: there
+`native` resolves to a model whose *static* feature set omits `aes`/`sha2`/
+`neon`, and `ring` asserts at compile time that an aarch64-apple target has
+them. Fixed with a job-level `RUSTFLAGS: -C target-cpu=apple-m1` — the same
+choice `make dist` already makes for portable builds, and `RUSTFLAGS` in the
+environment replaces the config's target rustflags rather than merging. It does
+not weaken the gate: the JIT is hand-emitted ARM64, not rustc codegen.
+
+This bug was undetectable before today. No CI could build on Apple Silicon, so
+nothing had ever exercised that config on a machine other than the maintainer's.
+Roughly 90 seconds of real macOS CI surfaced it.
+
+### Workflows
+- `.github/workflows/ci.yml` — `lint`, `audit`, `test` on `ubuntu-24.04`.
+- `.github/workflows/jit.yml` — `jit-macos` (`macos-14`, `make verify-jit`) and
+  `jit-linux-arm` (`ubuntu-24.04-arm`, `scripts/verify-jit.sh` directly; the
+  colima wrapper dropped because the runner *is* what colima was simulating).
+  `RUST_TEST_THREADS=3` on the 7 GB macOS box per MEM-01.
+- `.github/workflows/release.yml` — faithful port of the GitLab `release` job:
+  creates the Release on a `v*` tag, does **not** build or attach the binary.
+  Recorded there that full automation is now *possible* for the first time
+  (`macos-14` could run `make dist`), and that it is deliberately deferred
+  pending a decision on reproducibility and on shipping an unsigned CI-built
+  binary under the project's name.
+- `.gitlab-ci.yml` renamed to `.gitlab-ci.yml.archived` — kept for provenance,
+  inert.
+
+### Docs
+`README.md`, `CLAUDE.md`, `Makefile` and `RELEASING.md` rewritten: CI provider,
+issue URLs remapped to the new numbering, `glab` → `gh`, MR → PR. Zero `glab`
+commands and zero `gitlab` mentions remain in `RELEASING.md`.
+
+### What is NOT true yet
+`make verify-jit` remains documented as mandatory before a JIT change. That
+wording should be relaxed now that CI enforces it — but only once the gates have
+a track record, and it is a separate change. Issue #6's checklist item covering
+it stays open.

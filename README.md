@@ -20,9 +20,9 @@ see [Platform support and how it is verified](#platform-support-and-how-it-is-ve
 |---|---|---|
 | **macOS aarch64** (the shipping target) | aarch64 JIT + native iteration loop | `make verify-jit` — **local, human-run** |
 | **Linux aarch64** | same JIT; tests only, no release artifact | `make verify-jit-linux` — **local, human-run**, native arm64 container |
-| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **GitLab CI** (`rust:lint`, `rust:test`, `rust:audit`) |
+| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **GitHub Actions** (`lint`, `test`, `audit`) |
 
-**A green pipeline says nothing about the JIT.** GitLab's shared runners are
+**The x86_64 jobs say nothing about the JIT.** Those runners are
 x86_64 Linux, and `src/randomx/mod.rs` gates the JIT behind
 `#[cfg(target_arch = "aarch64")]`, so CI never compiles — let alone executes — a
 single emitted ARM64 instruction. CI is a real regression guard for the
@@ -37,11 +37,13 @@ release profiles, run by a human before any change to `src/randomx/jit/` is
 merged. `scripts/verify-jit.sh` is the gate; it exits non-zero on any failure
 *or* on an unexpected test count.
 
-This is a single point of failure and it is tracked, not accepted: GitLab SaaS
+This was a single point of failure until the GitHub migration; the JIT is now
+covered by `jit-macos` (macos-14) and `jit-linux-arm` (ubuntu-24.04-arm), which
+run the same `make verify-jit` gate on every push. Historically, GitLab SaaS
 offers this project no arm64 runner (probed: `no_matching_runner`), so
-[issue #9](https://gitlab.com/stephen84s/miner-tim/-/issues/9) covers migrating CI to GitHub Actions, which gives
+[issue #9](https://github.com/stephen84s/miner-tim/issues/6) covers migrating CI to GitHub Actions, which gives
 public repositories free `macos-14` and `ubuntu-24.04-arm` runners and would let
-this gate run automatically. [Issue #2](https://gitlab.com/stephen84s/miner-tim/-/issues/2) tracks the gap itself.
+this gate run automatically. [Issue #2](https://github.com/stephen84s/miner-tim/issues/2) tracks the gap itself.
 
 ## Quick Start
 

@@ -1,0 +1,39 @@
+# Release — fires on a `v*` tag and creates the GitHub Release entry.
+#
+# This is a faithful port of `.gitlab-ci.yml`'s `release` job: it creates the
+# release, it does NOT build or attach the binary. Per RELEASING.md the macOS
+# arm64 tarball is still built locally with `make dist` and attached by hand.
+#
+# Worth recording that this is now a deliberate choice rather than a limitation.
+# On GitLab it was forced: the shared runners were x86_64 Linux and physically
+# could not produce an aarch64-apple-darwin binary. GitHub's `macos-14` runner
+# is Apple Silicon and *could* run `make dist` end to end. Automating it is a
+# real option now and is worth its own issue — it needs a decision about
+# reproducibility and about whether an unsigned CI-built binary should carry the
+# project's name. Until that decision is made, the manual flow stands.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: create GitHub Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "MinerTim $GITHUB_REF_NAME" \
+            --notes 'The macOS arm64 binary (`minertim-<ver>-macos-arm64.tar.gz` + `SHA256SUMS`) is built locally with `make dist` and attached manually — see RELEASING.md.'

@@ -16,7 +16,7 @@
 6.  **JIT gate (mandatory):** Any change touching `src/randomx/jit/`, or `vm.rs`'s
     native-loop path, additionally requires **`make verify-jit`** to pass on Apple
     Silicon before the work is called done, and its final `GATE PASSED` lines
-    **pasted into the MR description**. CI cannot substitute for this: GitLab's
+    **pasted into the PR description** when CI has not yet run it. Historically CI could not substitute for this: GitLab's
     shared runners are x86_64, where the JIT is `cfg`'d out, so a green pipeline
     is not evidence about emitted ARM64. `make verify-jit-linux` runs the same
     gate under native linux/arm64 and should be run when `jit/memory.rs` or any
@@ -79,7 +79,7 @@ needs colima running on an aarch64 VM (`colima start --arch aarch64 --cpu 4 --me
 |---|---|---|
 | macOS aarch64 (shipping target) | aarch64 JIT + native iteration loop | `make verify-jit` — **local, human-run** |
 | Linux aarch64 | same JIT; tests only, no release artifact | `make verify-jit-linux` — **local, human-run**, native arm64 container |
-| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **GitLab CI** — `rust:lint`, `rust:test`, `rust:audit` |
+| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **GitHub Actions** — `lint`, `test`, `audit` |
 
 **CI validates the interpreter path on x86_64 Linux and nothing else.** `mod.rs`
 gates the JIT on `#[cfg(target_arch = "aarch64")]`, so the shared runners never
@@ -103,7 +103,7 @@ set: it is the only test that hard-requires a *successful* JIT allocation. The
 known-answer vectors alone pass even with an inert JIT, because the interpreter
 fallback produces the same hash (issue #4).
 
-Why this is manual: GitLab SaaS gives this free-tier project no arm64 runner
+Historically manual because GitLab SaaS gave this free-tier project no arm64 runner
 (probed — `no_matching_runner`), and a self-hosted runner on a public repo lets
 fork MRs run code on the host. **Issue #9** tracks migrating CI to GitHub
 Actions, which offers public repos free `macos-14` and `ubuntu-24.04-arm`

@@ -56,7 +56,8 @@ test:
 	cargo test
 
 # ---------------------------------------------------------------------------
-# The aarch64 JIT gate (issue #2). CI cannot run any of this — GitLab's shared
+# The aarch64 JIT gate (issue #2). Also run in CI by .github/workflows/jit.yml
+# on macos-14 and ubuntu-24.04-arm. Historically nothing could run it — GitLab's shared
 # runners are x86_64 Linux, where `randomx::jit` is cfg'd out of the build, so a
 # green pipeline says nothing about emitted ARM64. Both targets are hard gates:
 # non-zero exit on any failing test or an unexpected test count.
@@ -128,7 +129,7 @@ dist:
 	@cat dist/SHA256SUMS
 
 # Tag the current commit and push it; the CI 'release' job then creates the
-# GitLab Release. Attach the dist tarball per RELEASING.md.
+# GitHub Release. Attach the dist tarball per RELEASING.md.
 release:
 	@test -z "$$(git status --porcelain)" || (echo "Working tree not clean; commit first." && exit 1)
 	git tag -a v$(VERSION) -m "MinerTim v$(VERSION)"

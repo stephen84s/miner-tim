@@ -11,7 +11,37 @@ CPU-based Monero (XMR) miner optimised for macOS (Apple Silicon). Pure Rust mini
 - **macOS** on Apple Silicon (M1/M2/M3)
 - **Rust 1.97+** via [rustup](https://rustup.rs)
 
-Linux/x86_64 also supported (interpreter fallback, no JIT).
+Other platforms build and run, but only Apple Silicon is a supported target —
+see [Platform support and how it is verified](#platform-support-and-how-it-is-verified).
+
+## Platform support and how it is verified
+
+| Platform | Hashing path | Verified by |
+|---|---|---|
+| **macOS aarch64** (the shipping target) | aarch64 JIT + native iteration loop | `make verify-jit` — **local, human-run** |
+| **Linux aarch64** | same JIT; tests only, no release artifact | `make verify-jit-linux` — **local, human-run**, native arm64 container |
+| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **GitLab CI** (`rust:lint`, `rust:test`, `rust:audit`) |
+
+**A green pipeline says nothing about the JIT.** GitLab's shared runners are
+x86_64 Linux, and `src/randomx/mod.rs` gates the JIT behind
+`#[cfg(target_arch = "aarch64")]`, so CI never compiles — let alone executes — a
+single emitted ARM64 instruction. CI is a real regression guard for the
+interpreter, the Stratum client, the miner loop and the dependency audit, and
+nothing more. A JIT defect does not crash; it silently produces wrong hashes,
+which means rejected shares.
+
+The JIT's actual coverage is the two `make verify-jit*` targets above: the JIT
+unit tests, the differential tests (emitted native loop vs the interpreter, from
+byte-identical state) and the known-answer vectors, in **both** the debug and
+release profiles, run by a human before any change to `src/randomx/jit/` is
+merged. `scripts/verify-jit.sh` is the gate; it exits non-zero on any failure
+*or* on an unexpected test count.
+
+This is a single point of failure and it is tracked, not accepted: GitLab SaaS
+offers this project no arm64 runner (probed: `no_matching_runner`), so
+[issue #9](https://gitlab.com/stephen84s/miner-tim/-/issues/9) covers migrating CI to GitHub Actions, which gives
+public repositories free `macos-14` and `ubuntu-24.04-arm` runners and would let
+this gate run automatically. [Issue #2](https://gitlab.com/stephen84s/miner-tim/-/issues/2) tracks the gap itself.
 
 ## Quick Start
 
@@ -30,7 +60,9 @@ make run
 |---|---|
 | `make build` | Build release binary |
 | `make run` | Build and run (reads `mining.conf`) |
-| `make test` | Run Rust unit tests |
+| `make test` | Run Rust unit tests (debug, whole suite — **not** the JIT gate) |
+| `make verify-jit` | aarch64 JIT gate on this Mac — mandatory before any MR touching `src/randomx/jit/` |
+| `make verify-jit-linux` | The same gate under native linux/arm64 (colima) |
 | `make check` | Quick type-check |
 | `make clean` | Remove build artifacts |
 
@@ -105,10 +137,10 @@ miner-tim/
 │       ├── argon2d.rs          # Argon2d cache initialisation (256 MiB)
 │       ├── superscalar.rs      # SuperscalarHash program generation
 │       ├── dataset.rs          # Dataset item computation from cache (2 GiB)
-│       ├── tests.rs            # 87 test vectors
+│       ├── tests.rs            # Known-answer vectors + differential tests
 │       └── jit/                # aarch64 JIT compiler
 │           ├── mod.rs
-│           ├── memory.rs       # MAP_JIT memory, W^X toggle (macOS)
+│           ├── memory.rs       # JIT memory: MAP_JIT + W^X (macOS), mmap/mprotect (Linux)
 │           ├── aarch64.rs      # ARM64 instruction emitter
 │           └── compiler.rs     # BytecodeInstruction[256] → native ARM64
 ├── Makefile
@@ -141,10 +173,11 @@ CLI (bin/minertim.rs)
 
 ### JIT Compiler (aarch64)
 
-Active on macOS aarch64. For each of the 8 RandomX program chains per hash:
+Active on aarch64 — macOS (the shipping target) and Linux (tests only). For each
+of the 8 RandomX program chains per hash:
 
 1. `JitCompiler::compile()` translates `BytecodeInstruction[256]` to ARM64 machine code
-2. Stored in a MAP_JIT region with W^X toggle (`pthread_jit_write_protect_np`)
+2. Stored in a `MAP_JIT` region with the W^X toggle (`pthread_jit_write_protect_np`) on macOS, or `mmap(RW)` → `mprotect(RX)` + `__clear_cache` on Linux
 3. Executed directly via function pointer — ~3× faster than interpreter
 
 ### Pipelined Hashing

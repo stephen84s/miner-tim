@@ -2850,3 +2850,326 @@ Process note worth carrying: this branch was run as three **cold-spawned** agent
 resuming one long-lived reviewer cost ~89M tokens across MR !1's rounds and left
 round 13 unable to start. Cold spawn plus a small durable ledger file is the
 working arrangement; see the rewritten `feedback_auto_review` memory note.
+
+## 2026-09-04 — PLAT-01: JIT ported to Linux aarch64 (issue #2, phase 1a)
+
+### Request / goal
+Issue #2 phase **1a only**: make `randomx::jit` build and pass its tests on
+Linux aarch64, so the JIT stops being a macOS-only artefact that CI can never
+execute. Explicitly **not** in scope: the arm64 CI job (phase 1b). The project's
+pipeline currently answers `no_matching_runner` for `saas-linux-medium-arm64`,
+so how the tests get *run* in CI is still an open decision; `.gitlab-ci.yml` was
+not touched.
+
+### Files changed
+- `src/randomx/jit/memory.rs` — split into two `mod platform` arms behind
+  `#[cfg(target_os = ...)]`, plus a `compile_error!` for every other OS.
+- `src/randomx/mod.rs` — comment only, recording why the `jit` gate stays
+  `target_arch = "aarch64"` with no OS term.
+- `src/randomx/jit/mod.rs` — header comment.
+
+### Behaviour / API changes
+- **macOS is unchanged.** Its arm is a byte-for-byte move of the existing code:
+  `mmap(PROT_READ|PROT_WRITE|PROT_EXEC, MAP_ANON|MAP_PRIVATE|MAP_JIT)`,
+  `pthread_jit_write_protect_np(0/1)`, `sys_icache_invalidate`, same Darwin
+  constants, same `"mmap MAP_JIT failed"` error string. No unification of the
+  two arms that would have cost Darwin its `PROT_EXEC` at map time.
+- **Linux aarch64** maps `PROT_READ|PROT_WRITE` with
+  `MAP_ANONYMOUS(0x20)|MAP_PRIVATE(0x02)` — never `RWX` — and swaps the region
+  between `R|W` and `R|X` with `mprotect`, then clears the I-cache with
+  `__clear_cache`. The constants were read out of the container's
+  `<sys/mman.h>` (`gcc -E -dM`), not inferred from Darwin's: Darwin's `MAP_ANON`
+  is `0x1000` and its `MAP_JIT` bit `0x0800` is `MAP_DENYWRITE` on Linux, so
+  copying them across would have failed at runtime rather than at compile time.
+  `__clear_cache` was confirmed to link and run under
+  `aarch64-unknown-linux-gnu` on rustc 1.97.1 before the abstraction was
+  written, rather than assumed from what `compiler_builtins` exports.
+- `mprotect`'s return value is checked; both directions panic with
+  `std::io::Error::last_os_error()`. An unchecked failure would surface as a
+  bare SIGSEGV inside emitted code with no context.
+- `enable_write` / `enable_execute` kept their signatures but became
+  **private**. `write_code` was already their only caller in the tree, and the
+  two platforms give them genuinely different scopes — Darwin's toggle is
+  per-thread and process-global across all `MAP_JIT` regions, Linux's `mprotect`
+  is per-region. Private means no future caller can rely on either reading.
+  `compiler.rs` needed no changes, as required.
+- One new test, `test_jit_memory_rewrite_in_place`: writes `MOVZ x0,#42; RET`,
+  calls it, rewrites the same region with `MOVZ x0,#55; RET`, calls it again.
+  This is the in-place rewrite the two-pass native-loop compile
+  (`compiler.rs:834`) and a reused `JitCompiler` both perform; on Linux a stale
+  I-cache line returns 42 and the test is what catches it.
+- `randomx/mod.rs`'s gate deliberately stays `target_arch = "aarch64"`.
+  Narrowing it to `all(aarch64, any(macos, linux))` would require rewriting the
+  ~40 `#[cfg(target_arch = "aarch64")]` sites in `vm.rs` that reference the
+  module — real risk to the shipping path for no gain. The OS requirement is
+  enforced one level down by the `compile_error!` instead, which was verified to
+  fire: `rustc --target aarch64-linux-android` on `memory.rs` aborts with the
+  message naming the file and the fix. (`cargo check --target
+  aarch64-linux-android` cannot reach it — `ring`'s build script needs an NDK
+  clang and fails first.)
+
+### The "only memory.rs is platform-specific" assumption
+The issue says this assumption is the whole basis of the phase-1 estimate. It
+**held**, and was confirmed rather than assumed:
+- `aarch64.rs`, `compiler.rs` and the native loop in `vm.rs` needed zero
+  changes; the full lib suite passes on Linux aarch64 (below).
+- `aes_hash.rs`'s NEON paths were already runtime-detected via
+  `is_aarch64_feature_detected!("aes")` behind `#[target_feature]`, so they
+  compile and run on Linux where `aes` is not a default target feature.
+- `miner.rs` (P-core count) and `pool_connection.rs` already carried
+  `#[cfg(not(target_os = "macos"))]` fallbacks.
+- `benches/{hash,fullmode,nativeloop_ab}.rs` compile on Linux aarch64:
+  `cargo check --benches --release` and `cargo check --all-targets --release`
+  are both clean in the container. (An earlier draft of this entry claimed
+  `clippy --all-targets` covered them, which was wrong twice over — clippy is
+  not installed in the image, and `cargo test --lib` / `--bin` never build
+  benches. `nativeloop_ab.rs` is the native-loop A/B harness and was the most
+  plausible place for a second platform dependency to hide; it has none.)
+- `.cargo/config.toml`'s `target-cpu=native` is scoped to
+  `[target.aarch64-apple-darwin]`, so Linux builds are baseline and unaffected.
+
+### Verification
+**macOS host (aarch64-apple-darwin):**
+- `cargo clippy --all-targets -- -D warnings` — clean.
+- `make check` — clean.
+- `caffeinate -i cargo test --release` — **131 lib + 10 bin passed, 2 ignored,
+  0 failed**. 131 is the 130 baseline plus `test_jit_memory_rewrite_in_place`;
+  the delta is that one new test, not drift.
+- Substitution to disclose: this was run instead of `make test`, which is
+  `cargo test` in **debug**. Release is the profile the 130+10 baseline is
+  stated in, and a debug full suite means Argon2d building two 2 GiB datasets
+  unoptimised. So **no debug full-suite run happened on macOS**; the only debug
+  coverage in this batch is the container's `cargo test --lib randomx::jit::`.
+  Issue #6's debug/release gap is narrowed for the JIT module, not closed.
+
+**Linux aarch64, native (colima, `rust:1.97.1`, `uname -m` = `aarch64`, no
+emulation).** Repo copied into the container with a container-local
+`CARGO_TARGET_DIR`, so the host `target/` was untouched:
+- `cargo test --release --lib randomx::jit::` — **66 passed, 0 failed**
+  (`jit::memory` 3, `jit::compiler` 63).
+- `cargo test --lib randomx::jit::` in **debug** — 66 passed. This is the only
+  run in the tree that executes the native loop's `debug_assert!` guards, and
+  is a partial answer to issue #6's debug/release gap.
+- `cargo test --release --lib randomx::tests::native_loop_diff_tests` — **4
+  passed**: `native_loop_matches_interpreter`,
+  `native_loop_matches_interpreter_full_program`,
+  `native_loop_at_the_c1_worst_case_dataset_address`,
+  `native_loop_zero_iterations_terminates`. **This is the deliverable** — the
+  emitted ARM64 native loop agreeing bit-for-bit with the interpreter on a
+  second operating system.
+- `cargo test --release --lib -- test_native_loop_known_answer
+  test_vm_calculate_hash_jit full_mode_v1_vm_reports_the_native_loop_effective`
+  — **4 passed**. `full_mode_v1_vm_reports_the_native_loop_effective` is the
+  one that matters most here: per its own doc comment it is the only test that
+  hard-requires a successful JIT allocation. The known-answer vectors pass even
+  when allocation fails, because the interpreter fallback yields the same hash
+  (issue #4's shape); this one going green is the proof that the Linux
+  `mmap`/`mprotect` path actually allocated and that emitted instructions ran.
+- `cargo test --release --lib` (whole suite, both 2 GiB datasets in one process)
+  — **131 passed, 2 ignored, 0 failed**. `cargo test --release --bin minertim` —
+  **10 passed**. Exact parity with macOS.
+- `cargo check --benches --release` and `cargo check --all-targets --release` —
+  both clean. This is the only Linux evidence for the three bench targets.
+- `cargo clippy --all-targets` in the container was **not** run: the `rust:1.97.1`
+  image ships no clippy component and installing it was out of proportion.
+  **Clippy evidence is macOS-only**; `cargo check --all-targets` is the Linux
+  substitute, so a Linux-only lint (as opposed to a compile error) would not
+  have been caught.
+
+### Assumptions and constraints
+- The `#[ignore]`d tests (`test_full_mode_matches_light_mode`,
+  `test_hash_profile`) were **not** run on either platform — they are ignored on
+  macOS too, so this is parity, not a Linux gap.
+- Linux support here means `aarch64-unknown-linux-gnu`. musl is untested;
+  `__clear_cache` comes from libgcc/compiler-rt and its availability under musl
+  was not checked.
+- The container had 8 GB and 4 vCPUs. The whole-suite run peaks around 4.5 GiB
+  (issue #7) and completed, but that is not much headroom — the per-key split
+  runs above are the reliable way to reproduce this on a smaller machine.
+- `mprotect` is called with the region's full `size`, which `mmap` guarantees is
+  page-aligned at the start; Linux rounds the length up to a page. The 4096-byte
+  test regions are therefore fine on both 4K and 64K page kernels.
+- Not done, deliberately: the arm64 CI job, any `.gitlab-ci.yml` edit, a
+  `make verify-jit` target, README/CLAUDE.md platform-coverage wording, and the
+  x86_64 backend (phase 2). Issue #2's remaining acceptance criteria stay open.
+
+### Decision (2026-09-04): no arm64 CI job — local gate instead
+Probed empirically before designing anything: a job tagged
+`saas-linux-medium-arm64` on this project fails with `no_matching_runner`
+(job 16298451382). This is a free-tier public project; GitLab SaaS arm64 runners
+are not available to it. The probe branch was deleted.
+
+Four options were put to the user — mirror to GitHub Actions (free arm64 and
+macos-14 runners for public repos), register the developer's Mac as a
+self-hosted runner, local gate only, or pay for GitLab Premium. **User chose:
+local gate only, no CI.**
+
+Consequence, recorded plainly: issue #2's acceptance criterion *"a CI job runs
+the differential and known-answer tests on an arm64 runner and fails the
+pipeline if they fail"* will NOT be met. The JIT stays on a human-run gate. What
+the port does buy is that the gate is now **reproducible on two operating
+systems** rather than resting on one machine's local state, and it is CI-ready
+the day a runner exists. The remaining interim mitigations the issue itself
+lists (a `make verify-jit` target, the debug/release gap, recording gate results
+in the MR) are the next step.
+
+Self-hosted runner was flagged to the user as carrying a real risk on a public
+repo — a fork's merge request can run arbitrary code on the runner host unless
+it is restricted to protected branches and disabled for forks. Not chosen.
+
+---
+
+## 2026-09-04 — PLAT-02: the JIT gate made explicit (issue #2, interim mitigations)
+
+### Request / goal
+Issue #2's acceptance criteria minus the arm64 CI job, which the user ruled out
+on 2026-09-04 (see the decision note in the PLAT-01 entry above): a hard local
+gate for the aarch64 JIT (`make verify-jit`), the same gate under native Linux
+aarch64 (`make verify-jit-linux`), close the debug/release gap (issue #6), state
+plainly in README/CLAUDE.md which platforms CI validates and which rest on a
+human, record the reviewer's F11 Linux syscall cost somewhere durable, and
+document the gate as mandatory before any MR touching `src/randomx/jit/`.
+
+### Files changed
+- `scripts/verify-jit.sh` — **new.** The gate itself; runs on either host.
+- `Makefile` — `verify-jit`, `verify-jit-linux`, help entries, a comment on
+  `test:` saying it is not the JIT gate.
+- `README.md` — new "Platform support and how it is verified" section; build
+  table; two stale annotations the reviewer flagged as F12 (`:14`, `:111`) and
+  the stale "87 test vectors" line next to them; JIT section no longer says
+  macOS-only.
+- `CLAUDE.md` — protocol rule 6 (the mandatory gate); "Platform coverage — what
+  CI proves, and what it cannot"; build commands; project-tree annotations;
+  PLAT-02 task-board row.
+- `src/randomx/jit/memory.rs` — comment only: F11, the Linux `mprotect` cost.
+- `AUDIT.md` — this entry.
+
+No behaviour change. The only source file touched is a comment block.
+
+### What the gate runs, and why those tests
+`scripts/verify-jit.sh` drives `cargo test --lib` with six substring filters
+derived from `cargo test --release --lib -- --list`, not guessed:
+`randomx::jit::` (66 unit tests), `randomx::tests::native_loop_diff_tests::`
+(4 differential), `randomx::tests::full_hash_tests::` (15 + 1 ignored),
+`randomx::tests::full_hash_v2_tests::` (2), `randomx::tests::v2_jit_tests::`
+(2), `randomx::vm::native_loop` (3) — **92** tests.
+
+Three ways a gate like this can go green having proved nothing, all closed:
+1. **Wrong host.** On x86_64 every one of those tests is `cfg`'d out and libtest
+   exits 0. The script refuses to run unless `uname -m` is `arm64`/`aarch64`.
+2. **Filter drift.** libtest also exits 0 when a filter matches *nothing*, so a
+   renamed module would silently empty the gate. The script compares the run
+   count against `EXPECTED_PASSES=92` and fails on any mismatch, in either
+   direction. Verified by deliberately breaking one filter
+   (`randomx::jit::module_that_was_renamed::`): the run reported 26 passed and
+   the script failed with "ran '26' tests, expected 92" — a plain
+   `cargo test` there would have exited 0.
+3. **Inert JIT.** Every known-answer vector still passes when JIT allocation
+   fails, because the interpreter fallback returns the same hash (issue #4's
+   shape). `full_mode_v1_vm_reports_the_native_loop_effective` is the only test
+   that hard-requires a live allocation; it is inside the filter set and is
+   marked LOAD-BEARING in the script so a future trim cannot quietly drop it.
+
+### The debug/release gap (issue #6, issue #2 mitigation 2) — decision: run both
+Measured before deciding, on an M2 Max:
+
+| Set | Debug | Release |
+| :- | :- | :- |
+| JIT unit + differential only | 177 s | 45 s |
+| The full 92-test gate | 307 s | 195 s |
+
+Running the *whole* gate in debug costs 130 s more than the reduced subset, so
+the reduced-subset compromise the task allowed was not needed: **both profiles
+run the same 92 tests**, and no "which profile is authoritative" caveat is
+required. Debug is where the native loop's `debug_assert!` guards actually
+execute — the imm12/imm7 encoding ranges in `jit/aarch64.rs`, the CBRANCH
+forward-target rule, the CBZ zero-iteration patch range and the back-branch
+imm19 range in `jit/compiler.rs` — all of which are compiled out of release,
+which is the profile every recorded MR !1 measurement used. Release stays the
+profile the miner ships and the one hash values are quoted from. The known-answer
+vectors push roughly 80 further real programs through those assertions than the
+differential tests alone do, which is the reason for not trimming the debug set.
+
+Prohibitive-cost escape hatch (2 GiB datasets built unoptimised) was checked and
+did not materialise: Argon2d + dataset generation in debug is slow but bounded —
+the full debug gate is 5 minutes on the host.
+
+### `make verify-jit-linux` mechanics
+`docker run --rm --platform linux/arm64 -v $(CURDIR):/src:ro -v <named
+volume>:/target -e CARGO_TARGET_DIR=/target rust:1.97.1 ./scripts/verify-jit.sh`.
+The repo is mounted **read-only** — that, rather than the env var alone, is what
+guarantees the host's `target/` (macOS artifacts) and `Cargo.lock` cannot be
+touched; `--locked` in the script means an out-of-date lock file fails rather
+than being rewritten. Named volumes keep the container's target dir and cargo
+registry across runs so re-runs are incremental. The image is pinned to
+`rust:1.97.1`, the image every recorded Linux result on this branch used.
+
+Three refusals, none silent:
+- no `docker` CLI → message with the `brew install colima docker` line;
+- daemon unreachable → "colima is probably not running", the `colima start`
+  line, and an explicit "refusing to skip";
+- daemon architecture not `aarch64` → refuses, because a linux/arm64 container
+  on an x86_64 daemon runs under qemu and would prove nothing about real ARM64.
+
+### Verification
+All on the branch head, macOS host = M2 Max, Rust 1.97.1.
+
+- **`make verify-jit` (macOS aarch64) — GATE PASSED, exit 0.** Numbers from the
+  final run against the committed script, on an otherwise idle machine:
+  - `debug profile (debug_assert! live)`: `test result: ok. 92 passed; 0 failed;
+    1 ignored; 0 measured; 40 filtered out; finished in 309.43s`.
+  - `release profile (shipping profile)`: `test result: ok. 92 passed; 0 failed;
+    1 ignored; 0 measured; 40 filtered out; finished in 88.36s`.
+  - Final lines: `verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug +
+    release`. (An earlier run of the same gate logged 497 s / 195 s because the
+    drift experiment below was competing for CPU — same 92/92 result.)
+- **Drift experiment (negative test of the gate itself).** A copy of the script
+  with `randomx::jit::` changed to `randomx::jit::module_that_was_renamed::`:
+  `test result: ok. 26 passed; ...` and then
+  `verify-jit: FAIL — debug profile (debug_assert! live) ran '26' tests,
+  expected 92.` Bare `cargo test` exits 0 in that situation; the gate does not.
+- **`${PIPESTATUS[0]}` status path** checked separately —
+  `bash -c 'set -uo pipefail; (echo x; exit 3) | tee /dev/null >/dev/null;
+  echo ${PIPESTATUS[0]}'` prints 3, so a failing `cargo test` behind the `tee`
+  is caught rather than masked by the pipeline's exit code.
+- **`make verify-jit-linux` (native linux/arm64, colima, no emulation)** —
+  **GATE PASSED, exit 0.** Container: `aarch64, 4 cpu, 7.7 GiB`, no emulation.
+  - `debug profile`: `test result: ok. 92 passed; 0 failed; 1 ignored; 0
+    measured; 40 filtered out; finished in 713.10s`.
+  - `release profile`: `test result: ok. 92 passed; 0 failed; 1 ignored; 0
+    measured; 40 filtered out; finished in 193.02s`.
+  - `verify-jit: GATE PASSED on Linux aarch64 — 92 tests, debug + release`.
+  - ~15 minutes wall-clock on 4 vCPUs; the debug profile dominates because both
+    2 GiB datasets are generated unoptimised. Noted in the Makefile so nobody
+    assumes the target has hung.
+  - Honest note on the first attempt: `scripts/verify-jit.sh` was edited (a
+    comment) *while* the container was executing it, and bash — which reads a
+    script incrementally — re-ran the debug group a second time before
+    continuing. Results were identical (92/92 three times), but the log was
+    misleading, so the gate was re-run untouched and the numbers above are from
+    that clean run. Do not edit the script while a gate is in flight.
+- `cargo clippy --all-targets -- -D warnings` on macOS: **exit 0**.
+- `make check`: **exit 0**.
+- Baseline suite unchanged: `cargo test --release` → **131 passed, 2 ignored,
+  0 failed** (lib) and **10 passed** (bin).
+
+### Assumptions and constraints
+- The gate runs `--lib` only. The 10 bin tests and the two `#[ignore]`d tests
+  (`test_full_mode_matches_light_mode`, `test_hash_profile`) are **not** in it;
+  `make test` / `cargo test --release` remain the way those run.
+- `EXPECTED_PASSES` is a hand-maintained constant. Adding or removing a test in
+  the filtered modules **will** fail the gate until it is updated in the same
+  commit. That is the intended trade: a number someone must touch deliberately,
+  in exchange for a filter that cannot silently empty.
+- `--locked` means a stale `Cargo.lock` fails the gate rather than being
+  rewritten — deliberate, since the Linux run mounts the repo read-only.
+- Clippy in the container is still unavailable (`rust:1.97.1` ships no clippy
+  component), unchanged from PLAT-01: **lint evidence stays macOS-only**.
+- The gate does not measure hashrate and says nothing about performance. It is
+  a correctness gate. Linux throughput in particular has never been measured
+  and the Linux backend is known to be syscall-heavy (F11).
+- No `.gitlab-ci.yml` change, by the user's decision of 2026-09-04. Issue #2's
+  CI acceptance criterion therefore remains unmet by design; issue #9 (GitHub
+  Actions) is the plan of record for meeting it.
+- `REVIEW_PLAT01.md` was not modified — it is a reviewer's record. F11 and F12
+  are addressed in the code and docs instead.

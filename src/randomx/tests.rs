@@ -24,23 +24,19 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// The full dataset for `b"native loop test key"` — the second of the two the
-/// test binary builds. Hoisted to the top level so the native-loop differential
-/// tests and the verifier-rotation test share one build rather than forcing a
-/// third 2 GiB allocation.
-fn native_loop_test_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
-    static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
-        std::sync::LazyLock::new(|| {
-            let vm_light = vm::RandomXVm::new(b"native loop test key");
-            let (cache, programs) = vm_light.cache_and_programs();
-            std::sync::Arc::new(super::dataset::RandomXDataset::generate(cache, programs, 8))
-        });
-    DS.clone()
-}
-
 /// The full dataset for `b"test key 000"` — the key behind every known-answer
-/// vector in this file. It is 2 GiB and three tests need it, so it is built
-/// once per test binary rather than once per test.
+/// vector in this file, and now the *only* real dataset the test binary builds.
+///
+/// It is 2 GiB and is never freed (`LazyLock`), so a second key would double
+/// that for the life of the process. There used to be a second one, keyed
+/// `b"native loop test key"`, for the native-loop differential tests; issue #7
+/// removed it. The differential tests do not depend on the key: every input
+/// that shapes what they exercise — the program bytes, the derived
+/// `ProgramConfiguration`, `ma`/`mx`, `dataset_offset` and the scratchpad — is
+/// derived from `make_program_bytes(seed)` / `make_scratchpad(seed)`, and the
+/// reference path and the native loop are handed the *same* `&dataset`. The
+/// dataset only supplies the bytes both sides read, so swapping which key
+/// produced them is lateral, not reductive.
 fn test_key_000_dataset() -> std::sync::Arc<super::dataset::RandomXDataset> {
     static DS: std::sync::LazyLock<std::sync::Arc<super::dataset::RandomXDataset>> =
         std::sync::LazyLock::new(|| {
@@ -722,8 +718,13 @@ mod full_hash_tests {
         // can make a verifier stale — in full mode the key does not affect the
         // hash at all, since the Argon2d cache is not built and the
         // SuperscalarHash programs are light-mode only.
-        let other = native_loop_test_dataset();
-        v.rekey(b"native loop test key", other.clone());
+        //
+        // The second dataset is a synthetic all-zero one rather than a second
+        // real 2 GiB build (issue #7): what this test needs from it is only
+        // that it is a *different* `Arc` producing a *different* hash, which
+        // the `assert_ne!` at the end of this test enforces directly.
+        let other = std::sync::Arc::new(super::dataset::RandomXDataset::zeroed_for_test());
+        v.rekey(b"synthetic dataset key", other.clone());
         assert!(
             !v.has_cached_vm(),
             "cached VM survived a seed rotation — it would verify against the \
@@ -734,7 +735,7 @@ mod full_hash_tests {
 
         // And it must now hash against the new dataset, not the old one.
         let after = v.reference(&blob).expect("no reference after rotation");
-        let mut other_vm = vm::RandomXVm::new_full(b"native loop test key", other);
+        let mut other_vm = vm::RandomXVm::new_full(b"synthetic dataset key", other);
         other_vm.set_native_loop(false);
         assert_eq!(
             hex_encode(&after),
@@ -1214,11 +1215,20 @@ mod native_loop_diff_tests {
         );
     }
 
-    /// The 2 GiB dataset, built once for the whole module. Previously built
-    /// per test function, which meant two concurrent 2 GiB allocations plus two
-    /// 256 MiB Argon2d caches when both tests ran.
+    /// The 2 GiB dataset, built once for the whole test binary.
+    ///
+    /// This used to be a second `LazyLock` keyed `b"native loop test key"`,
+    /// which meant the binary held two 2 GiB datasets for its whole life
+    /// (issue #7). It now shares the one every known-answer vector uses. The
+    /// key is not a coverage input here: the programs these tests push through
+    /// both paths, and every value derived from them — `ProgramConfiguration`,
+    /// `ma`, `mx`, `dataset_offset`, the scratchpad — come from
+    /// `make_program_bytes(seed)` / `make_scratchpad(seed)`, and both the
+    /// reference path and the native loop read this same dataset. Dataset bytes
+    /// do reach the r-registers and so can steer CBRANCH, but they steer both
+    /// paths identically, which is the property under test.
     fn test_dataset() -> Arc<RandomXDataset> {
-        super::native_loop_test_dataset()
+        super::test_key_000_dataset()
     }
 
     /// The C1 memory-safety worst case, executed rather than argued.
@@ -1274,10 +1284,15 @@ mod native_loop_diff_tests {
 
     /// The emitted loop is a do-while: without the CBZ guard, `iterations == 0`
     /// wraps the counter to u64::MAX and runs ~2^64 times, scribbling the
-    /// scratchpad throughout. If this test hangs, that guard has regressed.
+    /// scratchpad throughout.
+    ///
+    /// Failure mode, since the dataset pointer below is a 64-byte dummy: a
+    /// regressed guard now reads wildly past it and the process almost
+    /// certainly faults, killing the whole libtest binary, rather than hanging
+    /// this one test. Either way it is a hard failure, but the symptom to look
+    /// for is "test binary crashed", not "test hung".
     #[test]
     fn native_loop_zero_iterations_terminates() {
-        let ds = test_dataset();
         let program_bytes = make_program_bytes(3);
         let (config, ma, mx, dataset_offset) = vm::derive_program_params(&program_bytes);
         let mut bytecode: Box<[BytecodeInstruction; RANDOMX_PROGRAM_SIZE_MAX]> =
@@ -1304,12 +1319,19 @@ mod native_loop_diff_tests {
         let mut sp = make_scratchpad(3);
         let sp_before = sp.clone();
         let mut out = [0u64; 4];
+        // Deliberately NOT a real dataset: at zero iterations the emitted code
+        // never dereferences this pointer. The prologue's only use of it is
+        // `add x22, x22, dataset_offset` — pointer arithmetic, emitted before
+        // the CBZ guard — and every load lives inside the loop body. Building a
+        // real 2 GiB dataset here would be 2 GiB and ~40 s spent to pass an
+        // address that is never read (issue #7).
+        let dummy_dataset = [0u64; 8];
         unsafe {
             let f = jit.get_loop_fn();
             f(
                 &mut nreg as *mut NativeRegisterFile,
                 sp.as_mut_ptr(),
-                ds.as_ptr_for_test(),
+                dummy_dataset.as_ptr() as *const u8,
                 0,
                 out.as_mut_ptr(),
             );

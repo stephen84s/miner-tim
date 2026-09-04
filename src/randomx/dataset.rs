@@ -132,6 +132,29 @@ impl RandomXDataset {
         RandomXDataset { items }
     }
 
+    /// An all-zero dataset of the correct shape, for tests that need a second
+    /// dataset that is merely *distinguishable* from the real one.
+    ///
+    /// This is NOT a RandomX dataset and no hash computed against it is a
+    /// RandomX hash. Its only consumer is `ShareVerifier`'s seed-rotation test,
+    /// whose subject is the verifier's state machine — does a rotation drop the
+    /// cached VM and adopt the new `Arc` — and not dataset correctness. That
+    /// test still hashes both sides against the same dataset and still asserts
+    /// the pre- and post-rotation hashes differ, so a dataset that failed to be
+    /// distinguishable would fail the test rather than pass it quietly.
+    ///
+    /// It exists because the alternative was a second 2 GiB `LazyLock` built
+    /// from a second key, which is what made the suite peak over 7 GB (issue
+    /// #7). The allocation here is still nominally 2 GiB, but it is
+    /// `alloc_zeroed` and never written, so only the pages a hash actually
+    /// reads become resident.
+    #[cfg(test)]
+    pub(crate) fn zeroed_for_test() -> Self {
+        RandomXDataset {
+            items: vec![[0u64; 8]; DATASET_ITEM_COUNT],
+        }
+    }
+
     /// Look up a precomputed dataset item by index.
     #[inline(always)]
     pub fn get_item(&self, item_number: u64) -> &[u64; 8] {

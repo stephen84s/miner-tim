@@ -3173,3 +3173,164 @@ All on the branch head, macOS host = M2 Max, Rust 1.97.1.
   Actions) is the plan of record for meeting it.
 - `REVIEW_PLAT01.md` was not modified — it is a reviewer's record. F11 and F12
   are addressed in the code and docs instead.
+
+---
+
+## 2026-09-04 — MEM-01: test-suite peak RSS cut from 8.16 GB to 6.23 GB (issue #7)
+
+### Request / goal
+Issue #7: the test binary held **two** never-freed 2 GiB `LazyLock` datasets,
+built from two different keys. Filed as a contributor-machine annoyance, then
+re-prioritised as a **hard blocker on issue #9** (GitHub Actions migration),
+because the free `macos-14` runner has 7 GB of RAM. Acceptance now includes a
+*measured* peak RSS that fits 7 GB with headroom.
+
+### Headline finding: the issue's estimate was wrong, and in the dangerous direction
+The issue (and a comment in `scripts/verify-jit.sh`) said "~4.5 GiB". Measured
+on an M2 Max, `cargo test --release --lib` peaked at **8.16 GB** — already
+*over* the 7 GB budget. Had #9 landed first it would have been red from day one,
+presenting as intermittent flakes rather than a memory ceiling. This is exactly
+the outcome the re-prioritisation was trying to avoid, and it was only visible
+because the number was measured rather than inherited.
+
+### Files changed
+- `src/randomx/tests.rs` — deleted `native_loop_test_dataset()`; the
+  native-loop differential tests now share `test_key_000_dataset()`. The
+  verifier seed-rotation test takes a synthetic dataset instead of a second
+  real build. `native_loop_zero_iterations_terminates` takes a 64-byte dummy
+  pointer instead of forcing a 2 GiB build.
+- `src/randomx/dataset.rs` — added `RandomXDataset::zeroed_for_test()`
+  (`#[cfg(test)]`).
+- `scripts/verify-jit.sh` — replaced the stale "~4.5 GiB" comment with the
+  measured before/after and the `--test-threads` mechanism.
+- `CLAUDE.md` — task-board row.
+
+### Behaviour / API changes
+None outside `cfg(test)`. No production code path changed.
+
+### The coverage question, answered explicitly
+The issue proposed sharing one key between the two suites. The risk is that
+the differential tests draw their value from program diversity, and that
+collapsing keys would quietly shrink it. It does not, and here is why:
+
+- Every input that shapes what `native_loop_diff_tests` exercises is derived
+  from the **seed**, not the key: `make_program_bytes(seed)` produces the
+  program, and `vm::derive_program_params` turns that into the
+  `ProgramConfiguration`, `ma`, `mx` and `dataset_offset`; the scratchpad comes
+  from `make_scratchpad(seed)`. The documented tuning ("seed 78 has
+  dataset_offset at 99.67% of its maximum") lives in the seed list. Nothing in
+  the tests' rationale ever selected `b"native loop test key"` for coverage.
+- Both sides are handed the **same** `&dataset`. Dataset bytes are not inert —
+  they reach the r-registers and can therefore steer CBRANCH — but they steer
+  the reference path and the native loop identically, which is precisely the
+  property under test. The swap is **lateral, not reductive**.
+- The evidence for that is the structural argument above. The tests passing
+  after the swap is necessary but is *not* evidence of equal coverage, and is
+  not offered as such.
+
+### The constraint the issue missed
+`share_verifier_builds_lazily_and_resets_on_seed_rotation` needs two
+**genuinely distinct** datasets: R9-F2 established that re-keying with the same
+`Arc` degenerates `holds_dataset` into `ptr_eq(x, x)`, and the test ends with an
+`assert_ne!` on the pre- and post-rotation hashes. So collapsing the keys does
+**not**, on its own, remove a dataset — something still has to supply a second
+one. That is why `zeroed_for_test()` exists.
+
+`zeroed_for_test()` is an all-zero allocation of the correct shape. It is not a
+RandomX dataset and no hash against it is a RandomX hash — the doc comment says
+so. It is sound here because this test's subject is the `ShareVerifier` state
+machine (does a rotation drop the cached VM and adopt the new `Arc`), not
+dataset correctness; both sides of the comparison hash against the same
+synthetic dataset; and the existing `assert_ne!` still fails the test if the two
+datasets are not distinguishable. `vm_is_on_reference_path()` and the
+`assert_ne!` were left untouched. Rejected alternatives: shrinking
+`DATASET_ITEM_COUNT` under `cfg(test)` (breaks every known-answer vector) and
+building the second dataset transiently (still a full 2 GiB build, in both
+profiles).
+
+### The dummy pointer
+Verified before relying on it: in `compile_native_loop`, the only use of the
+dataset base before the CBZ zero-iteration guard is
+`e.add_reg(X22, X22, dataset_offset)` — pointer arithmetic, no load and no
+`PRFM`. Every dataset load is inside the loop body. At zero iterations the
+pointer is never dereferenced.
+
+Consequence recorded in the test's doc comment: a regressed guard now reads
+wildly past a 64-byte dummy and almost certainly **faults, killing the whole
+libtest binary**, rather than hanging this one test. Still a hard failure, but
+the symptom to look for changed and the old comment promising a hang would have
+misled.
+
+### Verification
+All on an M2 Max (12 logical P-cores), `caffeinate -i`, `/usr/bin/time -l`
+`maximum resident set size` (bytes) of the **test binary** — system-wide use is
+higher, so #9 still has the OS, runner agent and toolchain to fit.
+
+| Measurement | Before | After |
+|---|---|---|
+| release `--lib`, default parallelism (12 threads) | **8.16 GB** (3 runs: 7.85 / 8.16 / 8.15) | **6.23 GB** (3 runs: 6.01 / 6.23 / 6.23) |
+| release `--lib`, `--test-threads=3` (models macos-14's core count) | not measured | **4.06 GB** |
+| release `--lib`, `--test-threads=1` (structural floor) | not measured | **3.25 GB** |
+| debug, `verify-jit` filter | **6.77 GB** | **4.50 GB** |
+| release `--lib` wall clock | 94 s | 50 s |
+| debug `verify-jit` filter wall clock | 316 s | 193 s |
+
+Read the table carefully: the two `--test-threads` rows are **post-fix only**
+and were deliberately not measured pre-fix. They are not a before/after delta —
+they show how the *same* post-fix build behaves at different parallelism. The
+only true before/after pairs are the 12-thread release row and the debug row.
+
+Mechanism, for #9's benefit: peak scales with libtest's `--test-threads`
+(default = core count) because each concurrent test may hold its own 256 MiB
+Argon2d cache. The runner has 3 cores, so **4.06 GB is the figure #9 should
+plan against — 2.9 GB of headroom** — and `--test-threads` is the lever if the
+runner ever surprises them. Quote it as "the fix's result at the runner's
+parallelism", not as "the fix's result".
+
+The debug row was measured by running the filtered test binary directly under
+`/usr/bin/time -l`, not via `make verify-jit`, which adds cargo and rustc on
+top; reproducing it through the Make target will read higher.
+
+The 1.93 GB saving at 12 threads also empirically backs the doc comment's claim
+that `zeroed_for_test()` is mostly non-resident: the baseline held two
+fully-touched 2 GiB datasets (~4.2 GB); afterwards one real plus the zeroed one,
+for a net cost of roughly 0.2 GB resident.
+
+Checks:
+- `make verify-jit`: **GATE PASSED on Darwin arm64 — 92 tests, debug + release**
+  (`92 passed; 0 failed; 1 ignored; 40 filtered out` in each profile).
+- `cargo clippy --all-targets -- -D warnings`: **exit 0**.
+- `make check`: **exit 0**.
+- `cargo test --release`: **131 passed, 2 ignored, 0 failed** (lib) and
+  **10 passed** (bin) — baseline unchanged.
+
+`EXPECTED_PASSES` in `scripts/verify-jit.sh` was **deliberately left at 92**: no
+test was added or removed, only the dataset three of them read, and both gate
+runs confirmed 92. It was reviewed, not overlooked.
+
+### Assumptions and constraints
+- Scope was deliberately held at the dataset. The remaining peak is dominated
+  by concurrent 256 MiB Argon2d caches for `b"test key 000"`. Sharing those
+  behind a `LazyLock` was **considered and rejected**: it would make 256 MiB
+  permanent (beside the 2 GiB dataset) to remove transients that only exist at
+  parallelism the target runner cannot reach, and it would degrade diagnostics
+  — an argon2d regression would surface as "LazyLock init panicked" across five
+  tests instead of one clean known-answer failure in `test_cache_initialization`.
+- `zeroed_for_test()` is gated `#[cfg(test)]` only, not arch-gated, and its
+  single caller (`share_verifier_builds_lazily_and_resets_on_seed_rotation`) is
+  likewise not arch-gated, so it stays reachable under GitLab's x86_64 Linux
+  `clippy -D warnings` job. Verified by inspecting both attributes; a real
+  cross-compile could **not** be run — this host has no
+  `x86_64-linux-gnu-gcc`, so `cargo clippy --target x86_64-unknown-linux-gnu`
+  fails in `cc-rs` before reaching the lint. That check is therefore an
+  inspection, not an execution.
+- The 8.16 GB baseline is a scheduling outcome — it needs both `LazyLock`s live
+  at once — so a single run can understate it. Three runs were taken and the
+  max reported; the structural guarantee is the two never-freed statics, and
+  the measurement confirms it.
+- `test_full_mode_matches_light_mode` remains `#[ignore]`d and still builds
+  `test_key_000_dataset()` when run manually. Unchanged here and out of scope:
+  it is excluded from every default run, so it contributes nothing to the
+  measured peaks above.
+- `REVIEW_*.md` files were not modified — they are reviewers' records.
+- Not pushed, no MR opened, per the task's instruction.

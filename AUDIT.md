@@ -3114,14 +3114,15 @@ Three refusals, none silent:
 ### Verification
 All on the branch head, macOS host = M2 Max, Rust 1.97.1.
 
-- **`make verify-jit` (macOS aarch64) — GATE PASSED, exit 0.**
+- **`make verify-jit` (macOS aarch64) — GATE PASSED, exit 0.** Numbers from the
+  final run against the committed script, on an otherwise idle machine:
   - `debug profile (debug_assert! live)`: `test result: ok. 92 passed; 0 failed;
-    1 ignored; 0 measured; 40 filtered out; finished in 497.00s` (497 s because
-    the drift experiment below was running concurrently; 307 s standalone).
+    1 ignored; 0 measured; 40 filtered out; finished in 309.43s`.
   - `release profile (shipping profile)`: `test result: ok. 92 passed; 0 failed;
-    1 ignored; 0 measured; 40 filtered out; finished in 195.04s`.
+    1 ignored; 0 measured; 40 filtered out; finished in 88.36s`.
   - Final lines: `verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug +
-    release`.
+    release`. (An earlier run of the same gate logged 497 s / 195 s because the
+    drift experiment below was competing for CPU — same 92/92 result.)
 - **Drift experiment (negative test of the gate itself).** A copy of the script
   with `randomx::jit::` changed to `randomx::jit::module_that_was_renamed::`:
   `test result: ok. 26 passed; ...` and then

@@ -120,10 +120,10 @@ run_group() {
 # imm19 range in `jit/compiler.rs` — had therefore never executed in the
 # profile that gets cited as evidence. Issue #6 / issue #2 mitigation 2.
 #
-# The whole set runs here, not a subset: it was measured at 307 s on an idle
-# M2 Max against 177 s for the JIT-unit-plus-differential subset (the gate's own
-# first run logged 497 s, under CPU contention), and the known-answer
-# vectors push ~80 further real programs through the same assertions. Cheap
+# The whole set runs here, not a subset: it was measured at ~308 s on an idle
+# M2 Max against 177 s for the JIT-unit-plus-differential subset, and the
+# known-answer vectors push ~80 further real programs through the same
+# assertions. Cheap
 # enough that "which profile is authoritative" needs no caveat — both run.
 run_group "debug profile (debug_assert! live)" ""
 

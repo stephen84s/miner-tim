@@ -10,12 +10,12 @@ Code change is confined to `src/randomx/jit/memory.rs` (+`mod.rs` comments);
 | # | Item | Status |
 | :- | :- | :- |
 | 1 | Darwin path genuinely unchanged? | **done — unchanged** |
-| 2 | Linux path correct (constants, alignment, ordering, cache clear)? | in progress — constants + `__clear_cache` verified |
+| 2 | Linux path correct (constants, alignment, ordering, cache clear)? | **done — correct** |
 | 3 | In-place rewrite test — does it actually fail if cache maintenance is removed? | **done — guard is live on Linux** |
 | 4 | Privatisation of `enable_write`/`enable_execute` | done |
-| 5 | `compile_error!` + module gate | in progress |
-| 6 | Implementer's disclosures | not started |
-| R | Reproduce claimed test results (macOS + Linux aarch64) | not started |
+| 5 | `compile_error!` + module gate | **done — fires cleanly** |
+| 6 | Implementer's disclosures | **done — all honest; two narrowed** |
+| R | Reproduce claimed test results (macOS + Linux aarch64) | in progress |
 
 ## Findings
 
@@ -144,3 +144,70 @@ This is the opposite of the earlier "assertion that could not fail" problem in
 this repo's history. The test earns its place, and it also empirically confirms
 that Linux `mprotect` does **not** imply I-cache maintenance — the `__clear_cache`
 call is load-bearing, not defensive.
+
+### F6 — Same mutation on macOS is also caught. (informational)
+
+Symmetric experiment on a scratchpad copy of the tree (the working tree was not
+touched): replaced `sys_icache_invalidate(p, code_len)` with a no-op inside the
+Darwin `enable_execute`.
+
+- `cargo test --release --lib randomx::jit::` → **65 passed, 1 failed**, again
+  only `test_jit_memory_rewrite_in_place`, again `left: 42 / right: 55`.
+- Repeated **200 times** standalone: **0 passed / 200 failed**.
+
+So the new test is a live guard on *both* platforms, deterministically. Worth
+noting that this is new coverage for Darwin too: before this branch, nothing in
+the tree would have caught a removed `sys_icache_invalidate`, even though the
+two-pass native-loop compile at `compiler.rs:834` depends on it. That is a small
+net safety gain for the shipping platform.
+
+### F7 — Linux mechanics: ordering, alignment and range are all right. (informational)
+
+- **Ordering.** `write_code` is `assert` → `mprotect(R|W)` → `copy` → set
+  `code_len` → `mprotect(R|X)` → `__clear_cache(p, p+code_len)`. Writes precede
+  the `dc cvau`, and the region is never `W|X` — the security property claimed.
+  Clearing *after* the `mprotect` is fine: `DC CVAU` / `IC IVAU` need only read
+  permission, which `PROT_READ|PROT_EXEC` grants, and the tests execute the code
+  successfully 66/66.
+- **Alignment.** `mprotect` requires a page-aligned `addr`; `mmap` guarantees it.
+  `len` is rounded up to a page by the kernel, so the 4096-byte test regions and
+  the 65536-byte `JIT_CODE_SIZE` are both fine. `getconf PAGESIZE` = 4096 in the
+  container; a 64K-page kernel is untested but not defective for the same reason.
+- **Range.** `__clear_cache` covers `[p, p+code_len)`, i.e. exactly the bytes just
+  written. Bytes beyond `code_len` left over from a previous, longer program are
+  never reached (every emitted program ends in `RET`), and memory and I-cache
+  agree about them anyway.
+- **Error handling.** `protect` uses `assert!` (not `debug_assert!`), so the
+  `mprotect` check survives `--release`. Format arguments — including
+  `std::io::Error::last_os_error()` — are only evaluated on failure, so there is
+  no per-call cost. Verified against the repo's history of vacuous assertions:
+  this one is real, and the mutation experiments above trip it nowhere, meaning
+  `mprotect` never fails in the tested paths.
+- **`as_fn` before `write_code`.** New platform divergence: on `main` the region
+  was mapped `RWX`, so calling `as_fn()` on a virgin region executed garbage; on
+  Linux the virgin region is `R|W`, so the same call is a SIGSEGV. Unreachable in
+  practice — `JitCompiler::{get_fn,get_loop_fn}` both
+  `assert_eq!(self.kind, Some(...))` and `kind` is `None` until `write_code`
+  (`compiler.rs:141-147, 165-171`). Informational only.
+
+### F8 — `compile_error!` fires cleanly; the module gate is sound. (informational)
+
+`rustc --edition 2024 --crate-type lib --target aarch64-linux-android
+src/randomx/jit/memory.rs` produces **exactly one error** — the `compile_error!`
+text, pointing at `memory.rs:24`, with the fix and the Android note spelled out.
+No cascading "cannot find function `alloc` in module `platform`" noise: rustc
+aborts after expansion, before name resolution. The "unsupported OS fails
+clearly" claim is fully true, better than I expected.
+
+Non-aarch64 is unaffected: `randomx/mod.rs` still gates `pub mod jit` on
+`target_arch = "aarch64"`, so `memory.rs` is never even parsed elsewhere.
+`cargo check --target x86_64-apple-darwin --all-targets` is **clean** on this
+branch. GitLab CI runs on x86_64 Linux and therefore does not compile the JIT at
+all, so `.gitlab-ci.yml` needed no change and none was made — correct.
+
+The decision to leave the gate at `target_arch = "aarch64"` rather than narrowing
+to `all(aarch64, any(macos, linux))` is defensible: the ~40 `cfg` sites in
+`vm.rs` are on the shipping path, and the failure mode of not narrowing is a
+build error with a message that names the file and the fix, which is the right
+failure mode. Newly hard-failing targets that previously compiled: `aarch64-apple-ios`
+and friends (`target_os = "ios"`, not `"macos"`). Nobody ships those here.

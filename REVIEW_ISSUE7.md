@@ -331,3 +331,47 @@ The delta is 663 s of CPU. One `RandomXDataset::generate(cache, programs, 8)` is
 generating a second 2 GiB dataset — 663 ≈ 2 × 330 vs 1 × 330. No test lost work;
 one dataset build was removed. Combined with the byte-identical `--list` output
 (item 5), this is about as direct as "coverage is unchanged" gets.
+
+---
+
+## FINDING F3 (minor, but it is a checked-in measurement that does not reproduce) — the debug RSS figure in `scripts/verify-jit.sh` is understated by ~0.9 GB
+
+`scripts/verify-jit.sh` now carries, as a checked-in comment:
+
+> Max RSS on an M2 Max for this filtered set in the debug profile: 6.77 GB
+> before that change, **4.50 GB after**. Both figures are the *test binary*
+> measured directly (`/usr/bin/time -l target/debug/deps/minertim-* <filters>`)
+
+I reproduced that exact procedure — same binary, same six filters, default
+`--test-threads` — twice:
+
+| run | `maximum resident set size` | wall |
+|---|---|---|
+| 1 | 5,425,659,904 (**5.43 GB**) | 195.26 s, 92 passed |
+| 2 | 5,425,758,208 (**5.43 GB**) | 198.05 s, 92 passed |
+
+The two samples differ by 98 KB, so this is **not run-to-run variance** — the
+figure is simply ~0.93 GB (21%) higher than the one committed. Wall clock
+reproduces fine (claimed 193 s, measured 195/198 s), so the run itself matches;
+only the memory number does not.
+
+Why this is worth a finding rather than a nit: the audit's own headline
+criticism of issue #7 is that an *unmeasured, understated* number ("~4.5 GiB")
+would have let #9 be planned against a budget it could not meet. The replacement
+comment repeats that failure mode in miniature — it understates, and it
+understates the profile (`debug`) that `make verify-jit` is documented as
+**mandatory** for. 5.43 GB still fits 7 GB, so nothing is broken today; but the
+number should be corrected before anyone plans the debug gate's runner against
+it. (Release numbers, by contrast, reproduced to the quoted digit — see item 4.)
+
+I am re-measuring the "6.77 GB before" figure to establish whether the *delta*
+claim survives; result appended below.
+
+## FINDING F4 (nit) — debug figures sit under the release banner
+
+The new comment block is placed between the `# 2. Release profile` banner and
+`run_group "release profile ..."`, but the numbers it quotes are the **debug**
+profile's. It does say "in the debug profile", so it is not false, only
+misfiled — the debug `run_group` is ~15 lines above. A reader scanning the
+release section still finds no release RSS figure. Move it under section 1, or
+quote both profiles.

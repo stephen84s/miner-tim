@@ -95,6 +95,22 @@ mod platform {
 // ============================================================================
 // Linux backend — mmap(RW) / mprotect(RX) + __clear_cache
 // ============================================================================
+//
+// Correct, but deliberately not optimised. `write_code` issues **two
+// `mprotect` syscalls per compile** here, where Darwin flips a userspace
+// per-thread bit (`pthread_jit_write_protect_np`) twice. Production hashing
+// compiles 8 programs per hash, so a Linux aarch64 *miner* would pay ~16
+// syscalls per hash, each a kernel VMA permission change with the TLB
+// shootdown that implies.
+//
+// That cost is unreachable from anything this project ships: `make dist`
+// produces an `apple-m1` tarball only, and this backend exists so the JIT's
+// *tests* can run on a second operating system (`make verify-jit-linux`,
+// issue #2) rather than resting on one developer's Mac. No Linux throughput
+// has ever been measured here and none is claimed — do not read "the JIT works
+// on Linux" as "the JIT is fast on Linux". Making it fast would mean a dual
+// mapping (one RW alias and one RX alias of the same pages) so the hot path
+// stops calling `mprotect` at all. Recorded from REVIEW_PLAT01.md finding F11.
 #[cfg(target_os = "linux")]
 mod platform {
     use std::ptr;

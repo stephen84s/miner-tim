@@ -3016,3 +3016,159 @@ in the MR) are the next step.
 Self-hosted runner was flagged to the user as carrying a real risk on a public
 repo — a fork's merge request can run arbitrary code on the runner host unless
 it is restricted to protected branches and disabled for forks. Not chosen.
+
+---
+
+## 2026-09-04 — PLAT-02: the JIT gate made explicit (issue #2, interim mitigations)
+
+### Request / goal
+Issue #2's acceptance criteria minus the arm64 CI job, which the user ruled out
+on 2026-09-04 (see the decision note in the PLAT-01 entry above): a hard local
+gate for the aarch64 JIT (`make verify-jit`), the same gate under native Linux
+aarch64 (`make verify-jit-linux`), close the debug/release gap (issue #6), state
+plainly in README/CLAUDE.md which platforms CI validates and which rest on a
+human, record the reviewer's F11 Linux syscall cost somewhere durable, and
+document the gate as mandatory before any MR touching `src/randomx/jit/`.
+
+### Files changed
+- `scripts/verify-jit.sh` — **new.** The gate itself; runs on either host.
+- `Makefile` — `verify-jit`, `verify-jit-linux`, help entries, a comment on
+  `test:` saying it is not the JIT gate.
+- `README.md` — new "Platform support and how it is verified" section; build
+  table; two stale annotations the reviewer flagged as F12 (`:14`, `:111`) and
+  the stale "87 test vectors" line next to them; JIT section no longer says
+  macOS-only.
+- `CLAUDE.md` — protocol rule 6 (the mandatory gate); "Platform coverage — what
+  CI proves, and what it cannot"; build commands; project-tree annotations;
+  PLAT-02 task-board row.
+- `src/randomx/jit/memory.rs` — comment only: F11, the Linux `mprotect` cost.
+- `AUDIT.md` — this entry.
+
+No behaviour change. The only source file touched is a comment block.
+
+### What the gate runs, and why those tests
+`scripts/verify-jit.sh` drives `cargo test --lib` with six substring filters
+derived from `cargo test --release --lib -- --list`, not guessed:
+`randomx::jit::` (66 unit tests), `randomx::tests::native_loop_diff_tests::`
+(4 differential), `randomx::tests::full_hash_tests::` (15 + 1 ignored),
+`randomx::tests::full_hash_v2_tests::` (2), `randomx::tests::v2_jit_tests::`
+(2), `randomx::vm::native_loop` (3) — **92** tests.
+
+Three ways a gate like this can go green having proved nothing, all closed:
+1. **Wrong host.** On x86_64 every one of those tests is `cfg`'d out and libtest
+   exits 0. The script refuses to run unless `uname -m` is `arm64`/`aarch64`.
+2. **Filter drift.** libtest also exits 0 when a filter matches *nothing*, so a
+   renamed module would silently empty the gate. The script compares the run
+   count against `EXPECTED_PASSES=92` and fails on any mismatch, in either
+   direction. Verified by deliberately breaking one filter
+   (`randomx::jit::module_that_was_renamed::`): the run reported 26 passed and
+   the script failed with "ran '26' tests, expected 92" — a plain
+   `cargo test` there would have exited 0.
+3. **Inert JIT.** Every known-answer vector still passes when JIT allocation
+   fails, because the interpreter fallback returns the same hash (issue #4's
+   shape). `full_mode_v1_vm_reports_the_native_loop_effective` is the only test
+   that hard-requires a live allocation; it is inside the filter set and is
+   marked LOAD-BEARING in the script so a future trim cannot quietly drop it.
+
+### The debug/release gap (issue #6, issue #2 mitigation 2) — decision: run both
+Measured before deciding, on an M2 Max:
+
+| Set | Debug | Release |
+| :- | :- | :- |
+| JIT unit + differential only | 177 s | 45 s |
+| The full 92-test gate | 307 s | 195 s |
+
+Running the *whole* gate in debug costs 130 s more than the reduced subset, so
+the reduced-subset compromise the task allowed was not needed: **both profiles
+run the same 92 tests**, and no "which profile is authoritative" caveat is
+required. Debug is where the native loop's `debug_assert!` guards actually
+execute — the imm12/imm7 encoding ranges in `jit/aarch64.rs`, the CBRANCH
+forward-target rule, the CBZ zero-iteration patch range and the back-branch
+imm19 range in `jit/compiler.rs` — all of which are compiled out of release,
+which is the profile every recorded MR !1 measurement used. Release stays the
+profile the miner ships and the one hash values are quoted from. The known-answer
+vectors push roughly 80 further real programs through those assertions than the
+differential tests alone do, which is the reason for not trimming the debug set.
+
+Prohibitive-cost escape hatch (2 GiB datasets built unoptimised) was checked and
+did not materialise: Argon2d + dataset generation in debug is slow but bounded —
+the full debug gate is 5 minutes on the host.
+
+### `make verify-jit-linux` mechanics
+`docker run --rm --platform linux/arm64 -v $(CURDIR):/src:ro -v <named
+volume>:/target -e CARGO_TARGET_DIR=/target rust:1.97.1 ./scripts/verify-jit.sh`.
+The repo is mounted **read-only** — that, rather than the env var alone, is what
+guarantees the host's `target/` (macOS artifacts) and `Cargo.lock` cannot be
+touched; `--locked` in the script means an out-of-date lock file fails rather
+than being rewritten. Named volumes keep the container's target dir and cargo
+registry across runs so re-runs are incremental. The image is pinned to
+`rust:1.97.1`, the image every recorded Linux result on this branch used.
+
+Three refusals, none silent:
+- no `docker` CLI → message with the `brew install colima docker` line;
+- daemon unreachable → "colima is probably not running", the `colima start`
+  line, and an explicit "refusing to skip";
+- daemon architecture not `aarch64` → refuses, because a linux/arm64 container
+  on an x86_64 daemon runs under qemu and would prove nothing about real ARM64.
+
+### Verification
+All on the branch head, macOS host = M2 Max, Rust 1.97.1.
+
+- **`make verify-jit` (macOS aarch64) — GATE PASSED, exit 0.**
+  - `debug profile (debug_assert! live)`: `test result: ok. 92 passed; 0 failed;
+    1 ignored; 0 measured; 40 filtered out; finished in 497.00s` (497 s because
+    the drift experiment below was running concurrently; 307 s standalone).
+  - `release profile (shipping profile)`: `test result: ok. 92 passed; 0 failed;
+    1 ignored; 0 measured; 40 filtered out; finished in 195.04s`.
+  - Final lines: `verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug +
+    release`.
+- **Drift experiment (negative test of the gate itself).** A copy of the script
+  with `randomx::jit::` changed to `randomx::jit::module_that_was_renamed::`:
+  `test result: ok. 26 passed; ...` and then
+  `verify-jit: FAIL — debug profile (debug_assert! live) ran '26' tests,
+  expected 92.` Bare `cargo test` exits 0 in that situation; the gate does not.
+- **`${PIPESTATUS[0]}` status path** checked separately —
+  `bash -c 'set -uo pipefail; (echo x; exit 3) | tee /dev/null >/dev/null;
+  echo ${PIPESTATUS[0]}'` prints 3, so a failing `cargo test` behind the `tee`
+  is caught rather than masked by the pipeline's exit code.
+- **`make verify-jit-linux` (native linux/arm64, colima, no emulation)** —
+  **GATE PASSED, exit 0.** Container: `aarch64, 4 cpu, 7.7 GiB`, no emulation.
+  - `debug profile`: `test result: ok. 92 passed; 0 failed; 1 ignored; 0
+    measured; 40 filtered out; finished in 713.10s`.
+  - `release profile`: `test result: ok. 92 passed; 0 failed; 1 ignored; 0
+    measured; 40 filtered out; finished in 193.02s`.
+  - `verify-jit: GATE PASSED on Linux aarch64 — 92 tests, debug + release`.
+  - ~15 minutes wall-clock on 4 vCPUs; the debug profile dominates because both
+    2 GiB datasets are generated unoptimised. Noted in the Makefile so nobody
+    assumes the target has hung.
+  - Honest note on the first attempt: `scripts/verify-jit.sh` was edited (a
+    comment) *while* the container was executing it, and bash — which reads a
+    script incrementally — re-ran the debug group a second time before
+    continuing. Results were identical (92/92 three times), but the log was
+    misleading, so the gate was re-run untouched and the numbers above are from
+    that clean run. Do not edit the script while a gate is in flight.
+- `cargo clippy --all-targets -- -D warnings` on macOS: **exit 0**.
+- `make check`: **exit 0**.
+- Baseline suite unchanged: `cargo test --release` → **131 passed, 2 ignored,
+  0 failed** (lib) and **10 passed** (bin).
+
+### Assumptions and constraints
+- The gate runs `--lib` only. The 10 bin tests and the two `#[ignore]`d tests
+  (`test_full_mode_matches_light_mode`, `test_hash_profile`) are **not** in it;
+  `make test` / `cargo test --release` remain the way those run.
+- `EXPECTED_PASSES` is a hand-maintained constant. Adding or removing a test in
+  the filtered modules **will** fail the gate until it is updated in the same
+  commit. That is the intended trade: a number someone must touch deliberately,
+  in exchange for a filter that cannot silently empty.
+- `--locked` means a stale `Cargo.lock` fails the gate rather than being
+  rewritten — deliberate, since the Linux run mounts the repo read-only.
+- Clippy in the container is still unavailable (`rust:1.97.1` ships no clippy
+  component), unchanged from PLAT-01: **lint evidence stays macOS-only**.
+- The gate does not measure hashrate and says nothing about performance. It is
+  a correctness gate. Linux throughput in particular has never been measured
+  and the Linux backend is known to be syscall-heavy (F11).
+- No `.gitlab-ci.yml` change, by the user's decision of 2026-09-04. Issue #2's
+  CI acceptance criterion therefore remains unmet by design; issue #9 (GitHub
+  Actions) is the plan of record for meeting it.
+- `REVIEW_PLAT01.md` was not modified — it is a reviewer's record. F11 and F12
+  are addressed in the code and docs instead.

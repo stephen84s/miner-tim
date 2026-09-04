@@ -1197,7 +1197,7 @@ miss: it forks from the **Android-era** history, which never contained
   regenerable `target/`.
 
 ### Published (user approved 2026-08-17)
-- `git push --force origin main`: `c17f0f0 -> 3eb834d` (forced).
+- `git push --force origin main`: `c17f0f0 -> ca8db7a` (forced).
 - `git push --force --tags`: all three force-updated; verified still
   **annotated** (type=tag, messages preserved) and peeling to the rewritten
   commits. `git ls-remote` matches local exactly.
@@ -1573,7 +1573,7 @@ Independent review round 5 (see `REVIEW_MR1.md`, finding F1) found that
 `benches/nativeloop_ab.rs` built its **baseline** arm with `RandomXVm::new_full`
 and relied on the constructor default for it, calling `set_native_loop` only on
 the native arm. That was correct when the harness was written — the default was
-`false` — but the *same commit* (260bc89) flipped the default to `true`. From the
+`false` — but the *same commit* (cf77831) flipped the default to `true`. From the
 committed tree the "baseline" was a second native-loop arm, so the benchmark
 measured the native loop against itself. The reviewer re-ran it and got -0.02%,
 "NO MEASURABLE DIFFERENCE".
@@ -1723,7 +1723,7 @@ would mean tearing down a VM whose scratchpad is live.
 
 ## 2026-09-02 - Review round 6 findings applied + verify-before-submit
 
-### Review round 6 (delta review of d49535a..HEAD)
+### Review round 6 (delta review of 4a4f5ca..HEAD)
 The reviewer was asked to check the fixes it had itself prompted. It found real
 defects **in those fixes** — recorded here because the pattern (a fix that looks
 right and is subtly wrong) is the argument for delta reviews existing at all.
@@ -2034,11 +2034,11 @@ remainder is listed below rather than left implicit.**
 ## 2026-09-03 - Review round 8: no blockers, no majors. MR !1 declared mergeable.
 
 The first round in four without a major. Independent verification of the three
-previously-unreviewed commits (`e6724ce`, `3fcc388`, `3c281dc`).
+previously-unreviewed commits (`35d4507`, `d19e7c3`, `a8589c8`).
 
 **Correction to my own brief:** I asked for a review of "three commits" in
-`3fcc388..3c281dc`. That range contains **one**. The reviewer spotted it,
-worked out which three I meant, and reviewed all of them — `e6724ce` had landed
+`d19e7c3..a8589c8`. That range contains **one**. The reviewer spotted it,
+worked out which three I meant, and reviewed all of them — `35d4507` had landed
 before its round-7 doc commit and so fell outside the range I gave. Recorded
 because a reviewer silently accepting a wrong scope is how a commit goes
 unreviewed while everyone believes it was covered.
@@ -2508,7 +2508,7 @@ Not a contributing factor: tool discipline. 558 shell calls averaged 0.8 KB of
 output; all tool results across the session totalled 0.55 MB.
 
 ### Fix
-- `REVIEW_MR1.md` split (`ea86ec9`): **175 KB → 6.5 KB**. Head keeps the standing
+- `REVIEW_MR1.md` split (`b3e928b`): **175 KB → 6.5 KB**. Head keeps the standing
   protocol, status, open-items table, a one-line index of every closed finding
   R5-F1…R12-F2, and the current round's brief and ledger. Full round transcripts
   moved verbatim to `REVIEW_MR1_ARCHIVE.md`, to be grepped by finding ID.
@@ -2520,7 +2520,7 @@ output; all tool results across the session totalled 0.55 MB.
   what produced this. Both halves recorded — continuity still matters, because
   every round from 5 on found a defect in the previous round's *fix*.
 
-### Round 13 outcome (`74c8186..6765b17`)
+### Round 13 outcome (`2a6b5fa..593a410`)
 **Mergeable. No blockers, no majors.** Three new findings, all open:
 
 - **R13-F1 (MINOR)** — answers round 13's priority 1: the two expressions **do**
@@ -2836,7 +2836,7 @@ comment at the site says so.
 - `REVIEW_ISSUE4.md` is the reviewer's record and was not modified.
 
 ### Merge record (2026-09-04)
-MR !2 merged into `main` as `10b4546`, pipeline green on `af3825b` (rust:test
+MR !2 merged into `main` as `1790a9f`, pipeline green on `c8406c1` (rust:test
 18m46s, rust:audit, rust:lint all success). GitLab issues **#3 and #4 closed
 automatically** by the MR description's closing pattern.
 
@@ -3401,7 +3401,7 @@ three x86_64 jobs (`rust:lint`, `rust:audit`, `rust:test`) and add the two jobs
 that are the point of the move — `macos-14` (aarch64 + Darwin, the shipping
 platform) and `ubuntu-24.04-arm` (native Linux aarch64). Workflows only: no
 `.gitlab-ci.yml` change, no README/CLAUDE.md URL rewrites, no release flow, no
-GitHub authentication. Branch `ci/github-actions`, based on `main` at `0f2d75a`.
+GitHub authentication. Branch `ci/github-actions`, based on `main` at `f02950b`.
 
 Motivation, from issue #9: GitLab's shared runners are x86_64 Linux, an arm64
 runner probe returned `no_matching_runner`, no GitLab SaaS tier runs macOS at
@@ -3539,3 +3539,79 @@ it from "mandatory" is issue #9's follow-up, not this change.
   assertion.
 - Queue times for free macOS runners are unknown; issue #9 notes they may be
   significant.
+
+---
+
+## 2026-09-05 — Object format converted SHA-256 → SHA-1 for the GitHub migration
+
+### Why
+GitHub does not support SHA-256 repositories. Established first-hand, not
+assumed: `git push` was rejected with *"the receiving end does not support this
+repository's hash algorithm"*, and GitHub's own protocol handshake advertises
+`object-format=sha1` — for this repo and for `git/git`, `torvalds/linux` and
+`rust-lang/rust` alike, so it is platform-wide and not a setting on our project.
+
+Everything settable was checked before converting: `gh repo create` exposes no
+hash flag; REST `POST /user/repos` has 23 body parameters and none relate to
+object format; GraphQL `CreateRepositoryInput` has 10 fields and none do.
+`GET /repos/:owner/:repo/hash-algorithm` **does** exist and returns
+`{"hash_algorithm":"sha1"}`, but `PATCH` and `PUT` on it both 404, and
+`PATCH /repos/:owner/:repo -f hash_algorithm=sha256` is **silently ignored** —
+it returns 200 with the field absent, which would be an easy way to believe the
+change had worked.
+
+GitLab, by contrast, advertises `object-format=sha256`: this repo is SHA-256
+precisely because GitLab shipped that support ahead of GitHub. The migration
+gives it up deliberately, in exchange for CI that can execute the aarch64 JIT.
+
+### Method
+`git fast-export --all --show-original-ids` → `git fast-import` into a repo
+initialised with `--object-format=sha1`, built **alongside** the original at
+`miner-tim-sha1`, never in place.
+
+One line had to be stripped: `M 160000 … .claude/worktrees/platform-neutral`, an
+**accidental gitlink** committed in `7851bdc` (the first agent-protocol commit).
+There is no `.gitmodules`, so it was never a declared submodule, and the
+directory is effectively empty on disk. Its SHA-256 dataref cannot be remapped,
+so it is dropped. This is the only content difference between the two repos.
+
+### Verification
+- Commits **185 → 185**, tags **3 → 3**.
+- `git archive main | tar -x` on both, then `diff -r`: **identical except
+  `.claude/worktrees`**, as intended.
+- `git fsck` on the converted repo exits 0.
+- Author, email, date and message preserved (checked at HEAD).
+- Old→new mapping rebuilt from fast-export's `original-oid` lines joined to
+  fast-import's marks: **188 entries**, and `main` verified to map to exactly the
+  SHA the converted repo reports.
+
+### Commit references rewritten
+Every commit SHA changes under conversion, which would have left the audit trail
+and the four review ledgers citing hashes that resolve to nothing. **118
+references were rewritten mechanically** from the verified mapping, across
+`AUDIT.md` (15), `CLAUDE.md` (2), `REVIEW_MR1.md` (28),
+`REVIEW_MR1_ARCHIVE.md` (69), `REVIEW_ISSUE4.md` (1), `REVIEW_PLAT01.md` (2) and
+`REVIEW_ISSUE7.md` (1).
+
+Substitution was conservative by construction: a 7–8 character lowercase hex
+token was replaced **only** when it uniquely prefix-matched a known commit.
+35 tokens were deliberately left alone and each was checked to be a non-object —
+ARM64 instruction encodings from the disassembly review (`4a000339`,
+`6d000400`, `6d010c02`, `6d1f8400`, `639183aa`), numeric constants (`1000000`,
+`4000000`) and a session id (`1e07e554`).
+
+This edits prior `AUDIT.md` entries, which the project's append-only rule
+otherwise forbids. The change is to **identifiers only**, never to narrative or
+findings, and the alternative was an audit trail whose every citation was dead.
+Recorded here so the edit is not silent.
+
+`SHA256_TO_SHA1_MAP.txt` is committed at the repo root: 188 lines of
+`<sha256> <sha1>`, so any hash quoted in the archived GitLab project — including
+the merge-request discussions for !1 through !4 — can still be resolved here.
+
+### Backup
+Before any of this, the complete repository including `.git` was archived
+outside the repo tree to `~/miner-tim-backups/`, and the archive was **verified
+by restoring it**: `git fsck` clean, `main` matching, 184 commits,
+`--show-object-format` still `sha256`. The SHA-256 history also remains intact
+on the archived GitLab project.

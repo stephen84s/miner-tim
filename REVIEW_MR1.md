@@ -31,13 +31,13 @@ Full transcripts of every round: **`REVIEW_MR1_ARCHIVE.md`** (~2900 lines).
 **Resume procedure:** find the last `## Round N coverage ledger` below, take the
 first row not marked DONE, and continue from there.
 
-## Status after round 13 (`74c8186..6765b17`)
+## Status after round 13 (`2a6b5fa..593a410`)
 
 Round 13 COMPLETE. No blockers, no majors. Three findings: R13-F1 (MINOR — the
 startup line and `worker_loop` disagree about share verification on non-aarch64),
 R13-F2 (MINOR — the line still over-reports when the JIT itself is unavailable on
 aarch64), R13-F3 (TRIVIAL — three `--help`/warning wording clauses). Both round-12 minors verified
-fixed. **Mergeable as of `6765b17`.**
+fixed. **Mergeable as of `593a410`.**
 
 Rounds 5–13 found nothing that can produce a wrong hash, a withheld valid share,
 or an out-of-bounds access.
@@ -49,7 +49,7 @@ record. Filed 2026-09-03.
 
 | ID | Issue | Item |
 |---|---|---|
-| R13-F1 | [#3](https://gitlab.com/stephen84s/miner-tim/-/issues/3) | Startup line and `miner.rs:549` disagree on non-aarch64 — reports `off`, verifies anyway. Introduced by `6765b17`. |
+| R13-F1 | [#3](https://gitlab.com/stephen84s/miner-tim/-/issues/3) | Startup line and `miner.rs:549` disagree on non-aarch64 — reports `off`, verifies anyway. Introduced by `593a410`. |
 | R13-F2 | [#4](https://gitlab.com/stephen84s/miner-tim/-/issues/4) | Silent `MAP_JIT` fallback: `.ok()` at `vm.rs:1681,1714` swallows the error, line still says `on`, verifier compares the interpreter against itself. **Reachable on the shipping platform.** |
 | R13-F3 | [#5](https://gitlab.com/stephen84s/miner-tim/-/issues/5) | `--help` synopsis omits `--verify-shares`; two other wording carry-overs. |
 | R5-F2 | [#6](https://gitlab.com/stephen84s/miner-tim/-/issues/6) | `make test` runs debug; AUDIT verification ran release, so the `debug_assert` nets never ran in the verified profile. |
@@ -65,23 +65,23 @@ Reasoning for each is in `REVIEW_MR1_ARCHIVE.md`; grep the ID.
 
 **Round 5 (initial):** F1 (MAJOR — A/B benchmark measured the native loop against
 itself; +9.01% retracted), F2, F3, F4, F5, F6, F7.
-**Round 6 (`d49535a..`):** R6-F1 (CBZ range assert 2x too loose — imm19 is
+**Round 6 (`4a4f5ca..`):** R6-F1 (CBZ range assert 2x too loose — imm19 is
 signed), R6-F2 (t-table buckets anti-conservative), R6-F3 (empty `--native-loop`
 silently ignored), R6-F4 (MAJOR — published CI narrower than run-to-run
 reproducibility), R6-Q1 (fail-safe direction).
-**Round 7 (`bbecd15..`):** R7-F1 (MAJOR — 256 MiB Argon2d cache per full-mode VM,
+**Round 7 (`95e0c9a..`):** R7-F1 (MAJOR — 256 MiB Argon2d cache per full-mode VM,
 never read; ~2.75 GiB at 11 threads), R7-F2 (fail-safe **inverted** for
 `--verify-shares`), R7-F3, R7-F4, R7-F5, R7-F6, R7-Q1.
 **Round 8:** R8-F1, R8-F2 (`set_var` racing `getenv`).
-**Round 9 (`3c281dc..5fe7eb3`):** R9-F1 … R9-F7.
-**Round 10 (`5fe7eb3..6f2b95b`):** R10-F1, R10-F2 (MAJOR — an empty value
+**Round 9 (`a8589c8..0df35e9`):** R9-F1 … R9-F7.
+**Round 10 (`0df35e9..726bb21`):** R10-F1, R10-F2 (MAJOR — an empty value
 *erased* an explicit `off`, silently re-enabling the native loop).
-**Round 11 (`6f2b95b..309cfda`):** R11-F1 … R11-F4.
-**Round 12 (`309cfda..74c8186`):** R12-F1 (startup line reports *requested*, not
+**Round 11 (`726bb21..29e3ed8`):** R11-F1 … R11-F4.
+**Round 12 (`29e3ed8..2a6b5fa`):** R12-F1 (startup line reports *requested*, not
 *effective*, state; invisible under `RUST_LOG=warn`), R12-F2 (`--help` note
 formatted as a flag entry). Both verified fixed in round 13.
 
-**Round 13 (`74c8186..6765b17`) — OPEN, not yet fixed.** Full text is below in
+**Round 13 (`2a6b5fa..593a410`) — OPEN, not yet fixed.** Full text is below in
 this file, not in the archive: R13-F1 (MINOR — report says
 `share verification: off` on non-aarch64 while `miner.rs:549` enables the
 verifier), R13-F2 (MINOR — line reports `Native-loop JIT: on` when
@@ -99,7 +99,7 @@ a safety switch. Treat each round's fixes as unreviewed code, not as corrections
 
 ---
 
-# Round 13 — `74c8186..6765b17`
+# Round 13 — `2a6b5fa..593a410`
 
 ## Round 13 brief
 
@@ -125,7 +125,7 @@ Priorities, in order:
 4. **The comments and AUDIT.** R12-F1 also required dropping the word
    "unconditional". Verify no code comment or AUDIT line still claims it.
 
-Verify by reading and running against `6765b17`'s source. The requester reports
+Verify by reading and running against `593a410`'s source. The requester reports
 125 lib + 8 bin tests passing in release and clippy clean on both targets —
 confirm rather than trust.
 
@@ -145,7 +145,7 @@ confirm rather than trust.
 **Where:** report `src/bin/minertim.rs:86-87` and `:102` (`verify_effective`),
 warning `src/bin/minertim.rs:108`; behaviour `src/miner.rs:549`.
 
-Three expressions, two of which were updated by `6765b17` and one of which was
+Three expressions, two of which were updated by `593a410` and one of which was
 not:
 
 | Site | Expression |
@@ -184,7 +184,7 @@ build (R13-VC6). `ShareVerifier::new` at `miner.rs:389-391` is a plain
 own, so the call site's argument is the whole story.
 
 **The same false premise is asserted in two more durable places, both new in
-`6765b17`**, which is why this is worth fixing rather than tolerating:
+`593a410`**, which is why this is worth fixing rather than tolerating:
 - the comment at `minertim.rs:82-85` justifying `verify_effective` — *"verification
   is skipped when the native loop is off, because the mining path is then already
   the reference path"*;
@@ -241,14 +241,14 @@ a *reassurance* void rather than making anything wrong.
 
 **Note on the standing lesson:** for the first time since round 5, the fix for
 the previous round's finding did not introduce a regression in what the code
-*does* — but R13-F1 is a genuine defect **introduced by** `6765b17` (the
+*does* — but R13-F1 is a genuine defect **introduced by** `593a410` (the
 report/behaviour split did not exist before this commit), so the pattern of "the
 fix needs review too" holds. R13-F2 is R12-F1(b) closed only halfway.
 
 ## Remaining work if this review is interrupted
 
 - **Round 13 is complete.** All five ledger items done; three findings filed;
-  full release suite and both clippy targets reproduced against `6765b17`.
+  full release suite and both clippy targets reproduced against `593a410`.
 - Order I would take the findings: **R13-F1** (align `miner.rs:549` with the
   effective predicate — one line, and it is the only one where the miner says
   one thing and does another), then **R13-F2** (log the discarded
@@ -322,7 +322,7 @@ more than the ~7% the native-loop warning quotes, since the fallback is the
 interpreter rather than the body JIT) plus two false reassurances.
 **Two separable sub-issues, both pre-existing in part:** the silent `.ok()` swallow
 at `vm.rs:1681,1714` is older than this MR and out of its scope; the *report*
-that now asserts effective state is new in `6765b17`, and it is the assertion
+that now asserts effective state is new in `593a410`, and it is the assertion
 that makes the swallow visible as a defect. A fix that only qualifies the
 startup line would still leave the JIT failure itself unlogged.
 **Confidence:** HIGH on the code path (read end to end); the failure is
@@ -360,7 +360,7 @@ switches in the heading is better than the generic "Switch values" I asked for.
    `<pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]` —
    `--verify-shares` is missing from it, though it has a full entry below and is
    the switch that guards share correctness. Pre-existing, not introduced by
-   `6765b17`; not previously filed in rounds 5-12 (checked the archive).
+   `593a410`; not previously filed in rounds 5-12 (checked the archive).
 **Confidence:** HIGH — read from rendered output and source.
 
 ### R13-VC3 — item 4: "unconditional" is gone from the code, and the AUDIT is handled correctly.
@@ -385,7 +385,7 @@ switches in the heading is better than the generic "Switch values" I asked for.
   times rather than a separate one.
 
 ### R13-VC4 — item 2, measured: the four combinations behave exactly as traced.
-Run against the freshly built `6765b17` binary at `RUST_LOG=info` (pool refused,
+Run against the freshly built `593a410` binary at `RUST_LOG=info` (pool refused,
 which is after the line, so nothing hides it):
 ```
 NL=on  VS=on   Native-loop JIT: on  | share verification: on    no warnings
@@ -396,9 +396,9 @@ NL=off VS=off  Native-loop JIT: off | share verification: off   native-loop-DISA
 Identical to the table in R13-VC1. In particular no spurious verification
 warning in rows 3-4, which was the specific regression risk in R12-F1's fix.
 
-### R13-VC5 — item 5: the requester's claimed state is real, reproduced on `6765b17`'s source.
+### R13-VC5 — item 5: the requester's claimed state is real, reproduced on `593a410`'s source.
 ```
-git diff 74c8186..HEAD -- src/ benches/ Cargo.toml Makefile   -> only src/bin/minertim.rs
+git diff 2a6b5fa..HEAD -- src/ benches/ Cargo.toml Makefile   -> only src/bin/minertim.rs
 cargo test --release      running 127 tests; 125 passed, 0 failed, 2 ignored (92.67s)
                           8 bin tests passed; 0 doc tests
 cargo clippy --all-targets -- -D warnings                          clean (aarch64)

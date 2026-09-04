@@ -1,7 +1,7 @@
 # Independent review — PLAT-01 (`feat/jit-linux-aarch64`, issue #2 phase 1a)
 
 Reviewer: independent agent, no prior context on this branch.
-Base: `main` (`10b4546`). Head: `5ac5cb4`. Diff: 5 files, 362 insertions.
+Base: `main` (`1790a9f`). Head: `1d444aa`. Diff: 5 files, 362 insertions.
 Code change is confined to `src/randomx/jit/memory.rs` (+`mod.rs` comments);
 `AUDIT.md` / `CLAUDE.md` are prose.
 

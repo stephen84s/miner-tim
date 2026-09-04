@@ -30,7 +30,7 @@ everything you need is here.
 row not marked DONE, and continue from there.
 
 ## Status
-COMPLETE — rounds 5-12 finished. Round 12 (`309cfda..74c8186`): no blockers, no majors, two minors (both about how state is reported). All four round-11 minors verified fixed. **Mergeable.**
+COMPLETE — rounds 5-12 finished. Round 12 (`29e3ed8..2a6b5fa`): no blockers, no majors, two minors (both about how state is reported). All four round-11 minors verified fixed. **Mergeable.**
 
 ## Coverage ledger
 | Area | File(s) | Status | Notes |
@@ -61,7 +61,7 @@ let mut base_vm = RandomXVm::new_full(KEY, dataset.clone());
 let mut nat_vm  = RandomXVm::new_full(KEY, dataset.clone());
 nat_vm.set_native_loop(true);        // <-- base_vm is never set to false
 ```
-and, in the *same commit* (260bc89, "stage D"), `RandomXVm::new_full` gained
+and, in the *same commit* (cf77831, "stage D"), `RandomXVm::new_full` gained
 `use_native_loop: true` (vm.rs:1696; `new` likewise at :1669). Before that commit
 the field defaulted to `false` and `base_vm` really was the body JIT — which is
 almost certainly the state in which the +9.01% figure was actually measured. The
@@ -110,9 +110,9 @@ this branch:
 Two arms of identical code, as predicted.
 
 **Commit archaeology confirms the mechanism** (raises the earlier MEDIUM to
-HIGH): `git show 260bc89^:src/randomx/vm.rs` has `use_native_loop: false` at
-both constructors; `git show 260bc89:src/randomx/vm.rs` has `true`; and
-`benches/nativeloop_ab.rs` is *added* by 260bc89 already without a
+HIGH): `git show cf77831^:src/randomx/vm.rs` has `use_native_loop: false` at
+both constructors; `git show cf77831:src/randomx/vm.rs` has `true`; and
+`benches/nativeloop_ab.rs` is *added* by cf77831 already without a
 `set_native_loop(false)` on `base_vm`. So the harness has never been valid in
 any committed tree state — it was presumably valid in the author's working tree
 before the vm.rs edit was applied.
@@ -456,8 +456,8 @@ prologue 48 + epilogue 35 = 83 words eliminated per iteration; pre 111 + post 55
 
 ---
 
-# Round 6 — delta review (d49535a..HEAD)
-Scope: `1d25c0b` (F1/F3/F5 fixes + corrected numbers) and `bbecd15` (runtime
+# Round 6 — delta review (4a4f5ca..HEAD)
+Scope: `7ba6146` (F1/F3/F5 fixes + corrected numbers) and `95e0c9a` (runtime
 fallback switch). Nothing from rounds 1-5 is re-reviewed.
 
 ## Round 6 coverage ledger
@@ -789,8 +789,8 @@ such ramp (one tail outlier of +4.9% in the last pair).
 
 ---
 
-# Round 7 — delta review (bbecd15..HEAD)
-Scope: `faa4131` — verify-before-submit, plus the round-6 fixes. Nothing from
+# Round 7 — delta review (95e0c9a..HEAD)
+Scope: `ed7035d` — verify-before-submit, plus the round-6 fixes. Nothing from
 rounds 1-6 is re-reviewed except to confirm those fixes landed.
 
 ## Round 7 coverage ledger
@@ -1049,12 +1049,12 @@ genuinely negligible, which is the point the claim is making. The cost that is
 *not* negligible and is missing from every one of these statements is the one-off
 verifier construction (R7-F1).
 
-**R7-VC8 — the committed HEAD (`faa4131`) compiles and its CLI tests pass.**
+**R7-VC8 — the committed HEAD (`ed7035d`) compiles and its CLI tests pass.**
 I hit a compile error while running the suite (`parse_switch` not found in the
 test module) and traced it to the *working tree*, not to the commit: `git status`
 shows uncommitted modifications to `src/bin/minertim.rs`, `src/miner.rs` and
 `src/randomx/jit/compiler.rs`, and I caught them mid-edit. Verified by exporting
-the commit cleanly (`git archive faa4131 | tar -x`) into a scratch directory and
+the commit cleanly (`git archive ed7035d | tar -x`) into a scratch directory and
 building there:
 ```
 running 6 tests
@@ -1067,7 +1067,7 @@ test tests::verify_shares_defaults_on_and_shares_the_fail_safe_policy ... ok
 test result: ok. 6 passed; 0 failed
 ```
 **Not a finding against the reviewed commit.** Flagging it only so nobody later
-reads a broken build into `faa4131`. All timing and behavioural results reported
+reads a broken build into `ed7035d`. All timing and behavioural results reported
 in Round 7 were taken either from that clean export or from a release binary
 built before the edits began.
 
@@ -1078,7 +1078,7 @@ extracted from `worker_loop`, plus an env-branch test for `parse_switch`. That i
 option 1 from R7-Q1, and from the fragment I saw it also makes the
 "verifier unavailable" case an explicit *fail-open* verdict rather than an
 implicit `None => true`, which is the right call and better than what I
-suggested. I have **not** reviewed it — it is outside the `bbecd15..HEAD` scope I
+suggested. I have **not** reviewed it — it is outside the `95e0c9a..HEAD` scope I
 was given and it was changing under me. It should get its own round.
 
 ### R7-F5 — Two small documentation inaccuracies carried into user-visible text  [MINOR]
@@ -1173,7 +1173,7 @@ decision and unit-test both branches; injecting a JIT fault is the hard way to
 get there (R7-Q1).
 
 **R7-VC10 — the six native-loop tests still pass in release on the committed
-HEAD.** Run against the clean `git archive faa4131` export, single-threaded:
+HEAD.** Run against the clean `git archive ed7035d` export, single-threaded:
 ```
 running 6 tests
 test randomx::jit::compiler::tests::native_loop_emitted_instruction_accounting ... ok
@@ -1189,7 +1189,7 @@ inert in this profile, but the known-answer and differential gates confirm the
 emitted loop is unchanged in behaviour.
 
 **R7-VC9 — clippy is clean on the committed HEAD for both targets.** Run against
-the clean `git archive faa4131` export, so unaffected by the working-tree edits:
+the clean `git archive ed7035d` export, so unaffected by the working-tree edits:
 `cargo clippy --all-targets -- -D warnings` and the same with
 `--target x86_64-apple-darwin` both finish with no diagnostics. The six CLI
 parser tests pass (R7-VC8).
@@ -1204,7 +1204,7 @@ parser tests pass (R7-VC8).
   changes present while I was reviewing (`src/miner.rs` `ShareVerdict` /
   `classify_share`, `src/bin/minertim.rs` env-branch test,
   `src/randomx/jit/compiler.rs`). They implement R7-Q1 option 1 and appear to
-  improve on it, but they were changing under me and are not in `faa4131`.
+  improve on it, but they were changing under me and are not in `ed7035d`.
   **They need their own round**, particularly: whether `classify_share` preserves
   the fail-open behaviour on `SubmitVerifierUnavailable`, and whether the
   extracted call site still reaches the counter.
@@ -1222,20 +1222,20 @@ parser tests pass (R7-VC8).
 ---
 
 # Round 8 — final pass
-**Scope note:** the range given was `3fcc388..3c281dc`, which contains only
-**one** commit. The three unreviewed commits described are `e6724ce`, `3fcc388`
-and `3c281dc` — `e6724ce` landed *before* my round-7 doc commit `9ab205d`, which
+**Scope note:** the range given was `d19e7c3..a8589c8`, which contains only
+**one** commit. The three unreviewed commits described are `35d4507`, `d19e7c3`
+and `a8589c8` — `35d4507` landed *before* my round-7 doc commit `9ca85cf`, which
 is why it fell outside. It is the `ShareVerdict` work I explicitly flagged in
 round 7 as "needs its own round", so I am reviewing all three.
 
 ## Round 8 coverage ledger
 | Area | Commit / file | Status | Notes |
 |---|---|---|---|
-| P3 — R7-F1 root fix: no Argon2d cache in full mode | 3fcc388 / vm.rs | DONE | Highest production risk; attacking the reasoning first |
-| P1 — C1 worst-case test | 3c281dc / tests.rs | DONE | |
-| P2 — differential helper split | 3c281dc / tests.rs | DONE | |
-| P4 — wired-up verification test | e6724ce / miner.rs | DONE | |
-| Doc corrections (R7-F5, framing) | 3c281dc / docs | DONE | |
+| P3 — R7-F1 root fix: no Argon2d cache in full mode | d19e7c3 / vm.rs | DONE | Highest production risk; attacking the reasoning first |
+| P1 — C1 worst-case test | a8589c8 / tests.rs | DONE | |
+| P2 — differential helper split | a8589c8 / tests.rs | DONE | |
+| P4 — wired-up verification test | 35d4507 / miner.rs | DONE | |
+| Doc corrections (R7-F5, framing) | a8589c8 / docs | DONE | |
 | Deferred-item merge judgement | AUDIT.md | DONE | |
 
 ## Round 8 findings
@@ -1439,7 +1439,7 @@ for. `src/miner.rs` carries the same limit as a comment at the call site.
 **No. None of the six should block, and I would not hold the MR for any of
 them.** Reasoning per item:
 - **R5-F2** (debug vs release assert gap) — the three `debug_assert!`s are all
-  invariants I proved by construction in round 5, and `e6724ce` added release
+  invariants I proved by construction in round 5, and `35d4507` added release
   tests for the guards that actually matter (v1-only, the C1 bound in both
   directions, both ABI directions). Aligning `make test` with the verified
   profile is a one-line Makefile change whenever someone wants it.
@@ -1489,7 +1489,7 @@ mode still gets its cache (`256 MiB`, first line), confirming the conditional
 did not over-apply.
 
 ### R8-VC8 — the claimed state is real.
-Ran the full suite and both clippy targets myself on `3c281dc`:
+Ran the full suite and both clippy targets myself on `a8589c8`:
 ```
 test result: ok. 121 passed; 0 failed; 2 ignored   (lib, release, 93.28s)
 test result: ok. 7 passed; 0 failed                (bin)
@@ -1551,7 +1551,7 @@ that can produce a wrong share.
 
 ## Round 8 postscript — verification timing, and work in flight
 
-**My round-8 verification was a clean reading of `3c281dc`, not of a torn tree.**
+**My round-8 verification was a clean reading of `a8589c8`, not of a torn tree.**
 This matters because I hit exactly that trap in round 7. Checked by timestamp:
 my suite+clippy run finished at `05:47:04` (mtime of the capture log), and the
 next batch of working-tree edits landed at `05:49:54`-`05:50:07`. The tree was
@@ -1586,21 +1586,21 @@ or the share-verification decision.
 
 ---
 
-# Round 9 — `3c281dc..5fe7eb3`
-Four commits: `914fe88` (R8-F1/R8-F2 fixes), `ea354ee` (panic-message repair),
-`8c80d8d` (my own review file — ignored), `5fe7eb3` (`ShareVerifier`
+# Round 9 — `a8589c8..0df35e9`
+Four commits: `c064ca9` (R8-F1/R8-F2 fixes), `8022ba0` (panic-message repair),
+`c784a21` (my own review file — ignored), `0df35e9` (`ShareVerifier`
 extraction — the substantive one).
 
 ## Round 9 coverage ledger
 | Area | Commit | Status | Notes |
 |---|---|---|---|
-| P1 — is the extraction behaviour-preserving? | 5fe7eb3 | DONE | R9-VC1; one exception, R9-F1 |
-| P2 — do the tests pin the stale-verifier hazard? | 5fe7eb3 | DONE | R9-F2: half of it; key measured irrelevant |
-| P3 — `is_armed()` as the `classify_share` predicate | 5fe7eb3 | DONE | R9-F1: branch is now unreachable |
-| P4 — `generate`'s hard assert on a public API | 914fe88 | DONE | R9-VC2: cannot fire legitimately |
-| Panic-message repair + branch sweep | ea354ee | DONE | R9-VC3 + R9-F3 |
-| `#[cfg(all(test, aarch64))]` on the test accessors | 5fe7eb3 | DONE | R9-F4 |
-| AUDIT "no behaviour change" claim | 5fe7eb3 | DONE | R9-F6: inaccurate |
+| P1 — is the extraction behaviour-preserving? | 0df35e9 | DONE | R9-VC1; one exception, R9-F1 |
+| P2 — do the tests pin the stale-verifier hazard? | 0df35e9 | DONE | R9-F2: half of it; key measured irrelevant |
+| P3 — `is_armed()` as the `classify_share` predicate | 0df35e9 | DONE | R9-F1: branch is now unreachable |
+| P4 — `generate`'s hard assert on a public API | c064ca9 | DONE | R9-VC2: cannot fire legitimately |
+| Panic-message repair + branch sweep | 8022ba0 | DONE | R9-VC3 + R9-F3 |
+| `#[cfg(all(test, aarch64))]` on the test accessors | 0df35e9 | DONE | R9-F4 |
+| AUDIT "no behaviour change" claim | 0df35e9 | DONE | R9-F6: inaccurate |
 
 ## Round 9 findings
 
@@ -1682,7 +1682,7 @@ key ALPHA : f04a3a9feec72386571fd896e068f8abca0361b3b8dce2efbddffa6c7c5c46bc
 key BRAVO : f04a3a9feec72386571fd896e068f8abca0361b3b8dce2efbddffa6c7c5c46bc
 => key affects full-mode hash? false
 ```
-That follows from `914fe88`: `new_full` no longer builds a cache, and
+That follows from `c064ca9`: `new_full` no longer builds a cache, and
 `ss_programs` are read only by `init_dataset_item` on the light-mode arm. So the
 only state that can make a verifier stale is **the dataset**.
 
@@ -1738,7 +1738,7 @@ liability) into an asset.
 - It is a real `assert!`, not `debug_assert!`, so it holds in release. Correct
   for a public-API precondition.
 
-### R9-VC3 — `ea354ee` repairs the panic message correctly, and the branch sweep claim checks out.
+### R9-VC3 — `8022ba0` repairs the panic message correctly, and the branch sweep claim checks out.
 The literal is now
 ```rust
 "dataset generation needs a light-mode VM's Argon2d cache; got an empty \
@@ -1833,8 +1833,8 @@ claim true (`--test-threads=1` for this binary, or a mutex around the env
 tests), or state the residual risk instead of a precondition that does not hold.
 **Confidence:** HIGH — enumerated every test in the module.
 
-### R9-F6 — AUDIT's "No behaviour change" for `5fe7eb3` is inaccurate  [MINOR]
-**Where:** AUDIT.md, `5fe7eb3` entry: *"No behaviour change: `rekey` drops the
+### R9-F6 — AUDIT's "No behaviour change" for `0df35e9` is inaccurate  [MINOR]
+**Where:** AUDIT.md, `0df35e9` entry: *"No behaviour change: `rekey` drops the
 cached VM..."*
 Per R9-F1, one row of the truth table did change: `enabled && dataset.is_none()`
 moved from `SubmitVerifierUnavailable` (with a `log::warn!`) to
@@ -1895,9 +1895,9 @@ test result: ok. 7 passed; 0 failed                (bin)
 clippy --all-targets -- -D warnings                          clean (aarch64)
 clippy --all-targets --target x86_64-apple-darwin -- -D warnings   clean
 ```
-Matches your 124 + 7 exactly. `git diff 5fe7eb3..HEAD -- src/ benches/
+Matches your 124 + 7 exactly. `git diff 0df35e9..HEAD -- src/ benches/
 Cargo.toml Makefile` is **empty**, and every commit of mine since touches only
-`REVIEW_MR1.md`, so this is a clean reading of `5fe7eb3`'s source.
+`REVIEW_MR1.md`, so this is a clean reading of `0df35e9`'s source.
 
 ## Round 9 verdict
 
@@ -1946,7 +1946,7 @@ correct with the sweep independently confirmed.
 ## Remaining work if this review is interrupted
 - **Round 9 is complete.** All four priorities answered, both lower-priority
   items answered, seven minors filed, full suite and both clippy targets run
-  independently against `5fe7eb3`'s source.
+  independently against `0df35e9`'s source.
 - Suggested order for the minors: **R9-F7** (assert the verifier is on the
   reference path — the historically-demonstrated failure), then **R9-F2** (rotate
   between the two datasets that already exist), then R9-F5 (make the SAFETY
@@ -1958,7 +1958,7 @@ correct with the sweep independently confirmed.
 
 ---
 
-# Round 10 — `5fe7eb3..6f2b95b`
+# Round 10 — `0df35e9..726bb21`
 One commit applying all seven round-9 minors.
 
 ## Round 10 coverage ledger
@@ -2180,7 +2180,7 @@ precedes the first hash" would make it exact.
 
 ### R10-VC8 — the claimed state is real, on the right source.
 ```
-git diff 6f2b95b..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+git diff 726bb21..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
 running 126 tests
 test result: ok. 124 passed; 0 failed; 2 ignored   (lib, release, 92.54s)
 test result: ok. 7 passed; 0 failed                (bin)
@@ -2241,7 +2241,7 @@ correct now than to explain later.
 ## Remaining work if this review is interrupted
 - **Round 10 is complete.** All four priorities answered, both lower-priority
   items checked, one major and one minor filed, full suite and both clippy
-  targets run against `6f2b95b`'s source.
+  targets run against `726bb21`'s source.
 - Order I would take them: **R10-F2** (restore `.or(value)` on both flag arms and
   warn on an empty value), then **R10-F1** (the composition test, plus a clause
   in the comment/AUDIT noting the `worker_loop` invariant), then the one-line
@@ -2252,11 +2252,11 @@ correct now than to explain later.
 
 ---
 
-# Round 11 — `6f2b95b..309cfda`
+# Round 11 — `726bb21..29e3ed8`
 One commit fixing R10-F2 and R10-F1.
 
 ## Round 11 brief
-**Scope:** `git diff 6f2b95b..309cfda` — one commit, fixing R10-F2 and R10-F1.
+**Scope:** `git diff 726bb21..29e3ed8` — one commit, fixing R10-F2 and R10-F1.
 
 R10-F2 was a regression introduced while fixing round 9: `as_bool` returning
 `None` for an empty value was the right semantics, but round 7 had replaced
@@ -2512,7 +2512,7 @@ suggestion.
 
 ### R11-VC6 — the claimed state is real, on the right source.
 ```
-git diff 309cfda..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+git diff 29e3ed8..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
 running 127 tests
 test result: ok. 125 passed; 0 failed; 2 ignored   (lib, release, 92.13s)
 test result: ok. 8 passed; 0 failed                (bin)
@@ -2571,7 +2571,7 @@ want improved, not things the miner does wrong.
 ## Remaining work if this review is interrupted
 - **Round 11 is complete.** All four priorities plus both lower-priority items
   answered, four minors filed, full suite and both clippy targets run against
-  `309cfda`'s source.
+  `29e3ed8`'s source.
 - Order I would take the minors: **R11-F1** (one line: warn on an empty
   environment value, so the two shell idioms behave alike), then **R11-F3** (one
   line at `vm.rs:1321`, where the breaking edit would be made), then **R11-F2**
@@ -2583,11 +2583,11 @@ want improved, not things the miner does wrong.
 
 ---
 
-# Round 12 — `309cfda..74c8186`
+# Round 12 — `29e3ed8..2a6b5fa`
 One commit applying all four round-11 minors plus the startup-state suggestion.
 
 ## Round 12 brief
-**Scope:** `git diff 309cfda..74c8186` — one commit.
+**Scope:** `git diff 29e3ed8..2a6b5fa` — one commit.
 
 **What changed:**
 - **R11-F1** — both arms now warn on an empty value, labelled with the flag or
@@ -2818,7 +2818,7 @@ the claim.
 
 ### R12-VC7 — the claimed state is real, on the right source.
 ```
-git diff 74c8186..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
+git diff 2a6b5fa..HEAD -- src/ benches/ Cargo.toml Makefile   -> empty
 running 127 tests
 test result: ok. 125 passed; 0 failed; 2 ignored   (lib, release, 92.84s)
 test result: ok. 8 passed; 0 failed                (bin)
@@ -2883,7 +2883,7 @@ does.
 ## Remaining work if this review is interrupted
 - **Round 12 is complete.** All four priorities plus both lower-priority items
   answered, two minors filed, full suite and both clippy targets run against
-  `74c8186`'s source.
+  `2a6b5fa`'s source.
 - Order I would take the minors: **R12-F1(a)** (either promote the state line or
   drop the word "unconditional" from the comment and the AUDIT — currently both
   overstate it), then **R12-F2** (move the `--help` note below `--verify-shares`

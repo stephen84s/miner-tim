@@ -1,6 +1,6 @@
 # Independent review — `fix/jit-alloc-failure-visible` (issues #4, #3)
 
-Reviewer: independent (did not write this code). Base `main`, head `049db1d`
+Reviewer: independent (did not write this code). Base `main`, head `1ae7bd7`
 (2 commits). Diff reviewed: `git diff main..HEAD` — 446 insertions / 30
 deletions across `AUDIT.md`, `CLAUDE.md`, `src/bin/minertim.rs`,
 `src/miner.rs`, `src/randomx/vm.rs`.

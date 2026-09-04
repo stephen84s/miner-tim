@@ -1,4 +1,4 @@
-# Independent review — `fix/test-dataset-memory` (`20fa11e`, issue #7)
+# Independent review — `fix/test-dataset-memory` (`bf29ed3`, issue #7)
 
 Reviewer: independent (no prior context on the implementation).
 Scope: `git diff main..HEAD` — `src/randomx/dataset.rs`, `src/randomx/tests.rs`,

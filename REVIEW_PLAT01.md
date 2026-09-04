@@ -256,10 +256,14 @@ kernel VMA permission change with the TLB shootdown that implies, against two
 userspace-cheap `pthread_jit_write_protect_np` calls on Darwin. Mature JITs avoid
 this with a dual mapping (one `RW` alias, one `RX` alias of the same memory).
 
-Severity: **minor / informational**. Issue #2 phase 1a is explicitly about making
-the JIT's *tests* runnable on a second OS, not about shipping a Linux miner, and
-the branch adds no Linux release artifact. There is no Linux throughput
-measurement anywhere in the branch and none is claimed. This should simply be
+Severity: **minor / informational, unreachable from any shipping path.** Verified,
+not assumed: `Makefile:19` sets `DIST_NAME := minertim-$(VERSION)-macos-arm64` and
+`dist:` builds with `-C target-cpu=apple-m1`, so the only release artifact this
+project produces is aarch64-apple-darwin. No Linux binary is shipped, so the
+syscall cost cannot reach a user today. Issue #2 phase 1a is explicitly about
+making the JIT's *tests* runnable on a second OS, not about shipping a Linux
+miner. There is no Linux throughput measurement anywhere in the branch and none
+is claimed. This should simply be
 written down so nobody later reads "the JIT works on Linux" as "the JIT is fast
 on Linux". **Does not block.**
 

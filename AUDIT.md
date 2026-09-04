@@ -3334,3 +3334,59 @@ runs confirmed 92. It was reviewed, not overlooked.
   measured peaks above.
 - `REVIEW_*.md` files were not modified — they are reviewers' records.
 - Not pushed, no MR opened, per the task's instruction.
+
+### Review corrections to MEM-01 (independent review, `REVIEW_ISSUE7.md`)
+Verdict was **mergeable, no code defect** — the dominant risk did not
+materialise. Worth recording why: `zeroed_for_test()` has exactly one caller,
+the ShareVerifier rotation test, and `native_loop_diff_tests::test_dataset()`
+still returns the **real** dataset. Had the diff tests been pointed at the
+zeroed one, every `r ^= dataset[...]` would have degenerated to `r ^= 0`,
+CBRANCH coverage would have collapsed — **and all 92 tests would still have
+passed.** That is the trap this change was one line away from.
+
+Five findings, corrected here rather than in place (this file is append-only):
+
+- **F3 (the substantive one).** Neither debug RSS figure reproduces. Claimed
+  6.77 GB → measured **6.27 GB**; claimed 4.50 GB → measured **5.43 GB** (twice,
+  98 KB apart). No thread count yields 4.50. So the debug saving is **0.84 GB,
+  not 2.27 GB — the original overstated it 2.7x.** Wall clock reproduces, so
+  this is not a measurement-method difference. Corrected in
+  `scripts/verify-jit.sh` and the `CLAUDE.md` MEM-01 row.
+- **F1.** "Already over #9's budget / red from day one" is a **12-thread**
+  claim. At the runner's 3 cores, `main` measures **6.00 GB** — marginal under
+  7 GB, not over. The fix is still worth having (6.00 → ~4.07 GB), but the
+  urgency was overstated.
+- **F2.** Declining to share the Argon2d cache behind a `LazyLock` was the right
+  call for the wrong reason: those transients *do* exist at 3 threads, and are
+  ~0.8 GB of the ~4.07 GB peak. The reasons to decline stand (256 MiB made
+  permanent; an argon2d regression would surface as "LazyLock init panicked"
+  across five tests instead of one clean failure in `test_cache_initialization`).
+- **F4.** The debug figures sat under the `# 2. Release profile` banner in
+  `verify-jit.sh`. Moved and relabelled.
+- **O1 (open, not fixed).** The saving rests on std's `IsZero` /`alloc_zeroed`
+  specialisation for the zeroed dataset. **Nothing asserts it.** If that
+  specialisation ever stops applying, 92/92 stays green while the peak returns
+  to issue-#7 levels. Worth a guard eventually; recorded rather than fixed.
+
+Release figures reproduced **exactly**: `main` 8.15 GB, HEAD 6.23 / 4.07 /
+3.25 GB at 12/3/1 threads. `make verify-jit` 92/92 both profiles, and
+`--list` output is **byte-identical** between `main` and HEAD — no test became
+vacuous, skipped or narrower.
+
+Numbers the review added that nobody had measured:
+
+- **`make test` (debug, unfiltered) — issue #7's literal complaint — was never
+  measured by anyone.** It is **6.22 GB** at 12 threads, which is **0.79 GB
+  above** the debug *filtered* set. So `verify-jit` is **not** a proxy for
+  `make test`.
+- Debug gate at 3 threads is **4.07 GB**, identical to release. Both profiles
+  fit 7 GB with ~2.9 GB headroom.
+- Building is not the constraint: `cargo test --release --lib --no-run` peaks at
+  **0.46 GB** despite `lto=true, codegen-units=1`.
+- No test got cheaper by doing less: user CPU fell 1025.9 s → 362.5 s, and that
+  663 s is exactly 2x vs 1x `RandomXDataset::generate` (~330 s CPU each). The
+  entire wall-clock saving is one removed dataset build.
+
+**For #9:** plan against **~4.07 GB**, and treat it as a **floor, not a budget**
+— `/usr/bin/time -l` reports max-over-waited-children, so the OS and the runner
+agent sit on top of it.

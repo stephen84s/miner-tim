@@ -8,12 +8,15 @@ Scope: `git diff main..HEAD` — `src/randomx/dataset.rs`, `src/randomx/tests.rs
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Is the key swap genuinely lateral? | **structural analysis done** — verifying empirically |
-| 2 | Is `zeroed_for_test()` sound for the ShareVerifier test? | analysis done, mutation test pending |
-| 3 | Does the dummy pointer keep the zero-iteration test meaningful? | **done** |
-| 4 | Reproduce the RSS numbers | pending |
-| 5 | Is coverage really unchanged (92 / 131+10)? | `make verify-jit` running |
-| 6 | The decided-against list | partially done |
+| 1 | Is the key swap genuinely lateral? | CLOSED — yes |
+| 2 | Is `zeroed_for_test()` sound for the ShareVerifier test? | CLOSED — yes |
+| 3 | Does the dummy pointer keep the zero-iteration test meaningful? | CLOSED — yes |
+| 4 | Reproduce the RSS numbers | CLOSED — release exact, debug does not reproduce (F3) |
+| 5 | Is coverage really unchanged (92 / 131+10)? | CLOSED — yes |
+| 6 | The decided-against list | CLOSED — both acceptable (F2 on one rationale) |
+
+**Verdict: MERGEABLE.** See the bottom of this file for findings F1-F4, O1 and
+the full reproduction table.
 
 ---
 

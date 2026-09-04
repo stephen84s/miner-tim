@@ -3390,3 +3390,152 @@ Numbers the review added that nobody had measured:
 **For #9:** plan against **~4.07 GB**, and treat it as a **floor, not a budget**
 — `/usr/bin/time -l` reports max-over-waited-children, so the OS and the runner
 agent sit on top of it.
+
+---
+
+## 2026-09-04 — CI-02: GitHub Actions workflows, incl. the two aarch64 JIT gates (issue #9)
+
+### Request / goal
+Write `.github/workflows/` for the GitHub migration: port `.gitlab-ci.yml`'s
+three x86_64 jobs (`rust:lint`, `rust:audit`, `rust:test`) and add the two jobs
+that are the point of the move — `macos-14` (aarch64 + Darwin, the shipping
+platform) and `ubuntu-24.04-arm` (native Linux aarch64). Workflows only: no
+`.gitlab-ci.yml` change, no README/CLAUDE.md URL rewrites, no release flow, no
+GitHub authentication. Branch `ci/github-actions`, based on `main` at `0f2d75a`.
+
+Motivation, from issue #9: GitLab's shared runners are x86_64 Linux, an arm64
+runner probe returned `no_matching_runner`, no GitLab SaaS tier runs macOS at
+any price, and the project has now exhausted its free CI minutes entirely
+(`ci_quota_exceeded`). GitHub gives public repositories both runners free.
+
+### Files changed
+- `.github/workflows/ci.yml` — new. Jobs `lint`, `audit`, `test` on `ubuntu-24.04`.
+- `.github/workflows/jit.yml` — new. Jobs `jit-macos` (`macos-14`) and
+  `jit-linux-arm` (`ubuntu-24.04-arm`).
+- `CLAUDE.md` — task-board row for CI-02.
+- `AUDIT.md` — this entry.
+
+No Rust source, no `Makefile`, no `scripts/verify-jit.sh`, no `.gitlab-ci.yml`
+change. `REVIEW_*.md` untouched; `.claude/settings.local.json` was already dirty
+and was not committed.
+
+### Behaviour
+| Job | Runner | Command |
+|---|---|---|
+| `lint` | `ubuntu-24.04` | `cargo clippy --all-targets --locked -- -D warnings` |
+| `audit` | `ubuntu-24.04` | `cargo audit` (RustSec) |
+| `test` | `ubuntu-24.04` | `cargo test --release --locked` |
+| `jit-macos` | `macos-14` | `make verify-jit` |
+| `jit-linux-arm` | `ubuntu-24.04-arm` | `./scripts/verify-jit.sh` |
+
+All five are hard gates: no `continue-on-error`, no `|| true`, no step-level
+`if:`, no summary step that could swallow a status. Triggers are push to `main`,
+`pull_request`, and `workflow_dispatch`; `cancel-in-progress` is enabled for
+pull requests only, so a rapid second push cannot cancel a verdict for a commit
+already on `main`. `permissions: contents: read` on both files.
+
+Two workflow files rather than one, per issue #9: the ~19-minute interpreter
+suite must not gate the JIT verdict, nor be gated by it.
+
+### The 7 GB constraint on `macos-14`
+`jit-macos` sets `RUST_TEST_THREADS: "3"` at job level. `scripts/verify-jit.sh`
+passes no `--test-threads` of its own, so libtest takes the env var instead of
+defaulting to the runner's core count — verified empirically here rather than
+assumed: `RUST_TEST_THREADS=0 ./target/debug/deps/minertim-<hash> <filter>`
+panics with "RUST_TEST_THREADS is `0`, should be a positive integer" from
+`library/test/src/helpers/concurrency.rs`, which proves the variable is read.
+This was preferred over editing the gate script, which stays the single source
+of truth for what the gate runs.
+
+MEM-01's numbers (issue #7): 6.23 GB at 12 threads, **4.07 GB at 3**, in both
+profiles. The workflow comment records 4.07 GB as a floor, not a budget, and
+names this env var as the lever if headroom ever gets tight. `ubuntu-24.04-arm`
+(4 cores, 16 GB) deliberately gets no cap, and the comment says so, so that the
+asymmetry does not later get "fixed".
+
+### `verify-jit-linux` → the runner, minus the container
+`make verify-jit-linux` wraps `scripts/verify-jit.sh` in a pinned `rust:1.97.1`
+linux/arm64 container under colima and spends most of its body proving the
+docker daemon is genuinely aarch64 rather than qemu. On `ubuntu-24.04-arm` that
+is what the runner *is*, so the workflow calls the script directly. What was
+kept from the wrapper: the 1.97.1 toolchain pin (every recorded Linux aarch64
+result used it) and the host-facts print (`uname -sm`, `nproc`, `MemTotal`).
+What was dropped: the container, the daemon-architecture checks, and the named
+docker volumes that existed only to keep the container's target dir off the
+maintainer's macOS `target/`. The script's own `uname -m` guard still rejects a
+non-aarch64 host, so a wrong runner label fails loudly rather than vacuously.
+The make target stays in the `Makefile` as a developer convenience — demoting
+it from "mandatory" is issue #9's follow-up, not this change.
+
+### Decisions worth recording
+- **No `cargo fmt --check`.** `.gitlab-ci.yml`'s rationale is preserved in
+  `ci.yml`: the RandomX/JIT sources use intentional custom formatting (aligned
+  emitter comments, compact literals) that aids auditing against the reference
+  implementation. A fmt gate would be permanently red or would destroy it.
+- **The `cargo install cargo-audit` existence test is kept** (`test -x
+  "$HOME/.cargo/bin/cargo-audit" || cargo install cargo-audit --locked`): a
+  plain install over a cached binary errors with "binary already exists in
+  destination" rather than no-opping. The GitLab-specific half of that
+  workaround — a redirected `CARGO_HOME` that `PATH` did not include — is
+  dropped, because this workflow leaves `CARGO_HOME` at its default.
+- **The `v*`-tag release job is deliberately not ported**, and `ci.yml` says so
+  in a comment so the next reader does not read it as an oversight. The release
+  flow (`RELEASING.md`, `make release`, GitLab Releases) is its own item in
+  issue #9 and needs credentials that are out of scope here.
+- **Toolchain install via `rustup`, not a third-party action.** Each job installs
+  1.97.1 with `rustup toolchain install --profile minimal`, falling back to the
+  official `sh.rustup.rs` installer if the image has no rustup (the arm64 Ubuntu
+  images carry a smaller toolset than x86_64). Only `actions/checkout@v4` and
+  `actions/cache@v4` — both first-party — are used.
+- **Runners pinned** (`ubuntu-24.04`, `macos-14`, `ubuntu-24.04-arm`), never
+  `-latest`: the image's core count drives libtest's default `--test-threads`,
+  which drives peak RSS. An image bump must not be able to change the memory
+  profile silently.
+- **Caching**: cargo registry/git-db everywhere; `target/` per job with the job
+  name, `runner.arch`, the Rust version and `hashFiles('Cargo.lock')` in the
+  key, so no two jobs share a `target/` cache and a toolchain change starts
+  cold. `CARGO_INCREMENTAL=0`. A `CACHE_EPOCH` variable exists purely so a
+  suspect cache is cheap to discard by hand. `audit` caches no `target/` (it
+  never builds the crate); the advisory DB is cached but `cargo audit` refreshes
+  it every run, so a hit cannot make the scan stale.
+
+### Verification performed
+- Both workflow files **parsed** with Ruby's YAML (Psych); PyYAML is not
+  installed on this machine and PEP 668 blocked installing it. Parse only — the
+  top-level `on:` key reads back as the boolean `true` under YAML 1.1, which is
+  expected and not a defect. A scripted check over the parsed trees confirmed no
+  `continue-on-error`, no step-level `if:`, and no `|| true` in any `run` block.
+- `make check` — pass. `cargo clippy --all-targets --locked -- -D warnings` —
+  exit 0 (the exact command the `lint` job runs). No Rust source was changed.
+- `cargo audit` — ran clean locally against the current `Cargo.lock` (93 crates,
+  1239 advisories loaded).
+- Every command and target referenced was checked against the `Makefile` and
+  `scripts/verify-jit.sh` rather than assumed: `verify-jit` and
+  `verify-jit-linux` exist, the script is executable and takes no arguments, and
+  its filters/`EXPECTED_PASSES=92` are untouched.
+- `make verify-jit` was run on this Apple Silicon host — result recorded below.
+
+### What could NOT be verified, and is asserted rather than tested
+- **Nothing here has ever executed on GitHub Actions.** The repository is still
+  on GitLab and `gh` is not authenticated.
+- Runner-label availability and specifications (`macos-14` = 3 cores / 7 GB,
+  `ubuntu-24.04-arm` = 4 cores / 16 GB, both free on public repos) are taken
+  from issue #9, not probed.
+- Real RAM headroom on `macos-14` is inferred from MEM-01's local measurements
+  at `--test-threads=3`; the runner's own OS and agent overhead is unmeasured.
+- Cache hit rates, and whether restoring the JIT gate's `target/` (debug +
+  release, `lto=true`) beats rebuilding on a 3-core M1, are unmeasured. The
+  workflow comment says to delete that step rather than tune it if it looks
+  like a net loss — correctness does not depend on it.
+- Whether the `ubuntu-24.04-arm` image ships a C compiler for `ring`'s build
+  script is assumed, not checked. PLAT-01 built the same tree in `rust:1.97.1`
+  linux/arm64, so the dependency set is known to build on that platform.
+- `EXPECTED_PASSES=92` is asserted on **both** JIT jobs. PLAT-01 recorded exact
+  macOS/Linux-aarch64 parity for the whole lib suite (131 passed / 2 ignored on
+  each) and 66/66 for `randomx::jit::` on both, so the filtered 92 should match
+  — but the count itself has never been measured on Linux aarch64 since the
+  native loop landed. If `jit-linux-arm` reports 90 or 91 on its first run, that
+  is a platform difference to investigate, **not** a reason to loosen the
+  assertion.
+- Queue times for free macOS runners are unknown; issue #9 notes they may be
+  significant.

@@ -15,7 +15,7 @@ Code change is confined to `src/randomx/jit/memory.rs` (+`mod.rs` comments);
 | 4 | Privatisation of `enable_write`/`enable_execute` | done |
 | 5 | `compile_error!` + module gate | **done — fires cleanly** |
 | 6 | Implementer's disclosures | **done — all honest; two narrowed** |
-| R | Reproduce claimed test results (macOS + Linux aarch64) | in progress |
+| R | Reproduce claimed test results (macOS + Linux aarch64) | **done — every claim reproduced** |
 
 ## Findings
 
@@ -276,3 +276,85 @@ on Linux". **Does not block.**
 
 AUDIT.md lists "README/CLAUDE.md platform-coverage wording" as deliberately
 deferred, so this is disclosed rather than missed. **Does not block.**
+
+### F13 — Every claimed result reproduced, plus one the implementer could not run. (informational)
+
+| Claim | My result |
+| :- | :- |
+| macOS `cargo clippy --all-targets -- -D warnings` clean | **exit 0, zero warnings** |
+| macOS `make check` clean | **exit 0** |
+| macOS `cargo test --release` → 131 lib + 10 bin, 2 ignored, 0 failed | **131 passed / 2 ignored / 0 failed (90.1 s); bin 10 passed** |
+| Linux aarch64 JIT tests, release, 66 passed | **66 passed, 0 failed** |
+| Linux aarch64 JIT tests, **debug**, 66 passed | **66 passed, 0 failed** |
+| Linux aarch64 differential tests, 4 passed | **8 passed** (the 4 diff tests + 4 known-answer/effective, 191 s) |
+| Linux aarch64 whole suite 131 + 10 | **131 passed / 2 ignored / 0 failed (194.8 s); bin 10 passed** — exact parity |
+| Linux `cargo check --benches/--all-targets --release` clean | **clean** |
+| *(not claimed — implementer said clippy was unavailable)* | **Linux `cargo clippy --all-targets -- -D warnings`: exit 0, clean** |
+| *(not claimed)* | **macOS debug JIT subset: 66 passed** |
+
+Container: colima / `rust:1.97.1` / `--platform linux/arm64`, `uname -m` =
+`aarch64`, `host: aarch64-unknown-linux-gnu`, 4 vCPU / 8 GB, no emulation. Peak
+observed RSS during the whole-suite run: **3.9 GiB of 7.7 GiB** — tighter than
+comfortable, as disclosed, but it completed.
+
+---
+
+## Verdict: **MERGEABLE.** No blockers, no majors. Two minors (F11, F12), both
+## already disclosed or inert.
+
+### Item-by-item
+
+1. **Is the Darwin path genuinely unchanged?** **Yes — confirmed by two
+   independent methods.** A statement-level table (F1) and a mechanical
+   normalised token comparison (F9) both show the `#[cfg(target_os = "macos")]`
+   arm is a pure move. Identical `mmap` prot/flags/fd/offset, identical
+   `MAP_FAILED || is_null` test, identical `"mmap MAP_JIT failed"` string,
+   identical `pthread_jit_write_protect_np(1)` → `sys_icache_invalidate(ptr,
+   code_len)` order, and `write_code` is textually unchanged so `code_len` still
+   holds the *current* program's length when the invalidate runs. The macOS
+   release suite is 131/10/2-ignored, matching main's 130 plus exactly the one
+   new test. **No Darwin regression.**
+2. **Is the Linux path correct?** **Yes.** All six `mman` constants verified
+   against the container's own `<sys/mman.h>` (F2), including that Darwin's
+   `MAP_JIT` bit is `MAP_DENYWRITE` on Linux. `__clear_cache` resolves to the
+   real libgcc implementation — `dc cvau` / `dsb ish` / `ic ivau` / `isb`, not a
+   stub (F3). Ordering, page alignment and the clear range are all right (F7).
+3. **Does the in-place rewrite case work, and is the new test a real guard?**
+   **Yes to both.** Deleting only the cache maintenance fails the test
+   **200/200 on Linux and 200/200 on macOS**, with the exact predicted symptom
+   (`left: 42, right: 55`), while the other 63 JIT tests stay green (F5, F6).
+   The test is the only unit-level guard and it is live.
+4. **Privatisation of `enable_write`/`enable_execute`.** **Correct.**
+   `git grep` on `main` finds no caller outside `memory.rs` (exit 1);
+   `write_code` is their only caller and its body is unchanged. `compiler.rs`
+   needed no edit, as claimed.
+5. **`compile_error!` and the module gate.** **Sound.** Firing it on
+   `aarch64-linux-android` yields exactly **one** clean error naming the file
+   and the fix — no cascading noise. Non-aarch64 is untouched
+   (`cargo check --target x86_64-apple-darwin --all-targets` clean); CI runs on
+   x86_64 Linux and never compiles the JIT, so leaving `.gitlab-ci.yml` alone is
+   right. No silent-wrong-compile combination found.
+6. **The disclosures.** **All honest.** Two I narrowed: Linux clippy is in fact
+   **clean** (I installed the component), and macOS debug JIT coverage now
+   exists (66 passed). The musl risk is real but its failure mode is a **loud
+   link error** — nothing in the musl sysroot defines `__clear_cache` as a stub.
+   Memory headroom is as stated.
+
+### Net effect on the shipping platform
+
+Not neutral — slightly **positive**. Before this branch nothing in the tree would
+have caught a removed `sys_icache_invalidate` on Darwin, even though the
+two-pass native-loop compile at `compiler.rs:834` depends on it.
+`test_jit_memory_rewrite_in_place` is the first guard against that, on macOS as
+well as Linux.
+
+### Non-blocking suggestions
+
+- Record in AUDIT.md that Linux clippy `--all-targets -D warnings` is clean
+  (`rustup component add clippy` is a ~20 s step) — the stated gap does not exist.
+- Add the F11 note (two `mprotect` syscalls per compile; no Linux release
+  artifact exists) so nobody later reads "the JIT works on Linux" as "the JIT is
+  fast on Linux".
+- Add the musl evidence to the source comment: the failure mode is a link error,
+  not a silent no-op.
+- README lines 14 and 111 when the deferred doc pass happens.

@@ -312,3 +312,22 @@ are ~20% of the peak there. The right justification is "they exist, they are
 the diagnostic regression", which reaches the same conclusion honestly. Worth
 correcting in the audit so a future reader planning a tighter runner is not
 misled into thinking the lever is unavailable.
+
+---
+
+## Extra evidence that no test got faster by doing *less*
+
+The release suite's wall clock dropped 88.4 s → 46.3 s, which could in principle
+mean tests were narrowed. It does not. Compare **user CPU time** across the same
+runs:
+
+| | wall | user CPU |
+|---|---|---|
+| `main`, 12 threads | 88.4 s | 1025.9 s |
+| HEAD, 12 threads | 46.3 s | 362.5 s |
+
+The delta is 663 s of CPU. One `RandomXDataset::generate(cache, programs, 8)` is
+~330 s of CPU on this host, so the *entire* saving is accounted for by not
+generating a second 2 GiB dataset — 663 ≈ 2 × 330 vs 1 × 330. No test lost work;
+one dataset build was removed. Combined with the byte-identical `--list` output
+(item 5), this is about as direct as "coverage is unchanged" gets.

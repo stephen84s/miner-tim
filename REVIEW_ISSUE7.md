@@ -375,3 +375,26 @@ profile's. It does say "in the debug profile", so it is not false, only
 misfiled — the debug `run_group` is ~15 lines above. A reader scanning the
 release section still finds no release RSS figure. Move it under section 1, or
 quote both profiles.
+
+---
+
+## OBSERVATION O1 (informational, not blocking) — the memory win rests on an unguarded std specialisation, and nothing tests for its regression
+
+`zeroed_for_test()` is only cheap because `vec![[0u64; 8]; DATASET_ITEM_COUNT]`
+hits std's `SpecFromElem`/`IsZero` specialisation and becomes `alloc_zeroed`
+(lazily-faulted zero pages) rather than 2 GiB of writes. That specialisation is
+an optimisation, not a stability guarantee.
+
+The property is real today — measured: at `--test-threads=1` HEAD peaks at
+3.25 GB, whereas a fully-written second dataset would put that at ~5.4 GB. So
+the pages are genuinely not being touched.
+
+But if it ever stopped holding — a std change, or someone "clarifying"
+`zeroed_for_test` into a loop that writes items — **every test would still pass
+and `make verify-jit` would still report 92**, while the peak silently returned
+to roughly where issue #7 started. There is no RSS assertion anywhere in the
+gate; `EXPECTED_PASSES` counts tests, not bytes. Given that #9 will depend on
+this number, a cheap guard (e.g. asserting `zeroed_for_test()`'s pages stay
+untouched, or simply a comment in `verify-jit.sh` naming the invariant as
+load-bearing) would be worth having. Not a defect in this branch — the branch
+does what it says — but the property it buys is currently unprotected.

@@ -398,3 +398,21 @@ this number, a cheap guard (e.g. asserting `zeroed_for_test()`'s pages stay
 untouched, or simply a comment in `verify-jit.sh` naming the invariant as
 load-bearing) would be worth having. Not a defect in this branch — the branch
 does what it says — but the property it buys is currently unprotected.
+
+---
+
+## The mistake this change did *not* make
+
+Worth stating explicitly, because it is the version of this change that would
+have been a real coverage loss: the **`zeroed_for_test()` dataset is not used by
+the differential tests.** It has exactly one caller, the ShareVerifier rotation
+test (`tests.rs:726`). `native_loop_diff_tests::test_dataset()` still returns the
+**real** `test_key_000_dataset()`.
+
+That matters because the emitted loop's dataset read is `r ^= dataset[...]`. Had
+the diff tests been pointed at a zeroed dataset to save the 2 GiB, every dataset
+read would have degenerated to `r ^= 0`, the r-registers would have stopped
+being steered by dataset content, and CBRANCH coverage would have collapsed —
+while all 92 tests still passed. The implementer took the 2 GiB hit exactly
+where it buys coverage and the synthetic dataset only where it does not. This is
+the correct split.

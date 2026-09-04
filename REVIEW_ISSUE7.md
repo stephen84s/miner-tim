@@ -122,3 +122,95 @@ the right mitigation for a cost that cannot be removed without paying 2 GiB.
 I would accept this. Recorded as a minor, not a blocker.
 
 **No blocking finding.**
+
+---
+
+## Item 5 — is coverage really unchanged?
+
+**Reproduced, and strengthened beyond a count.**
+
+`make verify-jit` on this host (Darwin arm64, M2 Max):
+
+```
+test result: ok. 92 passed; 0 failed; 1 ignored; 0 measured; 40 filtered out; finished in 185.41s
+verify-jit: OK — debug profile (debug_assert! live), 92 passed
+test result: ok. 92 passed; 0 failed; 1 ignored; 0 measured; 40 filtered out; finished in 46.04s
+verify-jit: OK — release profile (shipping profile), 92 passed
+verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug + release
+```
+
+Claimed 187 s / 46 s; measured 185.41 s / 46.04 s. `native_loop_at_the_c1_worst_case_dataset_address ... ok`
+appears in **both** profiles — which, per item 1, is the direct empirical proof
+that the C1 worst case is still reached against the new dataset.
+
+Full suite, release: **131 passed, 0 failed, 2 ignored** (lib) — reproduced at
+three different `--test-threads` values below. Bin target listed 10 tests.
+
+A pass count only proves cardinality, so I also diffed the **test name lists**
+between `main` and this branch:
+
+```
+diff <(sort list_main.txt) <(sort list_head.txt)   # main:  133 tests, 0 benchmarks
+                                                   # HEAD:  133 tests, 0 benchmarks
+=> IDENTICAL
+```
+
+Byte-identical. No test was added, removed, renamed, newly `#[ignore]`d, or
+cfg'd out. Leaving `EXPECTED_PASSES` at 92 is correct. **No finding.**
+
+---
+
+## Item 4 — reproducing the RSS numbers
+
+Method: `/usr/bin/time -l` on the **release lib test binary run directly**
+(`target/release/deps/minertim-<hash>`), not through `cargo`, matching the
+implementer's stated method. `main` was measured from a `git worktree` with its
+own `CARGO_TARGET_DIR`. M2 Max, `caffeinate -i`.
+
+| Run | `maximum resident set size` | Claimed | Verdict |
+|---|---|---|---|
+| `main`, `--test-threads=12`, run 1 | 8,154,300,416 (**8.15 GB**) | 8.16 GB | reproduced |
+| `main`, `--test-threads=12`, run 2 | 8,154,464,256 (**8.15 GB**) | 8.16 GB | reproduced |
+| `main`, `--test-threads=3` | 5,999,820,800 (**6.00 GB**) | *not measured* | **new** |
+| HEAD, `--test-threads=12` | 6,230,245,376 (**6.23 GB**) | 6.23 GB | exact |
+| HEAD, `--test-threads=3` | 4,067,033,088 (**4.07 GB**) | 4.06 GB | exact |
+| HEAD, `--test-threads=1` | 3,252,944,896 (**3.25 GB**) | 3.25 GB | exact |
+
+Wall clock: `main` 88.4 s / 88.5 s, HEAD 46.3 s — the claimed 94 s → 50 s, same
+direction and magnitude. All six runs: 131 passed, 0 failed, 2 ignored.
+
+**Every after-number is reproduced to the quoted precision, including the
+4.06 GB figure #9 will be planned against.** The saving is real and large.
+
+### FINDING F1 (minor, accuracy of a headline claim) — the "already red from day one" framing is not supported at the runner's parallelism
+
+`AUDIT.md` says of the 8.16 GB baseline: *"Had #9 landed first it would have
+been red from day one."* That is the 12-thread number on a 12-core dev box.
+At the `macos-14` runner's actual 3-core parallelism — the configuration #9 would
+actually run — I measured `main` at **6.00 GB**, i.e. *under* the 7 GB budget,
+though with only ~1 GB of headroom for the OS and runner agent. So the honest
+statement is "the baseline was marginal and would likely have flaked", not
+"would have been red from day one". The implementer explicitly declined to
+measure the pre-fix `--test-threads` rows; had they, the headline would have
+been weaker. This does not change the merge decision — 6.00 → 4.07 GB at the
+runner's parallelism is still a decisive improvement, and it is the honest
+version of the same argument.
+
+### Judgement: is "test-binary RSS" the right quantity for #9?
+
+**It is a floor, not a budget.** Two caveats worth recording on #9 rather than
+against this branch:
+
+1. `/usr/bin/time -l` reports max-over-waited-children, not the sum of
+   concurrently-resident processes. A CI job's true system peak is not bounded
+   by any number in that table; the OS, the runner agent and any concurrent
+   cargo process sit on top of 4.07 GB.
+2. The `macos-14` job compiles before it tests, and the release profile is
+   `lto=true, codegen-units=1`. I measured that separately:
+   `cargo test --release --lib --no-run` on `main` peaked at **458,784,768 B
+   (0.46 GB)** over 18.9 s. So the build is *not* the binding constraint — the
+   test run is. This closes the one caveat that could have invalidated the plan.
+
+With ~2.9 GB of slack under 7 GB, both caveats are comfortably absorbed. The
+figure is usable for #9 provided it is quoted as "the test binary's peak at the
+runner's parallelism", which the AUDIT already does say.

@@ -468,3 +468,100 @@ of headroom. That is the number worth committing.
 (I did not measure `main` debug at 3 threads; the 12-thread before/after pair is
 enough to establish the delta claim is wrong, and a second "before" number has
 no forward value.)
+
+---
+
+## Closing the issue's own acceptance wording — `make test` (debug, unfiltered)
+
+Issue #7's literal complaint is `make test` on an 8-16 GB machine, which is the
+**debug, unfiltered** suite — a configuration nobody measured. I did:
+
+| Configuration | measured | wall |
+|---|---|---|
+| HEAD, debug, **full suite**, 12 threads (`make test`) | 6,222,856,192 (**6.22 GB**) | 188.2 s, 131 passed / 2 ignored |
+
+Two notes. First, this is essentially identical to the release full suite at the
+same parallelism (6.23 GB), so the profile does not change the ceiling. Second,
+it is **0.79 GB above the debug *filtered* set (5.43 GB)** — so my earlier
+assumption that the filtered set approximates the full one was wrong, and the 41
+filtered-out tests do carry real Argon2d transients. Worth knowing before anyone
+uses the `verify-jit` figure as a proxy for `make test`.
+
+The issue's acceptance ("measure the suite's peak RSS after the fix and confirm
+it fits a 7 GB budget with headroom") is met at every parallelism I measured:
+6.22-6.23 GB at 12, 4.07 GB at 3, 3.25 GB at 1.
+
+---
+
+# Verdict
+
+**MERGEABLE.** No code defect found. Nothing here risks a wrong hash, a rejected
+share, or lost coverage.
+
+The dominant risk the review brief named — a quiet loss of JIT correctness
+coverage hidden inside a memory reduction — **does not materialise**, and it is
+closed three independent ways:
+
+- **structurally**: every input that shapes the differential tests
+  (`ProgramConfiguration`, `ma`, `mx`, `dataset_offset`, scratchpad) is a pure
+  function of the `u8` seed via `make_program_bytes` / `derive_program_params`;
+  the key cannot reach any of them;
+- **empirically on coverage**: `cargo test --lib -- --list` is **byte-identical**
+  between `main` and this branch, and `make verify-jit` reports 92/92 in both
+  profiles;
+- **empirically on work done**: the entire 663 s user-CPU saving equals exactly
+  one `RandomXDataset::generate` — no test got cheaper by doing less.
+
+The C1 worst-case guard still reaches the worst case, provably: the test forces
+`entropy(8)`/`entropy(13)` to their extremes and asserts `ma == 0x7FFF_FFC0` and
+`dataset_offset == DATASET_EXTRA_ITEMS * 64`; both assertions are
+dataset-independent and both pass in debug and release.
+
+The `zeroed_for_test()` substitution is confined to the one test whose subject is
+the `ShareVerifier` state machine, and four separate mutations of production
+`ShareVerifier` code all kill that test.
+
+## Findings
+
+| id | severity | summary |
+|---|---|---|
+| **F3** | minor | Both debug RSS figures in `scripts/verify-jit.sh` / `AUDIT.md` / `CLAUDE.md` fail to reproduce (6.77→6.27 measured, 4.50→5.43 measured); the claimed 2.27 GB debug saving is really 0.84 GB. Re-measure or drop before merge. |
+| **F1** | minor | "Would have been red from day one" is a 12-thread claim; at the runner's 3-core parallelism `main` measures 6.00 GB — marginal, not over budget. |
+| **F2** | minor | Right decision on the Argon2d `LazyLock`, wrong justification: those transients *do* exist at 3 threads (~0.8 GB of the 4.07 GB peak), they are simply not worth removing. |
+| **F4** | nit | Debug RSS comment filed under the `# 2. Release profile` banner in `verify-jit.sh`. |
+| **O1** | info | The whole memory win depends on std's `IsZero`/`alloc_zeroed` specialisation, which nothing asserts; a regression would leave all 92 tests green while the peak returned to ~issue-#7 levels. |
+
+All five are documentation/measurement accuracy or forward-looking hygiene. None
+requires a code change, and none should block the merge — though **F3 should be
+corrected in the same push**, since it is a checked-in number future work will
+be planned against.
+
+## Reproduction summary
+
+| check | claimed | measured |
+|---|---|---|
+| `make verify-jit` | GATE PASSED, 92 both profiles, 187 s / 46 s | **GATE PASSED, 92/92, 185.41 s / 46.04 s** |
+| `cargo test --release` | 131 lib + 10 bin, 2 ignored, 0 failed | **131 + 10, 2 ignored, 0 failed** |
+| `cargo clippy --all-targets -- -D warnings` | exit 0 | **exit 0** |
+| `make check` | exit 0 | **exit 0** |
+| release lib, 12 threads, `main` | 8.16 GB | **8.15 GB** (×2) |
+| release lib, 12 threads, HEAD | 6.23 GB | **6.23 GB** |
+| release lib, 3 threads, HEAD | 4.06 GB | **4.07 GB** |
+| release lib, 1 thread, HEAD | 3.25 GB | **3.25 GB** |
+| debug filtered, 12 threads, `main` | 6.77 GB | **6.27 GB** (F3) |
+| debug filtered, 12 threads, HEAD | 4.50 GB | **5.43 GB** (×2) (F3) |
+| test-name list, `main` vs HEAD | — | **byte-identical** |
+
+Host: M2 Max (8 P + 4 E = 12 logical), macOS, Rust as per `rust-toolchain`,
+all runs under `caffeinate -i`, `/usr/bin/time -l`, binaries invoked directly.
+
+## Coverage ledger (final)
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Is the key swap genuinely lateral? | **CLOSED — yes**, structurally and empirically |
+| 2 | Is `zeroed_for_test()` sound for the ShareVerifier test? | **CLOSED — yes**, 4/4 mutations killed |
+| 3 | Does the dummy pointer keep the zero-iteration test meaningful? | **CLOSED — yes**, verified in the emitter |
+| 4 | Reproduce the RSS numbers | **CLOSED** — release exact; debug does not reproduce (F3) |
+| 5 | Is coverage really unchanged? | **CLOSED — yes**, 92/92 and identical `--list` |
+| 6 | The decided-against list | **CLOSED** — both acceptable; F2 on one rationale |

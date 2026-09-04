@@ -214,3 +214,101 @@ against this branch:
 With ~2.9 GB of slack under 7 GB, both caveats are comfortably absorbed. The
 figure is usable for #9 provided it is quoted as "the test binary's peak at the
 runner's parallelism", which the AUDIT already does say.
+
+---
+
+## Item 2 — is `zeroed_for_test()` sound for the ShareVerifier test?
+
+**Mutation-tested, not argued.** A detached `HEAD` worktree with its own
+`CARGO_TARGET_DIR`; each mutation applied to `src/miner.rs` (production code),
+then `cargo test --release --lib -- <the rotation test> --exact`.
+
+Unmutated baseline: `1 passed` in 44.48 s.
+
+| # | Mutation to production code | Result | Assertion that killed it |
+|---|---|---|---|
+| M1 | `rekey` no longer does `self.vm = None` (stale VM survives rotation) | **FAILED** | `tests.rs:728` — *"cached VM survived a seed rotation — it would verify against the previous seed's dataset and withhold every share"* |
+| M2 | `rekey` ignores its `dataset` argument entirely | **FAILED** | `tests.rs:685` — `assertion failed: v.is_armed()` |
+| M3 | `reference()` drops `v.set_native_loop(false)` (verifier on the native-loop path) | **FAILED** | `tests.rs:707` — *"the verifier's VM is not on the reference path — verification would be comparing the native loop against itself"* |
+| M4 | `rekey` adopts a dataset only when it has none (i.e. **rotation** silently keeps the old one — the R9-F2 shape) | **FAILED** | `tests.rs:733` — *"the new dataset was not adopted"* |
+
+**Four out of four mutations killed.** M4 is the important one: it is exactly the
+failure mode the second dataset exists to detect, it is invisible to M1/M2, and
+the zeroed dataset catches it. The test is not vacuous and `zeroed_for_test()`
+has not weakened it.
+
+### Can the two hashes coincide?
+
+No, and this is settled empirically rather than by argument: the test passes,
+and it passes *through* `assert_ne!(after, got)`. That assertion only passes if
+the zeroed dataset produced a different 256-bit hash from the real one, so the
+zeroed dataset is demonstrably distinguishable on every run of the suite.
+Coincidence would require a 256-bit collision.
+
+### One honest qualification, stated so it is not over-claimed
+
+**No single mutation of production code can trip the `assert_ne!` itself**, because
+`holds_dataset()` and `reference()` both read `self.dataset`, so they cannot
+diverge — any mutation that would make the two hashes equal trips
+`has_cached_vm` or `holds_dataset` first. The `assert_ne!` is therefore a
+**test-vacuity guard** (it fires if a future edit passes the same dataset twice,
+which is precisely R9-F2), not a production-regression detector. That is a
+legitimate and valuable role, and the implementer's doc comment describes it
+correctly ("a dataset that failed to be distinguishable would fail the test
+rather than pass it quietly"). It should not be read as the assertion that
+catches a stale verifier — M1/M4 are.
+
+### Residency of the zeroed dataset
+
+`vec![[0u64; 8]; DATASET_ITEM_COUNT]` does hit std's `IsZero` specialisation
+(`impl IsZero for [T; N]` applies for `N <= 16`; here `N = 8`), so it is
+`alloc_zeroed` → lazily-faulted zero pages, as the doc comment claims. Expected
+residency: 8 programs × 2048 iterations = 16,384 dataset reads per hash over
+2 GiB at 16 KiB pages ≈ 15.4k distinct pages ≈ 250 MB; both hashes in the test
+walk the same address sequence, so ~250 MB total, not ~500 MB. That matches the
+AUDIT's "roughly 0.2 GB resident" and is consistent with the measured
+12-thread delta in item 4 (2× fully-touched 2 GiB → 1× 2 GiB + ~0.25 GB).
+
+**No finding.**
+
+---
+
+## Item 6 — the decided-against list
+
+### 6b — the x86_64 reachability check for `zeroed_for_test` (accepted)
+
+The implementer could not cross-compile and inspected instead. The inspection is
+**sufficient, and stronger than a cross-compile would have been**, because the
+predicates are identical:
+
+- `RandomXDataset::zeroed_for_test` — `#[cfg(test)]`, no arch predicate
+  (`dataset.rs:151`)
+- its only caller, `mod full_hash_tests` — `#[cfg(test)]`, no arch predicate
+  (`tests.rs:364`)
+
+Identical cfg predicates mean that wherever the caller compiles, the callee is
+used. There is no target on which one exists without the other, so GitLab's
+x86_64 `clippy -D warnings` job cannot see it as dead code. (Contrast
+`as_ptr_for_test`, which is correctly `#[cfg(all(test, target_arch = "aarch64"))]`
+because its caller is in the aarch64-gated `native_loop_diff_tests`.) **Accepted.**
+
+### 6a — declining to share the Argon2d cache behind a `LazyLock`
+
+The **decision** is right: at `--test-threads=3` there is ~2.9 GB of headroom
+under 7 GB, so spending a permanent 256 MiB and degrading a known-answer
+failure into "LazyLock init panicked" across five tests buys nothing. I would
+have declined too.
+
+### FINDING F2 (minor, wrong justification for a right decision)
+
+One of the two reasons given for that decision is factually wrong. `AUDIT.md`
+says sharing the cache would "remove transients that **only exist at parallelism
+the target runner cannot reach**." My measurements contradict that: the same
+post-fix binary peaks at **3.25 GB at 1 thread and 4.07 GB at 3 threads**. That
+0.82 GB delta is almost exactly three concurrent 256 MiB Argon2d caches, so the
+transients very much *do* exist at the `macos-14` runner's parallelism — they
+are ~20% of the peak there. The right justification is "they exist, they are
+~0.8 GB, and 2.9 GB of headroom makes them not worth the permanent 256 MiB and
+the diagnostic regression", which reaches the same conclusion honestly. Worth
+correcting in the audit so a future reader planning a tighter runner is not
+misled into thinking the lever is unavailable.

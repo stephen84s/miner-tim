@@ -11,7 +11,7 @@ Code change is confined to `src/randomx/jit/memory.rs` (+`mod.rs` comments);
 | :- | :- | :- |
 | 1 | Darwin path genuinely unchanged? | **done — unchanged** |
 | 2 | Linux path correct (constants, alignment, ordering, cache clear)? | in progress — constants + `__clear_cache` verified |
-| 3 | In-place rewrite test — does it actually fail if cache maintenance is removed? | not started |
+| 3 | In-place rewrite test — does it actually fail if cache maintenance is removed? | **done — guard is live on Linux** |
 | 4 | Privatisation of `enable_write`/`enable_execute` | done |
 | 5 | `compile_error!` + module gate | in progress |
 | 6 | Implementer's disclosures | not started |
@@ -88,3 +88,59 @@ Two consequences worth recording:
    coherency the call degenerates to `dsb`/`isb`. That is correct, but it is why
    the mutation test in item 3 must be interpreted carefully — see F5.
 
+
+### F4 — Headline deliverable independently reproduced on Linux aarch64. (confirmed)
+
+Container: `rust:1.97.1`, `--platform linux/arm64` on colima (`uname -m` =
+`aarch64`, `host: aarch64-unknown-linux-gnu`), 4 vCPU / 8 GB, **no emulation**.
+Tree = `git archive HEAD`, copied in; the host working tree was not used.
+
+- `cargo test --release --lib randomx::jit::` → **66 passed, 0 failed**.
+- `cargo test --release --lib -- native_loop_diff_tests
+  full_mode_v1_vm_reports_the_native_loop_effective test_native_loop_known_answer
+  test_vm_calculate_hash_jit` → **8 passed, 0 failed** (191 s), including all four
+  named deliverable tests:
+  `native_loop_matches_interpreter`, `native_loop_matches_interpreter_full_program`,
+  `native_loop_at_the_c1_worst_case_dataset_address`,
+  `full_mode_v1_vm_reports_the_native_loop_effective`.
+
+The implementer's load-bearing claim that
+`full_mode_v1_vm_reports_the_native_loop_effective` is the one test that
+hard-requires a live JIT allocation **checks out**: `vm.rs:1823` shows
+`native_loop_effective()` ORs in `self.jit.is_some()`, so a failed
+`mmap`/`mprotect` would make it false and the test fail, whereas the
+known-answer vectors would still pass via interpreter fallback.
+
+**The claim "emitted ARM64 agrees bit-for-bit with the interpreter on a second
+OS" is true and I reproduced it.**
+
+### F5 — The new test is a live guard, not decoration. (confirmed by mutation)
+
+Deleting only the cache-maintenance call in the container copy —
+
+```rust
+pub(super) fn enable_execute(p: *mut u8, size: usize, code_len: usize) {
+    protect(p, size, PROT_READ | PROT_EXEC, "PROT_READ|PROT_EXEC");
+    let _ = code_len; // MUTATION: cache clear removed
+}
+```
+
+— produces, on Linux aarch64:
+
+- `randomx::jit::` → **65 passed, 1 failed**. The one failure is
+  `test_jit_memory_rewrite_in_place`, with exactly the predicted symptom:
+  `assertion left == right failed: rewritten code must execute, not a stale
+  I-cache line / left: 42 / right: 55`.
+- Repeated **200 times** standalone (`--exact`, `--test-threads=1`):
+  **0 passed / 200 failed**. Deterministic, not a flaky microarchitectural
+  coin-flip.
+- The 63 `jit::compiler` tests **all still pass** under the mutation — so the new
+  test is not redundant with them; it is the only unit-level guard.
+- The differential/known-answer tests under the same mutation die with
+  **SIGSEGV** (executing a stale instruction stream), i.e. they detect it too,
+  but as a crash rather than a diagnosis.
+
+This is the opposite of the earlier "assertion that could not fail" problem in
+this repo's history. The test earns its place, and it also empirically confirms
+that Linux `mprotect` does **not** imply I-cache maintenance — the `__clear_cache`
+call is load-bearing, not defensive.

@@ -76,6 +76,19 @@ jobs:
       # max-over-waited-children, so the OS, the runner agent and rustc all sit
       # on top of it. Headroom under 7 GB is roughly 2.9 GB.
       RUST_TEST_THREADS: "3"
+      # `.cargo/config.toml` sets `-C target-cpu=native` for aarch64-apple-darwin.
+      # That is right for local mining but WRONG on a virtualised runner: on
+      # macos-14 `native` resolves to a CPU model whose *static* feature set
+      # omits aes/sha2/neon, and `ring` has a compile-time assertion that an
+      # aarch64-apple target has them — so the build fails before a single test
+      # runs (E0080, `_AARCH64_APPLE_TARGETS_EXPECTED_FEATURES`).
+      #
+      # RUSTFLAGS in the environment *replaces* the config's target rustflags
+      # rather than merging with them, so this is the override. apple-m1 is the
+      # same choice `make dist` already makes for portable builds, and it
+      # statically provides aes+neon+sha2. It does not affect what this job
+      # tests: the JIT is hand-emitted ARM64, not rustc codegen.
+      RUSTFLAGS: "-C target-cpu=apple-m1"
     steps:
       - uses: actions/checkout@v4
 

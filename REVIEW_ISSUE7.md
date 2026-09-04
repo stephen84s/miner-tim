@@ -416,3 +416,55 @@ being steered by dataset content, and CBRANCH coverage would have collapsed —
 while all 92 tests still passed. The implementer took the 2 GiB hit exactly
 where it buys coverage and the synthetic dataset only where it does not. This is
 the correct split.
+
+---
+
+## F3, CORRECTED AND EXTENDED — both debug figures fail to reproduce, and the claimed debug *delta* is inflated ~2.7×
+
+The earlier draft of F3 (above) only had the "after" number. I have now measured
+the "before" number too, from the `main` worktree's own debug binary, same six
+filters, same method. Full debug picture:
+
+| Configuration | measured `maximum resident set size` | wall | claimed |
+|---|---|---|---|
+| `main`, debug filtered, 12 threads | 6,265,208,832 (**6.27 GB**) | 308.9 s | 6.77 GB |
+| HEAD, debug filtered, 12 threads, run 1 | 5,425,659,904 (**5.43 GB**) | 195.3 s | 4.50 GB |
+| HEAD, debug filtered, 12 threads, run 2 | 5,425,758,208 (**5.43 GB**) | 198.1 s | 4.50 GB |
+| HEAD, debug filtered, **3 threads** | 4,067,426,304 (**4.07 GB**) | 201.5 s | not quoted |
+
+All four runs: `92 passed; 0 failed; 1 ignored; 40 filtered out`.
+
+Three things follow:
+
+1. **Wall clock reproduces on both sides** (claimed 316 s → 193 s; measured
+   308.9 s → 195.3/198.1 s). So the runs themselves are comparable and my method
+   matches the implementer's stated one. Only the memory figures diverge.
+2. **Neither debug figure reproduces, and they diverge in opposite directions** —
+   the "before" is quoted 0.5 GB too high, the "after" 0.93 GB too low. The
+   `--test-threads` confound does not explain it: at 3 threads HEAD reads
+   **4.07 GB**, not 4.50 GB, so no thread count produces the committed number.
+3. Consequently the claimed debug saving of **2.27 GB** (6.77 → 4.50) is really
+   **0.84 GB** (6.27 → 5.43) — inflated by about 2.7×. The saving is real and in
+   the right direction; its magnitude is not.
+
+I cannot explain the divergence from here (the release figures reproduced to the
+quoted digit, twice, on both branches, so it is not a method difference on my
+side). **Recommendation: re-measure the two debug numbers and correct them in
+`scripts/verify-jit.sh`, `AUDIT.md` and the `CLAUDE.md` task-board row before
+merge, or drop them and quote only the release figures, which are solid.**
+
+Severity: **minor** — no code is wrong, the direction of every claim holds, and
+5.43 GB still fits 7 GB. It is raised at this level rather than as a nit only
+because the audit's own thesis is that unverified memory numbers are what got
+issue #7 mis-scoped in the first place, and because `make verify-jit` (debug) is
+documented as mandatory before every JIT MR, so its footprint is the one a
+contributor on a 8-16 GB machine actually feels.
+
+**Useful side-result for #9:** the debug gate at the `macos-14` runner's
+3-core parallelism is **4.07 GB** — essentially identical to the release suite's
+4.07 GB at the same parallelism. Both profiles fit the 7 GB budget with ~2.9 GB
+of headroom. That is the number worth committing.
+
+(I did not measure `main` debug at 3 threads; the 12-thread before/after pair is
+enough to establish the delta claim is wrong, and a second "before" number has
+no forward value.)

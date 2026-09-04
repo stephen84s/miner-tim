@@ -1,4 +1,4 @@
-// RandomX JIT compiler for aarch64
+// RandomX JIT compiler for aarch64 (macOS and Linux).
 // Compiles BytecodeInstruction[256] to native ARM64 code.
 
 pub mod memory;

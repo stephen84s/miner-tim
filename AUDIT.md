@@ -4210,3 +4210,67 @@ that work needs a stub job reporting success in the skipped case — real
 complexity for a saving that only applies to documentation commits. Not worth it
 today; revisit if docs-only PRs become frequent.
 
+
+### DOC-02 (2026-09-06): retire the manual JIT gate in prose; correct a false safety claim CI-03 created
+
+Two things, one of which is a regression the previous merge introduced.
+
+**The regression.** CI-03 removed `push: branches: [main]` from `ci.yml` and
+`jit.yml`, leaving `pull_request` + `workflow_dispatch` as the only triggers
+(confirmed by reading the trigger keys directly, not from the entry that made the
+change). Three places still told the reader the gate runs on *every push*, the
+worst of them `CLAUDE.md`'s Operational Protocol step 6 — which told a future
+session that CI enforces the JIT gate automatically and "it is no longer on you
+to remember". After CI-03 that is false in a specific and dangerous way: **a push
+to a branch with no open PR is now checked by nothing at all.** An agent could
+push JIT changes, see no failure, and conclude they were verified.
+
+The discriminating test applied to the replacement wording was "does this
+sentence survive the case *push to a branch with no open PR*?" The two
+platform-coverage rows survive a plain push → pull request substitution. Step 6
+did not: its *reasoning* changed, not just its noun. It now states the uncovered
+window explicitly and inverts the old advice — running the gate locally matters
+**more** now, not less, because a bare branch produces no verdict at all. The
+x86_64 row gained the same qualifier, which it had never carried.
+
+**The retirement.** Issue #6 required that once both `jit-*` jobs were green in
+CI, the "mandatory before merge" language and the paste-the-output-into-the-MR
+requirement be removed, with the make targets demoted from mandatory to useful
+rather than deleted. Three leftovers were still in place:
+
+- `Makefile` help text — "mandatory before any MR touching src/randomx/jit/".
+- `Makefile` gate comment — the paste-into-MR sentence, plus "Issue #9 tracks
+  replacing this with GitHub Actions", which is stale twice over: it is old
+  GitLab numbering (GitHub #6), and the replacement has happened. Deleted rather
+  than renumbered.
+- `scripts/verify-jit.sh` — a final `echo` instructing the operator to paste the
+  PASS lines into the MR description, citing "issue #2 mitigation 3". The `GATE
+  PASSED` line above it is retained; only the instruction is gone.
+
+Both make targets are kept, as the issue required. Their stated purpose is now
+the window CI genuinely does not cover, rather than a duty CI has taken over.
+
+**Not changed: `README.md`.** Its table says the JIT is tested "automatically, on
+every change" and that "a failure blocks the change". Both became *more* accurate
+under CI-03, not less — it is the change, not the push, that is now gated.
+Rewriting it would have been churn.
+
+**Files changed:** `CLAUDE.md` (step 6, three platform-coverage rows, task
+board), `Makefile` (help text, gate comment), `scripts/verify-jit.sh` (one echo
+removed), `AUDIT.md` (this entry).
+
+**Verification.** `bash -n scripts/verify-jit.sh` clean; `make help` renders.
+Trigger keys read directly from all three workflows: `ci.yml` and `jit.yml` are
+`pull_request` + `workflow_dispatch`; `release.yml` keeps `push:` on `v[0-9]*`
+tags and is untouched. No behaviour change — the removed `echo` runs only after
+the gate has already passed, and the exit codes are unchanged, so the gate's
+verdict is bit-identical. The `jit-macos` and `jit-linux-arm` jobs on this PR
+re-run the full 92-test gate regardless.
+
+**Assumption stated rather than tested:** that no tooling parses
+`verify-jit.sh`'s final line. Nothing in the repo greps for it, and CI checks the
+exit code.
+
+**Issue #2 was closed separately**, before this branch, since it needed no code
+change. Its acceptance criteria were re-verified against what actually landed
+rather than against the audit's account of it. Issue #6 closes with this PR.

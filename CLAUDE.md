@@ -55,10 +55,14 @@
 5.  **Review:** Before replying "Done", verify `make check` and `make test` passed.
 6.  **JIT gate:** Any change touching `src/randomx/jit/`, or `vm.rs`'s
     native-loop path, must pass **`make verify-jit`**. CI enforces this on every
-    push (`jit-macos` on `macos-14`, `jit-linux-arm` on `ubuntu-24.04-arm`), so
-    it is no longer on you to remember — but run it locally before pushing when
-    the change is non-trivial, because the macOS debug profile takes ~8 minutes
-    in CI and a local failure is cheaper than a red push. `make verify-jit-linux`
+    **pull request** (`jit-macos` on `macos-14`, `jit-linux-arm` on
+    `ubuntu-24.04-arm`), and both are required checks on a protected `main`, so
+    a failure blocks the merge rather than merely reporting. Note what that does
+    *not* cover: since CI-03 the workflows trigger on `pull_request` and
+    `workflow_dispatch` only, so **a push to a branch with no open PR is checked
+    by nothing at all.** Run the gate locally while a change is still on a bare
+    branch — that is the window CI does not see. It is also cheaper than a red
+    PR: the macOS debug profile takes ~8 minutes in CI. `make verify-jit-linux`
     runs the same gate under native linux/arm64 and is worth running directly
     when `jit/memory.rs` or other platform-conditional code changes. Never cite
     the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.
@@ -88,6 +92,7 @@
 | **Completed** | **MIGRATE-01** | **Migrated to GitHub; aarch64 JIT under CI for the first time.** GitLab could not run it — x86_64 runners, `no_matching_runner` for arm64, then `ci_quota_exceeded` — and no GitLab tier offers macOS at any price. Repo converted SHA-256→SHA-1 (GitHub supports only SHA-1, established from its own protocol advertisement and from REST/GraphQL having no object-format parameter); 181 commits and 3 tags preserved, trees identical bar an accidental gitlink, 118 commit references remapped from a verified 188-entry mapping, `SHA256_TO_SHA1_MAP.txt` committed. Five jobs green: `lint`/`audit`/`test` on `ubuntu-24.04`, **`jit-macos`** (`macos-14`) and **`jit-linux-arm`** (`ubuntu-24.04-arm`), each running the 92-test gate in debug **and** release. The first `macos-14` run caught a latent build failure invisible for the project's life: `-C target-cpu=native` resolves to a feature-poor model on a virtualised runner and trips a `ring` compile-time assertion; fixed with `target-cpu=apple-m1`, matching `make dist`. GitLab archived read-only with a pointer; working copy moved to `code/github/miner-tim`. Closes issues #2 and #4. |
 | **Completed** | **PROC-01** | **`main` protected after six unreviewed commits reached it.** PR required, all five checks required, strict up-to-date, `enforce_admins: true`, force-push and deletion blocked, 0 approvals (a solo maintainer cannot approve their own PR). Verified by a refused direct push (`GH006`) *and* by reading the live API — the push test alone covers only 2 of the 7 settings. Enforces branch/PR/checks, **not** that a reviewer looked. Three review rounds: round 1 found the entry's "CI is green on them" claim false (`6414ba1`'s JIT gate cancelled with zero jobs); round 2 found the same sentence still claiming the six commits are "all documentation" when two changed CI workflows, and that the PR body had never been updated; round 3 found no blockers and confirmed the mechanism independently (live protection matches the table, the five contexts are string-exact against the real check-run names, and pushing to the PR flipped it `clean`→`blocked`), but found the entry had been corrected by accretion into three self-contradictions — rewritten in place rather than appended to again. Ledger: `REVIEW_PR7.md`. |
 | **Completed** | **CI-03** | **CI runs on pull requests only.** Dropped `push: branches: [main]` from `ci.yml`/`jit.yml`; `release.yml` untouched. Safe because `main` requires branches up to date before merging, so a PR's head is the tree that lands and the post-merge pass re-tested an identical tree. Measured cost of that duplicate pass: **30.4 runner-minutes** (mean per job over 12–14 completed runs) or **~15 min wall-clock** (n=17, median 14.52), the jobs being concurrent. Public repo, so `billable.total_ms` is 0 — this buys back wait time and runner capacity, not money. Three review rounds: round 1 caught the figures as invented and `cancel-in-progress: true` as unsafe (`workflow_dispatch` shares `refs/heads/main`, so a second manual run kills the first); round 2 caught the *corrections* — figures mislabelled as means, an un-updated PR body, and an unsupported "~19 min on GitLab" claim; round 3 re-derived every number from the run data (all reproduced exactly), confirmed the five required check contexts still match the job names a `pull_request` run produces, and found the entry's own Verification summary still citing the two methods the entry had already disavowed. Ledger: `REVIEW_PR8.md`. |
+| **Completed** | **DOC-02** | **Manual JIT gate retired in prose; a false safety claim corrected.** CI-03 left three places saying the gate runs "every push" when the workflows now trigger on `pull_request` + `workflow_dispatch` only — including Operational Protocol step 6, which told a future session CI had taken the duty over. It had not: **a push to a branch with no open PR is checked by nothing.** Step 6 now states that window and inverts the advice (run it locally *more*, not less). Issue #6's retirement items done: "mandatory" dropped from the `Makefile` help text, the paste-into-MR requirement removed from the `Makefile` comment and from `verify-jit.sh`'s final `echo`, and the stale "Issue #9 tracks replacing this" deleted rather than renumbered. Both make targets kept, demoted to useful. `README.md` deliberately unchanged — "on every change ... blocks the change" got *more* accurate under CI-03. Closes #6; #2 closed separately. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---
@@ -125,9 +130,9 @@ needs colima running on an aarch64 VM (`colima start --arch aarch64 --cpu 4 --me
 
 | Platform | Hashing path | Verified by |
 |---|---|---|
-| macOS aarch64 (shipping target) | aarch64 JIT + native iteration loop | **CI** — `jit-macos` (`macos-14`), every push |
-| Linux aarch64 | same JIT; tests only, no release artifact | **CI** — `jit-linux-arm` (`ubuntu-24.04-arm`), every push |
-| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **CI** — `lint`, `test`, `audit` (`ubuntu-24.04`) |
+| macOS aarch64 (shipping target) | aarch64 JIT + native iteration loop | **CI** — `jit-macos` (`macos-14`), every pull request |
+| Linux aarch64 | same JIT; tests only, no release artifact | **CI** — `jit-linux-arm` (`ubuntu-24.04-arm`), every pull request |
+| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **CI** — `lint`, `test`, `audit` (`ubuntu-24.04`), every pull request |
 
 **The x86_64 jobs validate the interpreter path and nothing else.** `mod.rs`
 gates the JIT on `#[cfg(target_arch = "aarch64")]`, so those runners never

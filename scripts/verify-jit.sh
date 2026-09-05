@@ -153,4 +153,3 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "verify-jit: GATE PASSED on $(uname -s) $arch — $EXPECTED_PASSES tests, debug + release"
-echo "verify-jit: paste these lines into the MR description (issue #2 mitigation 3)"

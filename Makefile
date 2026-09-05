@@ -25,8 +25,8 @@ help:
 	@echo "  make run              Build and run (requires WALLET=...)"
 	@echo "  make bench            Run the RandomX hash benchmark"
 	@echo "  make test             Run Rust unit tests (debug; NOT the JIT gate)"
-	@echo "  make verify-jit       aarch64 JIT gate on this Mac (mandatory before"
-	@echo "                        any MR touching src/randomx/jit/)"
+	@echo "  make verify-jit       aarch64 JIT gate on this Mac (CI runs it too;"
+	@echo "                        useful before a src/randomx/jit/ change has a PR)"
 	@echo "  make verify-jit-linux The same gate under native linux/arm64 (colima)"
 	@echo "  make check            Quick type-check"
 	@echo "  make audit            Scan dependencies for known vulnerabilities"
@@ -62,10 +62,11 @@ test:
 # green pipeline says nothing about emitted ARM64. Both targets are hard gates:
 # non-zero exit on any failing test or an unexpected test count.
 #
-# Mandatory before any MR that touches src/randomx/jit/ (or vm.rs's native-loop
-# path); paste the final PASS lines into the MR description. Issue #9 tracks
-# replacing this with GitHub Actions, which gives public repos free `macos-14`
-# and `ubuntu-24.04-arm` runners.
+# No longer mandatory to run by hand: the same gate is a required status check on
+# every pull request, so a failure blocks the merge and CI evidence replaces the
+# pasted-in kind. It stays useful in one window CI does not cover — the workflows
+# trigger on pull requests only, so a branch with no open PR is checked by
+# nothing.
 verify-jit:
 	@./scripts/verify-jit.sh
 

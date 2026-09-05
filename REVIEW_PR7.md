@@ -431,3 +431,234 @@ documentation carried false claims.
 **Fix:** edit the PR body: correct "all documentation, CI is green on them" to
 match the corrected AUDIT text, drop the "rather than" ranking of the push test,
 and add the `required_conversation_resolution` row.
+
+---
+
+## Round-1 findings: fixed or not
+
+Each row re-verified from primary sources, not from the correction commit's
+message.
+
+| # | round-1 finding | state after `6ef8921` |
+|---|---|---|
+| B1 | "CI is green on them" false | **Half fixed.** `AUDIT.md` corrected, and its numbers are right (re-verified below). The PR body still carries the claim — **F2**. Consequence overstated — **F3**. |
+| B2 | step 0 claimed protection removes the need to remember *review* | **Fixed, correctly.** |
+| B3 | "blocks a push" impossible after protection | **Fixed, correctly** (line 131 → "blocks a merge"). |
+| B4 | bootstrap carve-out not enumerated | **Fixed**, with one framing point dropped — **F4**. |
+| M1 | `required_conversation_resolution: true` omitted | **Half fixed** — in AUDIT prose only, not in the settings list and not in the PR table (**F2**); and the gate it names is inert here (**F5**). |
+| M2 | push test presented as covering more than it does | **Fixed in `AUDIT.md`** ("2 of the 6 rows"), not in the PR body (**F2**). |
+| M3 | no `PROC-01` task-board row | **Fixed.** Every substantive claim in the row verified true (**F6** is a nit on its status column). |
+
+### B1's replacement numbers — re-verified independently
+
+`gh api repos/stephen84s/miner-tim/commits/<sha>/check-runs`, run fresh for this
+round, all nine post-migration commits:
+
+| commit | check-runs | note |
+|---|---|---|
+| `f6f351e` | 0 | bootstrap, not run |
+| `4cfdf85` | 0 | bootstrap, not run |
+| `445466b` | 5 | **`jit-macos: failure`**, other four success |
+| `e460643` | 5 | all success |
+| `bcad873` | 5 | all success |
+| `966ffda` | 5 | all success |
+| `7c92e4c` | 5 | all success |
+| `6414ba1` | **3** | `lint`/`audit`/`test` success; no `jit-*` |
+| `d621978` | 5 | all success — it was `in_progress` during round 1, it is green now |
+
+Every figure the correction states is correct, including "`6414ba1` has only 3"
+and "five of six are fully green". Run `33941786130` confirmed: `head_sha`
+`6414ba1`, `conclusion: cancelled`, `run_attempt: 1`, jobs `total_count: 0`,
+created `03:24:59Z`, cancelled `03:28:29Z`. `445466b`'s `jit-macos` failure
+confirmed. The correction did not invent, round off, or soften anything here.
+
+### B2's replacement text — verified accurate
+
+Step 0 now says protection enforces "the **branch, the PR and the checks**; it
+does not and cannot enforce that a reviewer looked", that at 0 approvals an
+author can merge their own PR unreviewed, and that "the same account can disable
+protection". All three check out: `required_approving_review_count: 0` live,
+`rulesets` is `[]` (no second layer), and `enforce_admins` governs pushes, not
+the protection settings themselves. It is not merely arguable — it is
+demonstrated by this very PR: `pulls/7` reports `mergeable_state: clean` with
+`reviews: 0`, `comments: 0` and `review_comments: 0`. The merge button is live
+right now with no review recorded on GitHub at all. The replacement is stronger
+than the claim it replaced and it is true.
+
+### B3 — and the cross-file check round 1 did not run
+
+Line 131 now reads "blocks a merge — protection rejects a direct push before CI
+is even consulted", which is correct. I also grepped `README.md`, the other file
+carrying platform-coverage prose, for "every push" / "blocks a push" / "protect":
+**no hits** (only "protects against a bug silently producing wrong results",
+unrelated). So the corrected wording does not leave a sibling file contradicting
+it. `CLAUDE.md` 98–99 keep "every push", which round 1 adjudicated as loose but
+defensible; the fix did not worsen it and I do not reopen it.
+
+Also checked: "It was followed for MRs !1–!4" in step 0. Four GitLab merge
+commits exist on `main` — `365d288`, `1790a9f`, `389f3c7`, `f02950b` — and
+`AUDIT.md:3610` refers to "!1 through !4". Accurate.
+
+---
+
+## F3 (Minor) — "no aarch64 verdict and never will" overstates the gap
+
+Two overstatements in the correction's B1 paragraph, both in the direction of
+making the hole look worse than it is:
+
+1. **The source tree *was* verified.** `git diff --stat 6414ba1 d621978` is
+   `AUDIT.md | 52 +` — nothing else. `d621978` has all five check-runs green,
+   including both `jit-*` jobs. So the aarch64 gate has run green on a tree
+   identical to `6414ba1`'s in every file that affects the build. Per commit the
+   verdict is missing; in substance nothing about that code state is unverified.
+   `6414ba1` itself touched only `CLAUDE.md` and `README.md`.
+2. **"never will" is not true.** `.github/workflows/jit.yml` carries
+   `workflow_dispatch:`, so a branch at that SHA would produce a verdict on
+   demand. The verdict is *absent*, not *unobtainable*.
+
+Neither undermines B1's core, which was right and is the reason the entry needed
+correcting at all. But the correction is an accuracy fix, and precision cuts both
+ways: an append-only ledger should not overstate a gap any more than it should
+understate one.
+
+**Fix:** add one clause — "the identical source tree is covered by `d621978`'s
+green run (`git diff 6414ba1 d621978` is `AUDIT.md` only)" — and soften "never
+will" to "and none was ever produced".
+
+## F4 (Minor) — B4's fix keeps round 1's damaging fact and drops its framing challenge
+
+The new paragraph enumerates `445466b`, `4cfdf85`, `f6f351e` and — to its credit
+— keeps the sharp part: `445466b`'s `jit-macos` concluded `failure`, so the
+bootstrap push left `main` red. What it drops is round 1's challenge to the
+carve-out's premise, restating instead that all three went up "in the initial
+import push, when there was no `main` to protect and no PR was possible".
+
+Round 1's evidence was that `4cfdf85` and `445466b` were authored 37 and 39
+minutes *after* the repository was created (`created_at`
+`2026-09-04T20:26:36Z`), so they were new work rather than imported history.
+Checking that myself, it is half right and the correction is half justified:
+
+- `4cfdf85` is a **merge commit** (`parents = f02950b f6f351e`). Its content is
+  `f6f351e`, authored `20:02Z`, before the repo existed. Round 1 counting it as
+  new post-creation work is wrong; the correction is right to drop it.
+- `445466b` (`parents = 4cfdf85`) is a direct commit on `main`, authored and
+  committed `21:05Z`, **39 minutes after the repo existed** — genuinely new work
+  written straight onto `main`, and it is the one that left `main` red.
+
+So the honest version is narrower than round 1's and wider than the correction's:
+one of the three was new work authored after the repository existed, and it is
+the same one whose `jit-macos` failed. Saying only "the initial import push …
+no PR was possible" reads as more exculpatory than the record supports.
+
+**Fix (optional):** one clause — "`445466b` was authored 39 minutes after the
+repository existed and is the one that left `main` red; the other two carry
+pre-creation content".
+
+## F5 (Minor) — the gate cited as making 0 approvals non-vacuous does not fire here
+
+`AUDIT.md` now says: "What 0 approvals does *not* mean is 'no gate' —
+`required_conversation_resolution: true` is set and is independent of the review
+block, so an unresolved thread blocks a merge on its own."
+
+Literally true, and the setting is live (`required_conversation_resolution:
+{"enabled": true}`). But as a rebuttal to "0 approvals means an author can
+self-merge unreviewed" it does not hold, and the same paragraph's own first half
+says so:
+
+- It only fires if **someone opens a conversation**. This project's independent
+  reviews are written to `REVIEW_*.md` files committed to the branch — including
+  round 1 of this very review, and this round. PR #7 has `reviews: 0`,
+  `review_comments: 0`, `issue comments: 0`, and `mergeable_state: clean`.
+  The setting has gated nothing.
+- The author can resolve their own threads with one click, so even when it does
+  fire it is a speed bump, in exactly the way `enforce_admins` is against
+  disabling protection — which the same paragraph correctly says.
+
+**Fix:** keep the setting in the record (M1 asked for it and it belongs in the
+settings list, where it is still missing), but drop the "not 'no gate'"
+rhetoric, or qualify it: "it fires only if a reviewer opens a thread, and this
+project's reviewers write ledger files, not PR comments."
+
+## F6 (Nit) — `PROC-01` is marked **Completed** on an unmerged branch, mid-review
+
+Every factual claim in the new board row is true — I checked each against the
+live protection API: PR required, five contexts required, `strict: true`,
+`enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`,
+`required_approving_review_count: 0`; "2 of the 6 settings" matches round 1's
+M2 arithmetic (2 shown by the push refusal + 4 only by reading the config).
+
+The row nonetheless says "Reviewed by an independent agent, which found … both
+corrected" as settled fact, in a PR that was at that moment about to be
+re-reviewed — and this round found F1 in the correction itself. It also reads
+"Completed" while unmerged. Precedent rows (JIT-01, VIS-01) were written
+post-merge and say so ("Merged as MR !1 (`365d288`)"). Protocol step 4 is
+satisfied by the row existing; the nit is that its tense outruns the facts.
+
+## F7 (Nit) — an unwrapped 137-character line in `CLAUDE.md` step 0
+
+`CLAUDE.md:17` is 137 characters where the rest of the block wraps at ~75–80:
+the correction was spliced into the paragraph without re-flowing it. Cosmetic,
+and the one mechanical trace that this text was patched rather than rewritten.
+
+---
+
+## Observations (round 2)
+
+- **O5 — the implementer did not touch the reviewer's ledger.** `6ef8921`
+  changed `AUDIT.md` and `CLAUDE.md` only. `REVIEW_PR7.md` arrived in its own
+  commit (`5be2c8b`) and has not been edited since. Worth recording explicitly:
+  the round-1 record is intact and unrewritten.
+- **O6 — the enumeration of nine is complete.** `git log f02950b..main` lists
+  exactly the nine commits the branch discusses (six + three carve-out). Nothing
+  is missing and nothing has landed on `main` since `d621978`.
+- **O7 — `f6f351e` was in fact developed on a branch.** `4cfdf85` is a merge of
+  it into `main`. The GitLab-era habit had not fully lapsed at that point; what
+  was missing was a GitHub PR, which could not exist before the repository did.
+  This supports the carve-out and is worth one line in the record.
+- **O8 — forward-looking, not a defect here.** The sibling branch
+  `chore/pr-reviewer-agents` adds its *own* "Operational Protocol step 0"
+  (reviewer agents) plus a "0b" at the same insertion point in `CLAUDE.md`. Two
+  in-flight branches each introducing a step 0 will conflict textually, and
+  whichever merges second must renumber. Not this PR's defect; worth knowing
+  before merging either.
+- **O9 — round 1's B4 contained an error this round could not let stand.** B4
+  asserted `AUDIT.md` "omits the carve-out sentence entirely". It did not: the
+  original entry at `90e19d4` says "the initial push to `main` was unavoidable
+  when bootstrapping the repository". The correction's characterisation — "the
+  original entry gestured at that carve-out without naming them" — is the
+  accurate one. The implementer was right to resist the finding's premise while
+  acting on its substance.
+
+---
+
+## Summary (round 2)
+
+| # | Severity | Finding |
+|---|---|---|
+| F1 | **Blocking** | "they are all documentation" is false — `e460643` (jit.yml `RUSTFLAGS`) and `bcad873` (new `release.yml`, `Makefile`, archived `.gitlab-ci.yml`) are CI/automation. Left standing in the very sentence the correction edited, entering an append-only ledger |
+| F2 | **Major** | The PR body was never corrected: it still carries B1's exact false claim *and* F1's, still ranks the push test above reading the config (M2), and still omits `required_conversation_resolution` (M1). Three round-1 findings named it; none landed. Fixed with `gh pr edit`, not a commit |
+| F3 | Minor | "no aarch64 verdict and never will" overstates: `git diff 6414ba1 d621978` is `AUDIT.md` only and `d621978` is 5/5 green, so the identical tree is covered; and `workflow_dispatch:` exists |
+| F4 | Minor | B4's fix keeps `445466b`'s red `jit-macos` but drops round 1's premise challenge. Correct to drop it for `4cfdf85` (a merge of pre-creation content); wrong to drop it for `445466b`, authored 39 min after the repo existed |
+| F5 | Minor | `required_conversation_resolution` is cited as what makes 0 approvals "not no gate", but it fires only if someone opens a PR thread — this project's reviewers write ledger files. PR #7: 0 reviews, 0 comments, `mergeable_state: clean` |
+| F6 | Nit | `PROC-01` marked **Completed**, and its review described as concluded, on an unmerged branch under re-review. Every factual claim in the row verified true |
+| F7 | Nit | `CLAUDE.md:17` is 137 chars, unwrapped — the paragraph was patched without re-flowing |
+
+**Not mergeable.** F1 alone reaches that on round 1's own stated precedent: a
+false factual claim, made permanent in an append-only ledger, inside a PR whose
+subject is unreviewed documentation containing false factual claims. F2 means
+the artifact a human reads at merge time still carries the claim round 1 called
+blocking. Both are text edits — one in `AUDIT.md`, one via `gh pr edit` — and
+neither touches the mechanism.
+
+The mechanism remains right, and this round re-verified it end to end: every
+protection setting matches what is claimed, the five required contexts are
+string-exact and app-pinned, and the six corrections that did land in the two
+files are accurate where they land. What has not converged is the prose around
+it.
+
+**What this round did not verify:** the push refusal (pushing is outside a
+reviewer's remit; it is taken from the quoted `GH006` output and from
+`enforce_admins: true` being live), the mechanism behind run `33941786130`'s
+cancellation (round 1's O3 — still an open question and still worth an issue),
+and nothing was run of the test suite or the JIT gate, because this branch
+changes no code.

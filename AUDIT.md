@@ -3854,3 +3854,46 @@ had already been dropped once: the empty-value composition trap and the
 asymmetric fail-safe directions did not appear in later briefs even though both
 were findings from earlier rounds. Encoding them in the repo means the next
 session inherits them without depending on a conversation that will not exist.
+
+### PROC-03 (2026-09-05): worktrees for concurrent branches
+
+User asked for worktrees whenever more than one branch is in flight. Prompted by
+a concrete failure earlier the same day: with three PRs open and two reviewer
+agents running, the shared checkout was switched between branches mid-review, so
+**PR #7's reviewer committed its ledger onto the agents branch** instead of the
+one it was reviewing. Recovered by moving the commit, but it should not have been
+possible. `feedback_auto_review` already said "never edit the working tree while
+a review is running"; a single checkout makes that rule depend on discipline.
+
+**Setup.** One worktree per active branch under `.claude/worktrees/`, primary
+checkout parked on `main`:
+
+```
+~/code/github/miner-tim                                    [main]
+~/code/github/miner-tim/.claude/worktrees/chore-branch-protection
+~/code/github/miner-tim/.claude/worktrees/ci-run-on-pr-only
+~/code/github/miner-tim/.claude/worktrees/chore-pr-reviewer-agents
+```
+
+**`.gitignore` first, and this is not routine hygiene.** `.claude/worktrees/`
+and `.worktrees/` are now ignored. A tracked worktree directory is committed as
+a **gitlink** (mode 160000) — which is exactly what happened before:
+`.claude/worktrees/platform-neutral` was committed in `7851bdc`, and during the
+SHA-256 -> SHA-1 conversion it was the single line that had to be stripped from
+the fast-export stream, because a gitlink's object id cannot be remapped across
+hash algorithms. Adopting worktrees without ignoring the directory would have
+re-created the same defect.
+
+Verified the rule matches (`git check-ignore -v .claude/worktrees` resolves to
+`.gitignore:32`) rather than assuming — the bare path returns non-zero until the
+directory exists, since a trailing-slash pattern only matches directories, which
+makes a naive check look like a failure.
+
+**Baseline:** `cargo check` clean in the worktree. The full suite was **not** run
+per worktree — each has its own `target/`, and three cold release builds plus
+2 GiB dataset generation is a poor trade for a change that touches no Rust. Say
+so rather than implying a baseline was taken.
+
+**Cost worth knowing:** every worktree carries an independent `target/`, so disk
+grows quickly on a project with `lto=true` release artifacts. Remove worktrees as
+their PRs merge (`git worktree remove`).

@@ -17,6 +17,16 @@
     history and the verification rules. **Spawn cold, one per round** — never
     resume a reviewer across rounds; a long-lived one reached 560k tokens of
     context and could no longer start.
+0b. **Worktrees for concurrent branches.** When more than one branch is in
+    flight, give each its own worktree under `.claude/worktrees/` rather than
+    switching branches in the shared checkout:
+    `git worktree add .claude/worktrees/<branch-with-dashes> <branch>`. The
+    primary checkout stays on `main`. **That directory must stay in
+    `.gitignore`** — a tracked worktree is committed as a gitlink, which is how
+    `.claude/worktrees/platform-neutral` got into `7851bdc` and had to be
+    stripped during the SHA-256 conversion. This rule exists because switching
+    branches while two reviewers were running made one of them commit its ledger
+    to the wrong branch.
 1.  **Task Analysis:** Break user requests into atomic steps.
 2.  **Execution:** Implement changes in the repository.
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.

@@ -533,3 +533,56 @@ on Round 1's empirical demonstration of the shared group, not on a fresh
 reproduction. I did not measure the cache-scoping cost either; R2-9 accepts the
 entry's own refusal to guess and adds only the one cold-cache data point already
 present in the run history.
+
+---
+
+## Round 2 — corrections to this ledger
+
+Appended, not amended, per this project's own rule that a correction must be
+visible. Two defects in the text above, found on re-reading before sign-off.
+Neither changes the verdict.
+
+**C1 — R2-2's subset enumeration was miscounted.** It reads "The eight candidate
+3-subsets give 12.8, 13.0, 13.0, 13.7, 14.4 min". There are **ten** subsets
+(C(5,3)), and five values were listed for eight claimed subsets. A finding whose
+whole charge is fabricated provenance cannot itself ship a miscount. All ten,
+over {691, 802, 804, 854, 986} s, mean in minutes:
+
+| Subset (s) | Mean |
+|---|---|
+| 691, 802, 804 | 12.76 |
+| 691, 802, 854 | 13.04 |
+| 691, 804, 854 | 13.05 |
+| 802, 804, 854 | 13.67 |
+| 691, 802, 986 | 13.77 |
+| 691, 804, 986 | 13.78 |
+| 691, 854, 986 | 14.06 |
+| 802, 804, 986 | 14.40 |
+| 802, 854, 986 | 14.68 |
+| 804, 854, 986 | 14.69 |
+
+Target 13.4 min = 804.0 s. **The conclusion is unchanged and now complete: no
+3-subset yields 13.4**; the nearest are 13.05 below and 13.67 above. R2-2 stands
+as written apart from the count.
+
+**C2 — R2-3 was over-graded; downgrading MAJOR → MINOR.** The charge was that
+the headline "overstates by ~1.7x". Re-reading the comment's actual words —
+"measured at **29.5 minutes** of runner time" — 29.5 *is* the right number for
+runner time consumed across five jobs. It is correctly labelled. The defect is
+narrower than stated: the **next sentence** names wall-clock and queue time as
+the benefit, and 29.5 does not measure that (~17 min does). That is a
+non-sequitur between two adjacent sentences, not a mismeasurement, and it is a
+smaller thing than Round 1's 50-vs-30.
+
+The verdict paragraph's line — "the same factor, in the same direction, as the
+error Round 1 caught" — asserted an equivalence the evidence does not support
+and is withdrawn. The correct statement is: the fix changed the claim's currency
+to wall-clock without changing the number, so a reader who takes the two
+sentences together infers a ~17-minute benefit is ~29.5. Worth fixing; not
+blocking.
+
+**Effect on the verdict: none.** "Not mergeable" rests on R2-1 and R2-2 alone —
+an uncorrected PR body asserting the opposite of the code it ships, and two
+committed artifacts stating a provenance ("mean of 3 completed runs each") that
+produces neither 13.4 nor 0.2. R2-3 at minor, R2-4, R2-5 and R2-10 are the
+remaining cleanup.

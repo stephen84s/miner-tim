@@ -181,6 +181,35 @@ document is explicitly a dated design record — its header reads
 conclusion is unaffected — a manual dispatch is not automatic coverage — but the
 two texts landed in the same commit and disagree on the fact.
 
+### F6 (minor) — DOC-02's closing "assumption stated rather than tested" is now stale, and the task-board row cites no ledger
+
+Two accuracy items inside the audit entry itself, both fixable in place (the
+entry is on an unmerged branch, so per `CLAUDE.md` it may be **edited**, not
+appended to — do not "append a correction"):
+
+1. The entry ends *"**Assumption stated rather than tested:** that no tooling
+   parses `verify-jit.sh`'s final line."* It has now been tested — all three
+   workflows, the `Makefile`, every script and two live runs of the script (see
+   "Verified true" above). Leaving a disavowed-assumption sentence standing
+   after the assumption was discharged is the exact shape round 3 of PR #8 and
+   round 2 of PR #7 both caught.
+2. The `CLAUDE.md` DOC-02 row ends "Closes #6; #2 closed separately." The two
+   preceding rows end "Ledger: `REVIEW_PR7.md`." / "Ledger: `REVIEW_PR8.md`.".
+   This row should cite `REVIEW_PR10.md` and its review outcome.
+
+`bash -n scripts/verify-jit.sh` is clean and `make help` renders, so the rest of
+the entry's Verification block reproduces.
+
+## Note on the CI checks for this PR
+
+Committing this ledger to the PR branch **restarts the JIT gate**: `jit.yml` has
+`concurrency: jit-${{ github.ref }}` with
+`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`, so the run on
+`cf7fb89` (33997841524) shows `cancelled` and a fresh ~14-minute run started on
+the ledger commit. That is expected behaviour, not a failure — but a maintainer
+seeing a cancelled required check on the PR should know a review commit caused
+it. The authoritative run is the one on the head commit at merge time.
+
 ## What I could not verify
 
 - The `jit-macos` and `jit-linux-arm` check runs on PR #10 were still `pending`

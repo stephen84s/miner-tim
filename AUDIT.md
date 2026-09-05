@@ -3828,22 +3828,43 @@ own PR, so a non-zero count would block every merge. The gate is the PR plus the
 five checks plus the independent reviewer agent, which is the arrangement that
 has actually been catching defects.
 
-The six commits are left in place: they are all documentation, and rewriting
-published history to make the process look observed would be worse than the
-lapse it concealed.
+The six commits are left in place, because rewriting published history to make
+the process look observed would be worse than the lapse it concealed.
+
+**They are NOT all documentation — an earlier revision of this entry said they
+were, and that was false.** Two changed executable CI configuration:
+`e460643` touches **only** `.github/workflows/jit.yml` (the `RUSTFLAGS:
+-C target-cpu=apple-m1` fix, on the JIT gate itself), and `bcad873` **adds
+`.github/workflows/release.yml`** — 39 lines, triggered on `v[0-9]*` tags —
+alongside archiving `.gitlab-ci.yml` and editing the `Makefile`. So an
+unreviewed direct-to-`main` push added a workflow that publishes GitHub
+Releases. The remaining four are documentation.
+
+The false clause survived *inside the sentence that was edited to remove the
+equally false "CI is green on them"* — half a claim corrected, half left
+standing, which is a worse outcome than not touching it, because the edit
+signals the sentence was checked.
 
 **Correction — "CI is green on them" was false, and the review caught it.**
 Check-runs per commit: `e460643` 5/5, `bcad873` 5/5, `966ffda` 5/5, `7c92e4c`
 5/5, `d621978` 5/5 — but **`6414ba1` has only 3**. Its JIT-gate run
-(`33941786130`) concluded `cancelled` with **zero jobs**, so that commit carries
-no aarch64 verdict and never will. Five of six are fully green; one is not
+(`33941786130`) concluded `cancelled` with **zero jobs**, so that commit has no
+aarch64 verdict of its own. Stated precisely, because an earlier revision said
+"and never will": `jit.yml` carries `workflow_dispatch`, so one could still be
+produced; and `git diff 6414ba1 d621978` is `AUDIT.md` only, so the identical
+source tree *is* covered by `d621978`'s green run. The gap is real but narrower
+than first written. Five of six are fully green; one is not
 verified at all. Writing an unchecked "CI is green" into an append-only ledger,
 in an entry whose subject is unreviewed commits containing false claims, is the
 same failure one level up.
 
 **The bootstrap carve-out, now enumerated.** Three further commits reached
-`main` without a PR — `445466b`, `4cfdf85`, `f6f351e` — in the initial import
-push, when there was no `main` to protect and no PR was possible. The original
+`main` without a PR — `445466b`, `4cfdf85`, `f6f351e`. The carve-out holds for
+`4cfdf85` (a merge carrying pre-creation content) and `f6f351e`, but **not
+cleanly for `445466b`**, which is a direct commit to `main` authored 39 minutes
+after the repository was created — by then a branch and PR were possible. It is
+also the one whose `jit-macos` concluded **failure**, so the import push left
+`main` red and `e460643` was the fix. The original
 entry gestured at that carve-out without naming them. Worth recording that
 `445466b`'s `jit-macos` concluded **failure**: the bootstrap push left `main`
 red, and `e460643` was the fix.
@@ -3852,9 +3873,12 @@ red, and `e460643` was the fix.
 At 0 required approvals an author can merge their own PR unreviewed with every
 rule satisfied, so spawning the reviewer stays a responsibility rather than a
 mechanism, and `enforce_admins` does not protect the setting itself: the same
-account can disable protection. What 0 approvals does *not* mean is "no gate" —
-`required_conversation_resolution: true` is set and is independent of the review
-block, so an unresolved thread blocks a merge on its own.
+account can disable protection. `required_conversation_resolution: true` is set and blocks
+independently of the review count — but only once a PR conversation thread
+exists, and this project's reviewers write `REVIEW_*.md` ledgers rather than PR
+comments. PR #7 itself has 0 reviews and 0 comments and reports
+`mergeable_state: clean`, so in practice that setting is currently gating
+nothing. **The reviewer agent is the gate; the settings are not.**
 
 **Scope of the push-refusal test.** It demonstrated 2 of the 6 rows — that a PR
 is required, and that `enforce_admins` binds pushes. It says nothing about the

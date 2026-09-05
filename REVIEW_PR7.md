@@ -315,3 +315,119 @@ exercise of the flow it establishes.
 0. B3, B4, M1–M3 are corrections worth folding in while the branch is open, none
 of them introduced by this diff. Every one is a text edit inside the two files
 already in the diff.
+
+---
+
+# Round 2 — re-review of the corrections
+
+Reviewer: second independent agent, spawned cold, no prior context and no part
+in writing either the change or the round-1 ledger.
+Branch: `chore/branch-protection` @ `6ef8921`. Base: `main` @ `d621978`.
+Correction commit under review: `6ef8921` "docs: correct PR #7 per independent
+review — the 'CI is green' claim was false" (`AUDIT.md` +35/-3, `CLAUDE.md`
++11/-3). Date: 2026-09-05.
+
+Brief: verify each of round 1's seven findings is *actually* fixed and fixed
+correctly, and — the higher-value half — check what the corrections introduced.
+
+## Verdict (round 2)
+
+**Not mergeable as it stands.** One blocking finding (**F1**) and one major
+(**F2**); four minors and a nit.
+
+Five of the seven round-1 findings are genuinely and correctly fixed in the two
+files. But:
+
+- **F1** — the sentence the correction edited contains a *second* false claim
+  that was left standing. "The six commits ... they are all documentation" is
+  false: `e460643` and `bcad873` changed CI workflows and the `Makefile`, and
+  one of them added a whole release workflow. The fix reached into that clause,
+  removed "CI is green on them", and left the adjacent falsehood — into an
+  append-only ledger, in the entry whose subject is unreviewed commits carrying
+  false claims. Round 1 called that exact shape blocking; so does this round.
+- **F2** — **nothing was corrected in the PR body.** Three of round 1's findings
+  named it explicitly. It still says "They are all documentation, CI is green on
+  them" — the precise sentence B1 flagged as blocking — still frames the push
+  test as superior to reading the config (M2), and its table still omits
+  `required_conversation_resolution` (M1). The PR description is what a human
+  reads at merge time, and it is the artifact GitHub keeps.
+
+---
+
+## F1 (Blocking, factual) — "they are all documentation" is false, in the sentence the correction edited
+
+`AUDIT.md`, PROC-01, after the fix:
+
+> The six commits are left in place: they are all documentation, and rewriting
+> published history to make the process look observed would be worse than the
+> lapse it concealed.
+
+Verified with `git show --stat` on each of the six:
+
+| commit | subject prefix | files changed |
+|---|---|---|
+| `e460643` | **`ci:`** | `.github/workflows/jit.yml` (+13) |
+| `bcad873` | `docs:` | **`.github/workflows/release.yml` (new, +39)**, `.gitlab-ci.yml` → `.gitlab-ci.yml.archived`, **`Makefile`**, AUDIT/CLAUDE/README/RELEASING |
+| `966ffda` | `docs:` | AUDIT.md, NEON_FP_PORT_NOTES.md |
+| `7c92e4c` | `docs:` | AUDIT.md, CLAUDE.md, README.md |
+| `6414ba1` | `docs:` | CLAUDE.md, README.md |
+| `d621978` | `docs:` | AUDIT.md |
+
+Two of the six are executable automation, not prose:
+
+- **`e460643`** sets `RUSTFLAGS: -C target-cpu=apple-m1` on the `jit-macos` job.
+  That is a change to the JIT gate's own build configuration — the verification
+  apparatus this project treats as its highest-stakes artifact — pushed to
+  `main` with no branch, no PR and no review.
+- **`bcad873`** *adds* `.github/workflows/release.yml`, 39 lines that publish a
+  GitHub Release on any `v*` tag, and edits the `Makefile`. A release pipeline
+  reaching `main` unreviewed is the substance of the risk, not a pedantic
+  exception to a rounding-off phrase.
+
+The claim is not decorative: its function in the paragraph is to justify leaving
+the six unreviewed and unrewritten. "All documentation" is the load-bearing half
+of "harmless". And the ledger contradicts itself two paragraphs apart — the same
+entry lists `e460643`, whose own subject line begins `ci:`.
+
+This is the failure shape the shared context names: a correction that edits one
+clause and leaves the defect beside it. The correction deleted five words from
+this sentence and read past the four in front of them.
+
+**Fix:** say what is true. "Four are documentation; `e460643` and `bcad873` also
+changed CI workflows and the `Makefile` — including a new release workflow —
+which makes the lapse worse, not better." The argument against rewriting
+published history survives the correction unchanged.
+
+## F2 (Major) — the PR body was never corrected; it still carries the blocking claim
+
+`gh api repos/stephen84s/miner-tim/pulls/7 --jq .body`, read today at head
+`6ef8921`:
+
+- line 40: *"They are all documentation, CI is green on them, and rewriting
+  published history ..."* — **both** F1's falsehood and round 1's B1 falsehood,
+  verbatim, unchanged.
+- line 24: *"Verified by attempting a direct push and being refused, **rather
+  than** by reading the configuration back"* — the framing M2 flagged. `AUDIT.md`
+  was corrected; the body was not.
+- the settings table still lists six rows and omits
+  `required_conversation_resolution: true` — M1's subject, which the finding
+  asked to be added "to the PR table and to the AUDIT entry's settings list".
+
+Round 1's B1 opened with "`AUDIT.md` **and the PR body** both justify leaving the
+six commits in place partly on the grounds that 'CI is green on them'". M2 opened
+with "**Both the PR body** and `AUDIT.md` say...". M1 asked for a table row.
+Three findings, three explicit mentions of the PR body, zero corrections there.
+
+Why it was missed is legible and worth stating: the corrections were made as a
+commit, and a commit cannot edit a PR description. The remedy is `gh pr edit`,
+not another commit — which also makes it cheap.
+
+Why it matters beyond tidiness: the PR body is the artifact a reader sees at
+merge time and the one GitHub retains against the merge commit. Merging as-is
+publishes, permanently and in the project's own PR record, the claim a review
+round classified as blocking — in the PR whose entire subject is that unreviewed
+documentation carried false claims.
+
+**Fix:** edit the PR body: correct "all documentation, CI is green on them" to
+match the corrected AUDIT text, drop the "rather than" ranking of the push test,
+and add the `required_conversation_resolution` row.

@@ -4211,6 +4211,7 @@ complexity for a saving that only applies to documentation commits. Not worth it
 today; revisit if docs-only PRs become frequent.
 
 
+
 ### DOC-02 (2026-09-06): retire the manual JIT gate in prose; correct a false safety claim CI-03 created
 
 Two things, one of which is a regression the previous merge introduced.
@@ -4355,3 +4356,62 @@ Round 3 reproduced the 14.08-minute measurement exactly (12.38/15.27/13.33/
 load-bearing — including the next run gives 14.14. Each round re-ran the break
 test from scratch rather than inheriting it, and rounds 2 and 3 each re-derived
 the GitLab→GitHub mapping independently. Ledger: `REVIEW_PR10.md`.
+
+### PROC-05 (2026-09-06): three CI-hygiene rules recorded in the agent protocol
+
+User gave three standing instructions and asked for them to be recorded in
+`CLAUDE.md` so they survive this session:
+
+1. GitHub Actions should only run on pushes to branches which have pull requests.
+2. Pull requests need to be rebased on `main` before merging and have a green build.
+3. Consolidate multiple commits before pushing, to save CI minutes.
+
+All three are now bullets in Operational Protocol step 0, alongside the reviewer,
+worktree, audit-correction and branch-and-PR rules.
+
+**(1) is already the implemented behaviour, not a change request.** CI-03 left
+`ci.yml` and `jit.yml` on `pull_request` + `workflow_dispatch` only. What the
+rule adds is the consequence an agent must hold in mind, which DOC-02 found
+stated wrongly in step 6: a push to a branch *with* an open PR runs the five
+checks against that PR's head, and a push to a branch with **no** open PR runs
+nothing at all. So "I pushed and nothing went red" is not evidence about a bare
+branch. No workflow change was needed and none was made.
+
+**(2) is stricter than the enforced setting, deliberately.** Branch protection
+sets `strict: true`, which requires the branch to be up to date but is satisfied
+by a *merge* commit from `main` — which is how PR #8 was brought up to date
+earlier today. The instruction asks for a **rebase**, so the branch keeps a
+linear history and the tested tree is exactly the tree that lands. Recorded with
+the caveat that rebasing rewrites the branch: do it before requesting review, and
+never while a reviewer agent is running against that worktree, which is the
+worktree rule's failure mode in a different costume. The user said "master"; this
+repository's default branch is `main` and the rule is recorded with the real
+name.
+
+**(3) is recorded with its true unit corrected, not silently.** Every push to a
+PR head starts a full pass — five jobs, ~30 runner-minutes, ~15 minutes of
+wall-clock, `jit-macos` being the long pole (figures from CI-03, re-derived and
+confirmed in PR #8's round 3). But this repository is public, so
+`billable.total_ms` is **0**: there are no CI *minutes* to save in the billing
+sense. What is saved is queue time, runner capacity and a reviewer's time
+re-reading a head that keeps moving. The instruction is worth following for
+those reasons; the entry says so rather than repeating a cost that does not
+exist. One guard added: do not let commit-consolidation become a reason to skip
+a verification step in order to avoid a run.
+
+**Files changed:** `CLAUDE.md` (three new bullets in step 0, task board),
+`AUDIT.md` (this entry).
+
+**Verification.** Documentation only — no code, no workflow, no build behaviour
+touched. The trigger claim in bullet 1 was checked against the live workflow keys
+rather than restated from an earlier entry: `ci.yml` and `jit.yml` are
+`pull_request` + `workflow_dispatch`; `release.yml` keeps `push:` on `v[0-9]*`
+tags.
+
+**Sequencing note.** Written on a branch off `main` while PR #10 was under
+review, deliberately not added to that PR: a reviewer agent was mid-flight
+against its worktree, and changing the tree under a running reviewer is what
+PROC-03 exists to prevent. Both branches append to the end of `AUDIT.md`, so this
+one is rebased onto `main` after #10 lands and the overlap resolved there —
+which is rule (2) applied to its own commit.
+

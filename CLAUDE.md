@@ -8,18 +8,46 @@
 - **Constraint:** **No implementation is complete until it is committed to `AUDIT.md`.**
 
 ## Operational Protocol
-0.  **Branch and PR, always.** `main` is protected: direct pushes are rejected,
-    a pull request is required, and all five CI checks must pass — including for
-    admins. Work on a branch, open a PR, and have an **independent reviewer
-    agent** examine it before merge. This is a standing user instruction, not a
-    preference. It was followed for MRs !1–!4, then quietly dropped during the
-    GitHub migration: six commits reached `main` unreviewed, among them the
-    changes correcting earlier mistakes — the worst place to skip review.
-    Protection enforces the **branch, the PR and the checks**; it
-    does not and cannot enforce that a reviewer looked. At
-    `required_approving_review_count: 0` an author can still open and merge
-    their own PR unreviewed with every rule satisfied, and the same account can
-    disable protection. **Spawning the reviewer is still on you.**
+0.  **Process rules, before the task itself.**
+
+    - **Reviewer agents.** Independent review uses the repo's own agents in
+      `.claude/agents/`, not ad-hoc briefs: **`jit-reviewer`** for
+      `src/randomx/jit/`, the emitter, `vm.rs`'s native-loop path or `benches/`;
+      **`ci-reviewer`** for `.github/workflows/`, `Makefile`, `scripts/` or
+      `.cargo/config.toml`; **`pr-reviewer`** for everything else. They share
+      `.claude/agents/_shared-context.md`, which carries this repo's failure
+      history and the verification rules. **Spawn cold, one per round** — never
+      resume a reviewer across rounds; a long-lived one reached 560k tokens of
+      context and could no longer start.
+
+    - **Worktrees for concurrent branches.** When more than one branch is in
+      flight, give each its own worktree under `.claude/worktrees/` rather than
+      switching branches in the shared checkout:
+      `git worktree add .claude/worktrees/<branch-with-dashes> <branch>`. The
+      primary checkout stays on `main`. **That directory must stay in
+      `.gitignore`** — a tracked worktree is committed as a gitlink, which is how
+      `.claude/worktrees/platform-neutral` got into `3b2cc9d` and had to be
+      stripped during the SHA-256 conversion. This rule exists because switching
+      branches while two reviewers were running made one of them commit its
+      ledger to the wrong branch.
+
+    - **Correcting `AUDIT.md`.** An entry already merged to `main` is corrected
+      by **appending**. An entry added on an unmerged branch may still be edited
+      in place — it is not yet part of the record. Never claim to append while
+      editing in place.
+
+    - **Branch and PR, always.** `main` is protected: direct pushes are
+      rejected, a pull request is required, and all five CI checks must pass —
+      including for admins. Work on a branch, open a PR, and have an
+      **independent reviewer agent** examine it before merge. Followed for
+      MRs !1–!4, then quietly dropped at the GitHub migration: six commits
+      reached `main` unreviewed, two of them changing CI workflows, and several
+      correcting earlier mistakes — the worst place to skip review. Protection
+      enforces the **branch, the PR and the checks**; it does not and cannot
+      enforce that a reviewer looked. At `required_approving_review_count: 0` an
+      author can still merge their own PR unreviewed, and the same account can
+      disable protection. **Spawning the reviewer is still on you.**
+
 1.  **Task Analysis:** Break user requests into atomic steps.
 2.  **Execution:** Implement changes in the repository.
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.

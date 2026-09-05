@@ -3794,3 +3794,48 @@ maintainer's.
 sections whose premise had changed, producing files that contradicted
 themselves — which is how issue #2's third acceptance criterion came to be
 unmet while looking done. When a premise changes, rewrite the section.
+
+### PROC-02 (2026-09-05): repo-tuned reviewer agents replace ad-hoc briefs
+
+User asked for PR reviewers tuned to this repo rather than general-purpose
+agents. Every review so far was driven by a hand-written brief, ~2–3k tokens,
+re-deriving the same standing context each time — wasteful, and a place for the
+briefing to quietly omit a lesson learned three rounds earlier.
+
+**Added `.claude/agents/`:**
+
+- **`_shared-context.md`** — not an agent; the material all three quote. Holds
+  the wrong-hash framing, the verify-don't-trust rule, the **table of failure
+  modes this repo has actually produced** (a benchmark measuring a path against
+  itself; an assertion that could not fail; a signed/unsigned bound 2x too
+  loose; an inverted fail-safe; an empty value erasing an explicit setting; a
+  256 MiB allocation never read; orphaned doc comments; unreproducible
+  measurements; a filter matching nothing that libtest called success), the
+  break-testing requirement, what CI does and does not prove, the context budget
+  and the ledger rules.
+- **`jit-reviewer`** — `src/randomx/jit/`, the emitter, `vm.rs`'s native-loop
+  path. Instruction encodings, signed/unsigned bounds, the four native-loop
+  preconditions and their single definition, AAPCS64 and W^X, FPCR containment,
+  whether both arms of a differential test are still genuinely different code,
+  and paired-A/B discipline for any performance claim.
+- **`ci-reviewer`** — workflows, `Makefile`, `scripts/`, `.cargo/config.toml`,
+  branch protection. Leads with the infrastructure failure mode: application
+  bugs announce themselves, **infrastructure bugs go green**. Requires breaking
+  the gate to prove it can still go red; covers exact required-check name
+  matching, the skipped-workflow-blocks-a-required-check trap, the
+  `target-cpu=native` platform assumption, and the 7 GB runner budget.
+- **`pr-reviewer`** — everything else, with an explicit scope check that hands
+  off to the other two. Silent failure, fail-safe direction per switch, tests
+  that cannot fail, unread allocations, **documentation and audit accuracy**
+  (every number traces to a measurement; rewrite a section whose premise
+  changed rather than editing sentences inside it), and concurrency.
+
+`CLAUDE.md` gains Operational Protocol step 0a naming which agent covers what,
+and repeating the cold-spawn rule.
+
+**Why this is more than tidying.** The briefs were the only place several
+lessons lived, and they were reconstructed from memory each time. Two of them
+had already been dropped once: the empty-value composition trap and the
+asymmetric fail-safe directions did not appear in later briefs even though both
+were findings from earlier rounds. Encoding them in the repo means the next
+session inherits them without depending on a conversation that will not exist.

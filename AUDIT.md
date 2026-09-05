@@ -3981,6 +3981,113 @@ every `git status`". It is byte-identical to `HEAD` and was committed only four
 times in 181 commits. The clean state is precisely what makes the silent-delete
 warning true — a pull deletes a file that matches `HEAD` without complaint — so
 the warning stands and the description of it does not.
+
+### PROC-01 (2026-09-05): `main` protected after six unreviewed commits reached it
+
+User asked, plainly, "Are you working directly on main?" The answer was yes.
+
+Standing instruction from early in the project: branch-based development, merge
+requests, and independent subagent review before merge. It was honoured for all
+four GitLab MRs. It then lapsed at the GitHub migration — the initial push to
+`main` was unavoidable when bootstrapping the repository, and the habit never
+resumed. **Six commits reached `main` with no branch, no PR and no review:**
+`e460643`, `bcad873`, `966ffda`, `7c92e4c`, `6414ba1`, `d621978`.
+
+Two of those — `7c92e4c` (sections that contradicted themselves) and `6414ba1`
+(four factual errors, including an unsupported "~3x faster" claim) — were
+corrections of earlier mistakes. This project's own review history is that
+**every round on MR !1 found a defect in the fix written for the previous
+round's finding**, so skipping review on corrections is the worst available
+place to skip it. Contributing factor, not an excuse: three subagents died on
+session limits, work shifted to direct execution, and the review habit went with
+it.
+
+**What the six commits actually contain.** Not all documentation — an earlier
+revision of this entry said they were, and that was false. Two changed
+executable CI configuration: `e460643` touches **only**
+`.github/workflows/jit.yml` (the `RUSTFLAGS: -C target-cpu=apple-m1` fix, on the
+JIT gate itself), and `bcad873` **adds `.github/workflows/release.yml`** — 39
+lines, triggered on `v[0-9]*` tags — alongside archiving `.gitlab-ci.yml` and
+editing the `Makefile`. So an unreviewed direct-to-`main` push added a workflow
+that publishes GitHub Releases. The remaining four are documentation.
+
+**CI state of the six.** Check-runs per commit: `e460643` 5/5, `bcad873` 5/5,
+`966ffda` 5/5, `7c92e4c` 5/5, `d621978` 5/5 — but **`6414ba1` has only 3**. Its
+JIT-gate run (`33941786130`) concluded `cancelled` with **zero jobs**, so that
+commit carries no aarch64 verdict of its own. An earlier revision of this entry
+claimed "CI is green on them", which was false; a later one over-corrected to
+"and never will [be verified]", which was also false. Stated precisely: `jit.yml`
+carries `workflow_dispatch`, so a verdict could still be produced, and
+`git diff 6414ba1 d621978` is `AUDIT.md` only — the identical *source tree* is
+covered by `d621978`'s green run. What `6414ba1` lacks is a check-run of its
+own, not coverage of its code. Why that run was cancelled is still unexplained
+and is worth an issue. Writing an unchecked "CI is green" into an append-only
+ledger, in an entry whose subject is unreviewed commits containing false claims,
+was the same failure one level up.
+
+**The bootstrap carve-out, enumerated.** Three further commits reached `main`
+without a PR — `445466b`, `4cfdf85`, `f6f351e`. The carve-out holds for
+`4cfdf85` (a merge carrying pre-creation content) and `f6f351e`, but **not
+cleanly for `445466b`**, a direct commit authored 39 minutes after the
+repository was created, by which time a branch and PR were possible. `445466b`'s
+`jit-macos` concluded **failure** — the import push left `main` red — and
+`e460643` was the fix. That causal link was originally asserted from ordering
+alone; round 3 confirmed it from the primary log, job `101174240328` showing
+`error[E0080] ... _AARCH64_APPLE_TARGETS_EXPECTED_FEATURES` in
+`ring-0.17.14/src/cpu/arm/darwin.rs:44`. The original entry gestured at the
+carve-out without naming the commits.
+
+**Fix — structural, not a resolution to try harder.** Branch protection on
+`main`: PR required, all five checks required (`lint`, `audit`, `test`,
+`jit-macos`, `jit-linux-arm`), branch must be up to date (`strict: true`),
+force-push and deletion blocked, conversation resolution required, 0 approvals,
+and **`enforce_admins: true`** so it binds the maintainer as well as the agent.
+
+Approvals required is **0** deliberately: a solo maintainer cannot approve their
+own PR, so a non-zero count would block every merge. The gate is the PR plus the
+five checks plus the independent reviewer agent, which is the arrangement that
+has actually been catching defects.
+
+**How each setting was verified.** Two of the seven rows in PR #7's table were
+demonstrated behaviourally, by attempting a direct push and being refused with
+`GH006: Protected branch update failed — Changes must be made through a pull
+request`: that a PR is required, and that `enforce_admins` binds pushes. The
+push test says nothing about the other five — the check contexts, `strict`,
+force-push/deletion, conversation resolution and the approval count — and an
+earlier revision of this entry implied it covered more than it did. Those five
+were read back from the live API instead, which is weaker evidence than a
+behavioural test and is recorded as such. Round 3 added one behavioural datum
+for the contexts: pushing to this PR moved `mergeable_state` from `clean` to
+**`blocked`** with all five checks pending — `blocked` rather than `unstable`
+being the value that distinguishes "required" from "merely reported".
+
+**What protection does not do.** It enforces branch, PR and checks — not review.
+At 0 required approvals an author can merge their own PR unreviewed with every
+rule satisfied, so spawning the reviewer stays a responsibility rather than a
+mechanism, and `enforce_admins` does not protect the setting itself: the same
+account can disable protection. `required_conversation_resolution: true` blocks
+independently of the approval count — but only once a PR conversation thread
+exists, and this project's reviewers write `REVIEW_*.md` ledgers rather than PR
+comments, so in practice it is currently gating nothing. **The reviewer agent is
+the gate; the settings are not.**
+
+**The cost, stated rather than implied.** With `enforce_admins: true`, the
+three-minute `445466b` → `e460643` fix for a red `main` would now require a
+branch, a PR and the full five-check gate — roughly fifteen minutes before the
+fix can land. That is the right trade for this project, whose failure mode is
+unreviewed corrections rather than slow ones, but it is a real cost and not a
+free win.
+
+The six commits are left in place, because rewriting published history to make
+the process look observed would be worse than the lapse it concealed.
+
+**Files.** `CLAUDE.md`'s Operational Protocol step 0 — introduced by PROC-02,
+not by this entry — gains a fourth bullet stating the branch-and-PR rule and why
+it exists, so a future session reads it before working rather than after. The
+merge `0002d05` brought `main` (including PR #9's reviewer agents) into this
+branch and settled that collision: PR #9's step 0 is the one that survives, with
+PROC-01's rule added to it as a bullet rather than as a competing step.
+
 ### CI-03 (2026-09-05): workflows run on pull requests only
 
 User asked to cut CI CPU time by building only when a PR exists.
@@ -4102,3 +4209,4 @@ reports its check, and the PR stays blocked forever rather than passing. Making
 that work needs a stub job reporting success in the skipped case — real
 complexity for a saving that only applies to documentation commits. Not worth it
 today; revisit if docs-only PRs become frequent.
+

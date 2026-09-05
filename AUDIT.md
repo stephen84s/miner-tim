@@ -3830,8 +3830,23 @@ briefing to quietly omit a lesson learned three rounds earlier.
   (every number traces to a measurement; rewrite a section whose premise
   changed rather than editing sentences inside it), and concurrency.
 
-`CLAUDE.md` gains Operational Protocol step 0a naming which agent covers what,
-and repeating the cold-spawn rule.
+`CLAUDE.md` gains an Operational Protocol step 0 naming which agent covers what,
+and repeating the cold-spawn rule. (Numbered 0 here, not 0a: the branch-and-PR
+step of the same number lives on the `chore/branch-protection` branch, which
+this one does not contain. Whichever merges second must renumber — recorded so
+the collision is not a surprise.)
+
+### Verification
+The three agent files parse with valid YAML frontmatter (`name`, `description`,
+`tools` on each); `_shared-context.md` deliberately has none, being reference
+material rather than an agent. No Rust changed, so the build and suite are
+untouched by this commit. **Not verified:** that the agents behave as intended
+when invoked — that needs a real review round, and the next one is the test.
+
+*Correction, appended per the append-only rule: an earlier revision of this
+entry claimed the `CLAUDE.md` change had landed when the edit had in fact failed
+and only the agent files were committed. The claim was written before the result
+was checked.*
 
 **Why this is more than tidying.** The briefs were the only place several
 lessons lived, and they were reconstructed from memory each time. Two of them

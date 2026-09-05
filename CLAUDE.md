@@ -8,6 +8,15 @@
 - **Constraint:** **No implementation is complete until it is committed to `AUDIT.md`.**
 
 ## Operational Protocol
+0.  **Reviewer agents.** Independent review uses the repo's own agents in
+    `.claude/agents/`, not ad-hoc briefs: **`jit-reviewer`** for
+    `src/randomx/jit/`, the emitter or `vm.rs`'s native-loop path;
+    **`ci-reviewer`** for `.github/workflows/`, `Makefile`, `scripts/` or
+    `.cargo/config.toml`; **`pr-reviewer`** for everything else. They share
+    `.claude/agents/_shared-context.md`, which carries this repo's failure
+    history and the verification rules. **Spawn cold, one per round** — never
+    resume a reviewer across rounds; a long-lived one reached 560k tokens of
+    context and could no longer start.
 1.  **Task Analysis:** Break user requests into atomic steps.
 2.  **Execution:** Implement changes in the repository.
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.

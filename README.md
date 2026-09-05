@@ -18,32 +18,40 @@ see [Platform support and how it is verified](#platform-support-and-how-it-is-ve
 
 | Platform | Hashing path | Verified by |
 |---|---|---|
-| **macOS aarch64** (the shipping target) | aarch64 JIT + native iteration loop | `make verify-jit` — **local, human-run** |
-| **Linux aarch64** | same JIT; tests only, no release artifact | `make verify-jit-linux` — **local, human-run**, native arm64 container |
-| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **GitHub Actions** (`lint`, `test`, `audit`) |
+| **macOS aarch64** (the shipping target) | aarch64 JIT + native iteration loop | **CI** — `jit-macos` on `macos-14`, every push |
+| **Linux aarch64** | same JIT; tests only, no release artifact | **CI** — `jit-linux-arm` on `ubuntu-24.04-arm`, every push |
+| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **CI** — `lint`, `test`, `audit` on `ubuntu-24.04` |
 
-**The x86_64 jobs say nothing about the JIT.** Those runners are
-x86_64 Linux, and `src/randomx/mod.rs` gates the JIT behind
-`#[cfg(target_arch = "aarch64")]`, so CI never compiles — let alone executes — a
-single emitted ARM64 instruction. CI is a real regression guard for the
-interpreter, the Stratum client, the miner loop and the dependency audit, and
-nothing more. A JIT defect does not crash; it silently produces wrong hashes,
-which means rejected shares.
+**The x86_64 jobs still say nothing about the JIT.** `src/randomx/mod.rs` gates
+it behind `#[cfg(target_arch = "aarch64")]`, so those runners never compile — let
+alone execute — a single emitted ARM64 instruction. They are a real regression
+guard for the interpreter, the Stratum client, the miner loop and the dependency
+audit, and nothing more. A JIT defect does not crash; it silently produces wrong
+hashes, which means rejected shares.
 
-The JIT's actual coverage is the two `make verify-jit*` targets above: the JIT
-unit tests, the differential tests (emitted native loop vs the interpreter, from
-byte-identical state) and the known-answer vectors, in **both** the debug and
-release profiles, run by a human before any change to `src/randomx/jit/` is
-merged. `scripts/verify-jit.sh` is the gate; it exits non-zero on any failure
-*or* on an unexpected test count.
+What covers the JIT is `scripts/verify-jit.sh`: 92 tests — the JIT unit tests,
+the differential tests (emitted native loop vs the interpreter, from
+byte-identical state) and the known-answer vectors — in **both** the debug and
+release profiles. It exits non-zero on any failing test *or* on an unexpected
+test count, because libtest reports a filter that matches nothing as success, so
+a renamed module could otherwise leave the gate green while testing nothing.
 
-This was a single point of failure until the GitHub migration; the JIT is now
-covered by `jit-macos` (macos-14) and `jit-linux-arm` (ubuntu-24.04-arm), which
-run the same `make verify-jit` gate on every push. Historically, GitLab SaaS
-offers this project no arm64 runner (probed: `no_matching_runner`), so
-[issue #9](https://github.com/stephen84s/miner-tim/issues/6) covers migrating CI to GitHub Actions, which gives
-public repositories free `macos-14` and `ubuntu-24.04-arm` runners and would let
-this gate run automatically. [Issue #2](https://github.com/stephen84s/miner-tim/issues/2) tracks the gap itself.
+That gate now runs in CI on both architectures on every push, and fails the
+workflow. You can also run it locally before pushing:
+
+```bash
+make verify-jit         # this Mac, aarch64 darwin
+make verify-jit-linux   # native linux/arm64 via colima
+```
+
+This was a genuine single point of failure until September 2026: GitLab's shared
+runners are x86_64 only, an arm64 runner request returned `no_matching_runner` on
+that tier, and no GitLab tier offers macOS at any price — so the JIT rested
+entirely on a human remembering to run the gate. Moving to GitHub Actions closed
+it. The first `macos-14` run promptly earned its keep by catching a build failure
+that had been latent for the life of the project (`-C target-cpu=native` in
+`.cargo/config.toml` resolves to a feature-poor model on a virtualised runner,
+which trips a `ring` compile-time assertion).
 
 ## Quick Start
 

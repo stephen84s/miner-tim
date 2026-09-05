@@ -13,14 +13,15 @@
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.
 4.  **Status Update:** Update the `Current Task` table at the top of this file (`CLAUDE.md`) to reflect the new state. Do not leave tasks "Active" if they are completed.
 5.  **Review:** Before replying "Done", verify `make check` and `make test` passed.
-6.  **JIT gate (mandatory):** Any change touching `src/randomx/jit/`, or `vm.rs`'s
-    native-loop path, additionally requires **`make verify-jit`** to pass on Apple
-    Silicon before the work is called done, and its final `GATE PASSED` lines
-    **pasted into the PR description** when CI has not yet run it. Historically CI could not substitute for this: GitLab's
-    shared runners are x86_64, where the JIT is `cfg`'d out, so a green pipeline
-    is not evidence about emitted ARM64. `make verify-jit-linux` runs the same
-    gate under native linux/arm64 and should be run when `jit/memory.rs` or any
-    other platform-conditional code changes. See **Platform coverage** below.
+6.  **JIT gate:** Any change touching `src/randomx/jit/`, or `vm.rs`'s
+    native-loop path, must pass **`make verify-jit`**. CI enforces this on every
+    push (`jit-macos` on `macos-14`, `jit-linux-arm` on `ubuntu-24.04-arm`), so
+    it is no longer on you to remember — but run it locally before pushing when
+    the change is non-trivial, because the macOS debug profile takes ~8 minutes
+    in CI and a local failure is cheaper than a red push. `make verify-jit-linux`
+    runs the same gate under native linux/arm64 and is worth running directly
+    when `jit/memory.rs` or other platform-conditional code changes. Never cite
+    the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.
 
 ## Current Task Board
 | Status | Task ID | Description |
@@ -43,7 +44,8 @@
 | **Completed** | **PLAT-01** | **JIT ported to Linux aarch64 (issue #2, phase 1a).** `JitMemory` split into cfg'd platform arms: Darwin keeps `MAP_JIT` + `pthread_jit_write_protect_np` + `sys_icache_invalidate` byte-for-byte; Linux uses `mmap(RW)` -> `mprotect(RX)` + `__clear_cache`, with checked `mprotect` and constants read from the platform headers. `compiler.rs` unchanged, as the API shape was preserved. The "only `memory.rs` is platform-specific" assumption **held** and was confirmed. Verified natively on arm64 Linux (colima, no emulation): full suite **131 lib + 10 bin, 2 ignored, 0 failed** — parity with macOS — including the native-loop differential tests against the interpreter and `full_mode_v1_vm_reports_the_native_loop_effective`, the one test that hard-requires a live JIT allocation. Phase 1b (the arm64 CI job) **not** done: the pipeline has no arm64 runner (`no_matching_runner`). |
 | **Completed** | **PLAT-02** | **JIT gate made explicit (issue #2 interim mitigations).** `scripts/verify-jit.sh` + `make verify-jit` (macOS host) and `make verify-jit-linux` (native linux/arm64 via colima; read-only repo mount, container-local `CARGO_TARGET_DIR`). 92 tests — JIT unit + native-loop differential + known-answer vectors — in **both** debug and release, so the native loop's `debug_assert!` guards finally execute (issue #6). Hard gates: non-zero exit on any failure *and* on an unexpected test count, so a renamed module cannot empty a filter and leave the gate green (verified by a deliberate drift run). Platform-coverage wording landed in README + this file (CI validates the interpreter on x86_64 Linux only; issue #9 is the GitHub-Actions plan); F11's Linux `mprotect`-per-compile cost recorded in `jit/memory.rs`; the gate documented as mandatory before any MR touching `src/randomx/jit/`, with its result pasted into the MR description. |
 | **Completed** | **MEM-01** | **Test-suite peak RSS (issue #7).** The binary held two never-freed 2 GiB `LazyLock` datasets; now one. Measured, not inferred: release `--lib` peak **8.16 GB → 6.23 GB** at this host's 12-thread default, **~4.07 GB** at `--test-threads=3` (the macos-14 runner's core count, ~2.9 GB headroom under 7 GB); debug `verify-jit` filter **6.27 GB → 5.43 GB**; wall clock 94s→50s and 316s→193s. The issue's "~4.5 GiB" estimate was wrong — the real 12-thread baseline was 8.16 GB. (Review corrections: the debug pair was first recorded as 6.77→4.50 GB and does not reproduce; and "already over #9's budget" holds only at 12 threads — at the runner's 3 cores `main` measured 6.00 GB, marginal rather than over.) Differential coverage is unchanged: the diff tests' programs, entropy, ma/mx and `dataset_offset` all derive from the seed, not the key, and both paths read the same dataset. The verifier rotation test genuinely needs a second distinct dataset (R9-F2), so it got a synthetic zeroed one. `make verify-jit` 92/92 debug+release; 131 lib + 10 bin green. Unblocks #9. |
-| **Completed** | **CI-02** | **GitHub Actions workflows (issue #9, workflows only).** `.github/workflows/ci.yml` ports `.gitlab-ci.yml`'s three x86_64 jobs to pinned `ubuntu-24.04` (`lint` = clippy `-D warnings`, no fmt gate and the reason preserved; `audit` = cargo-audit, keeping the "binary already exists in destination" install guard; `test` = `cargo test --release --locked`). `.github/workflows/jit.yml` adds the two jobs that are the point of the move: **`jit-macos`** (`macos-14`, `make verify-jit` — the Darwin `MAP_JIT`/W^X path no GitLab tier can run) and **`jit-linux-arm`** (`ubuntu-24.04-arm`, `scripts/verify-jit.sh` **directly** — the colima/Docker wrapper dropped because the runner *is* native aarch64; its toolchain pin and host-facts print kept). All five are hard gates — no `continue-on-error`, no `|| true`, no step-level `if:`. The 7 GB `macos-14` box is handled with a job-level `RUST_TEST_THREADS=3` (MEM-01: 4.07 GB at 3 threads vs 6.23 GB at 12), set explicitly rather than left to the runner's core count; libtest's reading of that env var was verified empirically, not assumed. Two files so the ~19-min interpreter suite and the JIT verdict do not gate each other. **Nothing has run on GitHub yet** — the repo is still on GitLab and `gh` is unauthenticated; runner specs, cache behaviour and real RAM headroom are asserted from issue #9, not tested. The `v*` release job is deliberately not ported (separate issue-#9 item, needs credentials). Not pushed, no MR. |
+| **Completed** | **CI-02** | **GitHub Actions workflows (issue #9, workflows only).** `.github/workflows/ci.yml` ports `.gitlab-ci.yml`'s three x86_64 jobs to pinned `ubuntu-24.04` (`lint` = clippy `-D warnings`, no fmt gate and the reason preserved; `audit` = cargo-audit, keeping the "binary already exists in destination" install guard; `test` = `cargo test --release --locked`). `.github/workflows/jit.yml` adds the two jobs that are the point of the move: **`jit-macos`** (`macos-14`, `make verify-jit` — the Darwin `MAP_JIT`/W^X path no GitLab tier can run) and **`jit-linux-arm`** (`ubuntu-24.04-arm`, `scripts/verify-jit.sh` **directly** — the colima/Docker wrapper dropped because the runner *is* native aarch64; its toolchain pin and host-facts print kept). All five are hard gates — no `continue-on-error`, no `|| true`, no step-level `if:`. The 7 GB `macos-14` box is handled with a job-level `RUST_TEST_THREADS=3` (MEM-01: 4.07 GB at 3 threads vs 6.23 GB at 12), set explicitly rather than left to the runner's core count; libtest's reading of that env var was verified empirically, not assumed. Two files so the ~19-min interpreter suite and the JIT verdict do not gate each other. *(State at the time of writing: nothing had run on GitHub — runner specs and RAM headroom were asserted from the issue, not tested. Superseded by MIGRATE-01, which ran them.)* |
+| **Completed** | **MIGRATE-01** | **Migrated to GitHub; aarch64 JIT under CI for the first time.** GitLab could not run it — x86_64 runners, `no_matching_runner` for arm64, then `ci_quota_exceeded` — and no GitLab tier offers macOS at any price. Repo converted SHA-256→SHA-1 (GitHub supports only SHA-1, established from its own protocol advertisement and from REST/GraphQL having no object-format parameter); 181 commits and 3 tags preserved, trees identical bar an accidental gitlink, 118 commit references remapped from a verified 188-entry mapping, `SHA256_TO_SHA1_MAP.txt` committed. Five jobs green: `lint`/`audit`/`test` on `ubuntu-24.04`, **`jit-macos`** (`macos-14`) and **`jit-linux-arm`** (`ubuntu-24.04-arm`), each running the 92-test gate in debug **and** release. The first `macos-14` run caught a latent build failure invisible for the project's life: `-C target-cpu=native` resolves to a feature-poor model on a virtualised runner and trips a `ring` compile-time assertion; fixed with `target-cpu=apple-m1`, matching `make dist`. GitLab archived read-only with a pointer; working copy moved to `code/github/miner-tim`. Closes issues #2 and #4. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---
@@ -77,18 +79,20 @@ needs colima running on an aarch64 VM (`colima start --arch aarch64 --cpu 4 --me
 
 | Platform | Hashing path | Verified by |
 |---|---|---|
-| macOS aarch64 (shipping target) | aarch64 JIT + native iteration loop | `make verify-jit` — **local, human-run** |
-| Linux aarch64 | same JIT; tests only, no release artifact | `make verify-jit-linux` — **local, human-run**, native arm64 container |
-| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **GitHub Actions** — `lint`, `test`, `audit` |
+| macOS aarch64 (shipping target) | aarch64 JIT + native iteration loop | **CI** — `jit-macos` (`macos-14`), every push |
+| Linux aarch64 | same JIT; tests only, no release artifact | **CI** — `jit-linux-arm` (`ubuntu-24.04-arm`), every push |
+| x86_64 (Linux, CI) | interpreter only; `randomx::jit` is `cfg`'d out | **CI** — `lint`, `test`, `audit` (`ubuntu-24.04`) |
 
-**CI validates the interpreter path on x86_64 Linux and nothing else.** `mod.rs`
-gates the JIT on `#[cfg(target_arch = "aarch64")]`, so the shared runners never
-compile, let alone execute, one emitted ARM64 instruction. Do not cite a green
-pipeline as evidence about the JIT; it is evidence about the interpreter, the
-Stratum client, the miner loop and the dependency audit. A JIT defect does not
+**The x86_64 jobs validate the interpreter path and nothing else.** `mod.rs`
+gates the JIT on `#[cfg(target_arch = "aarch64")]`, so those runners never
+compile, let alone execute, one emitted ARM64 instruction. Do not cite `lint`,
+`test` or `audit` as evidence about the JIT; they are evidence about the
+interpreter, the Stratum client, the miner loop and the dependency audit. The
+two `jit-*` jobs are what cover the JIT. A JIT defect does not
 crash — it silently returns wrong hashes and the pool rejects the shares.
 
-The gate that does cover it is `scripts/verify-jit.sh`, run through the two
+The gate that does cover it is `scripts/verify-jit.sh` — run by the `jit-macos`
+and `jit-linux-arm` CI jobs, and available locally through the two
 `make verify-jit*` targets: 92 tests — the JIT unit tests, the native-loop
 differential tests against the interpreter, and the known-answer vectors — in
 **both** the debug and release profiles. Debug matters because the native
@@ -103,12 +107,12 @@ set: it is the only test that hard-requires a *successful* JIT allocation. The
 known-answer vectors alone pass even with an inert JIT, because the interpreter
 fallback produces the same hash (issue #4).
 
-Historically manual because GitLab SaaS gave this free-tier project no arm64 runner
-(probed — `no_matching_runner`), and a self-hosted runner on a public repo lets
-fork MRs run code on the host. **Issue #9** tracks migrating CI to GitHub
-Actions, which offers public repos free `macos-14` and `ubuntu-24.04-arm`
-runners; that is the plan of record for making this gate automatic. **Issue #2**
-tracks the gap.
+Why this was manual until September 2026: GitLab SaaS gave this free-tier project
+no arm64 runner (probed — `no_matching_runner`), no GitLab tier offers macOS at
+any price, and a self-hosted runner on a public repo would let fork MRs run code
+on the host. The GitHub migration closed it — `macos-14` and `ubuntu-24.04-arm`
+are free for public repositories, so the gate that used to depend on a human now
+blocks a push. Both issues that tracked the gap are closed.
 
 Linux aarch64 is a *test* platform, not a shipping one: `make dist` builds an
 apple-m1 tarball only, and the Linux JIT backend pays two `mprotect` syscalls

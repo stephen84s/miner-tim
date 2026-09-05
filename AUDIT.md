@@ -3700,3 +3700,45 @@ path were left alone — they are a record of where work happened at the time.
 Full pre-conversion backup remains at
 `~/miner-tim-backups/miner-tim-FULL-presha1-20260905-070130.tar.gz` (787 MB,
 restore-verified, SHA-256 sidecar alongside).
+
+### Issues #2 and #4 assessed against their acceptance criteria (2026-09-05)
+
+Checked rather than assumed, and the check found a real gap.
+
+**Issue #2 — multi-platform CI. Four criteria:**
+
+| Criterion | Verdict |
+|---|---|
+| `randomx::jit` compiles and passes its tests on Linux aarch64 | **Met** — PLAT-01; `jit-linux-arm` passes 92 tests in CI |
+| A CI job runs the differential and known-answer tests on an arm64 runner and **fails the pipeline** | **Met** — `scripts/verify-jit.sh` filters cover `randomx::jit::`, `native_loop_diff_tests`, `full_hash_tests`, the v2 sets and `vm::native_loop`; it exits non-zero on failure *and* on an unexpected count. Demonstrated in anger: the first `macos-14` run failed the workflow on the `ring` build error |
+| README / CLAUDE.md state plainly which platforms are CI-validated | **NOT met when checked — now fixed** |
+| x86_64 pipeline keeps its interpreter coverage | **Met** — `lint`, `test`, `audit` on `ubuntu-24.04` |
+
+The third failed because MIGRATE-01's doc pass substituted individual sentences
+instead of rewriting the sections. The result contradicted itself: the coverage
+tables in both files still said the JIT was verified "**local, human-run**",
+a later paragraph said CI now covers it, a third described the migration as
+future work, and a link labelled "issue #9" pointed at issue 6. Both sections
+have been rewritten as a whole. Lesson worth keeping: **patching sentences in a
+document whose premise has changed produces a document that argues with
+itself** — rewrite the section.
+
+Also corrected: the CI-02 task-board row asserted "Nothing has run on GitHub
+yet" in the present tense. Marked as state-at-time-of-writing and superseded by
+the new MIGRATE-01 row.
+
+**Issue #4 — debug/release profile gap.** Met. The complaint was that three
+`debug_assert!` guards (imm7 ranges on `stp_fp_imm`/`ldp_fp_imm`, the `subs_imm`
+imm12 check, the CBRANCH forward-target check at `compiler.rs:637`) were inert in
+the release runs cited as evidence, while `make test` ran debug — so the two
+never agreed. `scripts/verify-jit.sh` runs the JIT set in **both** profiles, and
+all three asserts sit on paths those filters exercise (`randomx::jit::` covers
+the emitter and compiler unit tests). CI now runs both profiles on both
+architectures every push, so the guards execute in the same gate that produces
+the evidence.
+
+Residual, deliberately not treated as blocking: `make test` (debug, unfiltered)
+is still a different set from the gate's filtered subset — the issue-#5 review
+measured it at 0.79 GB higher peak — so a `debug_assert!` outside the JIT paths
+is still only exercised by a full debug run nobody does routinely. The issue
+named three specific JIT asserts and those are covered.

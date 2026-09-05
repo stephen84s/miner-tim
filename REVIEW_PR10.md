@@ -212,10 +212,13 @@ it. The authoritative run is the one on the head commit at merge time.
 
 ## What I could not verify
 
-- The `jit-macos` and `jit-linux-arm` check runs on PR #10 were still `pending`
-  when this ledger was written. I ran the gate locally instead (Darwin arm64,
-  92/92, debug + release, exit 0) and the mutation test above; I did not wait
-  for the CI verdict.
+- Nothing material. The CI verdict was pending when the findings were written
+  but has since landed: run **33998507095** on `98aa2f8` (this branch's ledger
+  commit, which carries the PR's full diff) — `jit-macos` **success**,
+  `jit-linux-arm` **success**, and `lint`/`audit`/`test` green on run
+  33998507094. All five required contexts pass. I also ran the gate locally
+  (Darwin arm64, 92/92, debug + release, exit 0) plus the mutation test above.
+  Any run started after this commit is a re-run of an already-green tree.
 - I did not re-derive CI-03's runner-minute figures; they are PR #8's and were
   re-derived there (REVIEW_PR8.md round 3).
 

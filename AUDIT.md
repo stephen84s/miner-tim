@@ -3809,21 +3809,59 @@ already contains the latest `main`. Its run therefore validates exactly the tree
 that lands, and the post-merge run tested an identical tree at a different SHA.
 That second pass bought nothing.
 
-**Saving.** One full pass is ~50 runner-minutes: `test` 19, `jit-linux-arm` 12,
-`jit-macos` 11, `audit` 6, `lint` 2. That is now spent once per change instead of
-twice, so **~50 minutes saved per merged PR**, most of it the two JIT gates.
+**Saving — corrected after review; the original figures were invented.** One
+full pass is **29.5 runner-minutes**, measured from the API as the mean of three
+completed runs per job: `jit-macos` 13.4, `jit-linux-arm` 11.7, `test` 4.0,
+`audit` 0.2, `lint` 0.2. That is spent once per change instead of twice.
 
-**Concurrency simplified as a consequence.** `cancel-in-progress` was
-conditioned on `github.event_name == 'pull_request'`, to avoid cancelling a
-verdict for a commit already on `main`. With no push trigger, that case cannot
-arise, so it is now unconditionally `true`: pushing again to a PR means the
-earlier verdict concerns code nobody will merge.
+The original entry claimed ~50 minutes, and the workflow comments said 45 — three
+figures in circulation, none measured. `test` was quoted at 19 minutes, copied
+from a `jit.yml` comment describing GitLab's runner; on GitHub it is 4.0. `audit`
+and `lint` were overstated 30x and 10x. `jit-macos` was *under*stated.
+
+**And the currency was wrong.** The repository is public, so Actions minutes are
+free — `billable.total_ms` is zero across all workflows. This change frees **no
+billed minutes at all**. What it saves is wall-clock and queue time, which is a
+real benefit but not the one the entry claimed.
+
+**Concurrency — an attempted simplification, reverted after review.** The
+original change made `cancel-in-progress` unconditionally `true`, reasoning that
+with no push trigger the "cancel a verdict for a commit already on main" case
+could not arise. **That reasoning was wrong.** `workflow_dispatch` sets
+`github.ref` to `refs/heads/main`, so two manual dispatches of `main` share the
+concurrency group and the second silently kills the first — and a manual
+dispatch is precisely the mitigation this entry nominates for `main` no longer
+having push runs. It has been left conditioned on
+`github.event_name == 'pull_request'`, as before. The reviewer demonstrated the
+collision from this repo's own run history rather than arguing it.
 
 **What is given up, stated plainly.** `main` no longer has CI runs of its own.
 If branch protection were ever relaxed and someone pushed directly, nothing
 would check it. `workflow_dispatch` remains on both workflows, so `main` can be
 verified on demand — worth doing after a dependency bump, or if protection is
 ever loosened.
+
+### Verification
+Both workflows parse (`YAML.load_file`); triggers confirmed as
+`pull_request` + `workflow_dispatch` only; `release.yml` byte-identical and
+still tag-triggered; the five required check contexts still match the job
+`name:` fields. Durations measured via
+`actions/runs/<id>/jobs`, three completed runs per job. Billing checked via
+`actions/workflows/<id>/timing`. **Not verified:** the effect on Actions cache
+population — see below; deliberately left unquantified rather than guessed at,
+which is the error this section exists to prevent.
+
+**Open, from the review: Actions cache scoping.** The eight existing caches
+(~496 MB) are scoped to `refs/heads/main` and were written by the push runs this
+change deletes. PR runs write to `refs/pull/N/merge`, which other PRs cannot
+read. Nothing repopulates `main`'s scope any more, so `CACHE_EPOCH` effectively
+cannot be bumped and PRs after a `Cargo.lock` change fall back to stale prefix
+matches. Not measured, not fixed here.
+
+**Non-findings, checked and dismissed.** `cargo audit` drift is not a real loss:
+every merge is preceded by a PR run that includes `audit`. The genuine gap is
+that **no workflow has a `schedule:` trigger** at all, which predates this change
+and is unaffected by it. There is no README badge to break.
 
 **Considered and rejected: path filters** (skipping the suite for docs-only
 changes). With required status checks, a workflow skipped by a path filter never

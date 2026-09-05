@@ -21,8 +21,10 @@ on:
   # "require branches to be up to date before merging", so a PR's head already
   # contains the latest main and its run validates exactly the content that
   # lands. Re-running on the merge commit tests an identical tree and costs a
-  # second full pass — on this repo roughly 45 minutes of runner time per merge,
-  # most of it the two JIT gates.
+  # second full pass — measured at **29.5 minutes** of runner time across the
+  # five jobs (jit-macos 13.4, jit-linux-arm 11.7, test 4.0, audit 0.2,
+  # lint 0.2; mean of 3 completed runs each). The repo is public, so those are
+  # free minutes: what this saves is wall-clock and queue time, not money.
   #
   # `workflow_dispatch` stays, so main can still be checked on demand — after a
   # dependency bump, or if branch protection is ever relaxed.
@@ -34,10 +36,11 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Every run is now either a PR or a manual dispatch, so a superseded run is
-  # always safe to cancel: pushing again to a PR means the earlier verdict is
-  # about code nobody will merge.
-  cancel-in-progress: true
+  # Cancel superseded PR runs only. NOT unconditional: `workflow_dispatch` sets
+  # `github.ref` to `refs/heads/main`, so two manual dispatches of main share
+  # this group and the second would silently kill the first — and a manual
+  # dispatch is precisely the mitigation for main no longer having push runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Matches `.gitlab-ci.yml`'s RUST_VERSION. The JIT is compiler-sensitive and
@@ -177,8 +180,9 @@ jobs:
   test:
     name: test (cargo test --release, x86_64 linux)
     runs-on: ubuntu-24.04
-    # ~19 minutes on GitLab's x86_64 runners; 1h matches the GitLab job's
-    # timeout and leaves room for a cold cache.
+    # Took ~19 minutes on GitLab's x86_64 runners; measures **4.0 minutes** here
+    # (mean of 3 completed runs). 1h is inherited head-room for a cold cache, not
+    # an expectation — do not read the timeout as an estimate of the runtime.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

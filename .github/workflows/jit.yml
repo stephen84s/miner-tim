@@ -22,8 +22,10 @@
 # the local gate. That assertion is load-bearing — libtest exits 0 when a filter
 # matches nothing — so nothing here may weaken or bypass it.
 #
-# Kept separate from ci.yml on purpose: the interpreter suite takes ~19 minutes
-# and must not gate the JIT verdict, nor be gated by it (issue #9).
+# Kept separate from ci.yml on purpose: the two gates here are the slow pair
+# (13.4 and 11.7 minutes measured) and must not gate the interpreter verdict,
+# nor be gated by it (issue #9). The "~19 minutes" this comment used to quote
+# for the interpreter suite was never measured — it is 4.0.
 
 name: JIT gate (aarch64)
 
@@ -32,8 +34,10 @@ on:
   # "require branches to be up to date before merging", so a PR's head already
   # contains the latest main and its run validates exactly the content that
   # lands. Re-running on the merge commit tests an identical tree and costs a
-  # second full pass — on this repo roughly 45 minutes of runner time per merge,
-  # most of it the two JIT gates.
+  # second full pass — measured at **29.5 minutes** of runner time across the
+  # five jobs (jit-macos 13.4, jit-linux-arm 11.7, test 4.0, audit 0.2,
+  # lint 0.2; mean of 3 completed runs each). The repo is public, so those are
+  # free minutes: what this saves is wall-clock and queue time, not money.
   #
   # `workflow_dispatch` stays, so main can still be checked on demand — after a
   # dependency bump, or if branch protection is ever relaxed.
@@ -45,8 +49,9 @@ permissions:
 
 concurrency:
   group: jit-${{ github.ref }}
-  # See ci.yml: with no push trigger, superseded runs are always safe to cancel.
-  cancel-in-progress: true
+  # See ci.yml: PR runs only. A workflow_dispatch of main shares this group, and
+  # killing a manual verification of main is the one thing that must not happen.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_VERSION: "1.97.1"

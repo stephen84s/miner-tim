@@ -31,3 +31,10 @@ mining.conf
 # cannot be remapped across hash algorithms.
 .claude/worktrees/
 .worktrees/
+
+# Per-machine Claude Code permissions. Untracked deliberately: `settings.local.json`
+# is personal, per-machine state — it held one developer's exact pool/wallet
+# command line and showed as modified in every `git status` for the life of the
+# project. Shared, reviewable settings belong in `.claude/settings.json`, which
+# stays tracked.
+.claude/settings.local.json

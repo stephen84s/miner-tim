@@ -3897,3 +3897,42 @@ so rather than implying a baseline was taken.
 **Cost worth knowing:** every worktree carries an independent `target/`, so disk
 grows quickly on a project with `lto=true` release artifacts. Remove worktrees as
 their PRs merge (`git worktree remove`).
+
+### PROC-04 (2026-09-05): `.claude/settings.local.json` untracked
+
+Found during a repo-size audit the user asked for. The file was tracked from the
+initial commit and had shown as modified in `git status` for the life of the
+project — it is the file every session had to work around.
+
+**It should never have been tracked.** `settings.local.json` is per-machine
+Claude Code state: a 48-entry permission allow-list containing one developer's
+exact command line, pool and wallet. Shared, reviewable settings belong in
+`.claude/settings.json`, which stays tracked.
+
+`git rm --cached` plus a `.gitignore` entry: removed from the index, left on
+disk, ignored from here.
+
+**No secret was exposed.** The audit checked: the Monero address in that file
+matches one already in `src/donate.rs`, so it is the project's published
+donation address, not a private wallet. `mining.conf`, which holds the operator's
+actual mining wallet, has never been committed. No keys or tokens in any tracked
+file.
+
+**Consequence for anyone with an existing checkout, and it bites silently.**
+This commit deletes the file from the repository, so a `pull` deletes it from a
+working tree where it matches `HEAD` — taking the local permission list with it,
+with no warning. Backed up beforehand to
+`~/miner-tim-backups/settings.local.json.backup-20260905-224526` (48 entries,
+verified as parseable JSON, outside the repo per the destructive-ops rule).
+Restore by copying it back; it is ignored now, so it will stay put.
+
+### Repo-size audit (the reason this was found)
+- `.git` **6.1 MB**, pack **4.10 MiB**; **54 tracked files, 1.3 MB**.
+- Largest blobs in the whole history are `AUDIT.md` revisions at ~205–216 KB.
+  **No blob anywhere in history exceeds 500 KB**, so the earlier `target/`
+  history rewrite (174 MB -> 536 KB) is genuinely clean.
+- The 154 MB on disk is `target/` (71 MB) and worktrees (75 MB), both ignored.
+- **Growth to watch:** `AUDIT.md` is 210 KB and every entry commits a fresh
+  full-size blob — the ten largest objects in the repository are all the same
+  file, roughly half the pack. The head/archive split used for `REVIEW_MR1.md`
+  is the eventual answer.

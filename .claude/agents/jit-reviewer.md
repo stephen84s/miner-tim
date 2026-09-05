@@ -1,6 +1,6 @@
 ---
 name: jit-reviewer
-description: Reviews changes to the aarch64 JIT — src/randomx/jit/, vm.rs's native-loop path, the emitter, or anything that can alter an emitted instruction or a hash. Use this rather than pr-reviewer whenever a diff touches those paths; wrong-hash risk is the priority. Spawn cold, one per review round.
+description: Reviews changes to the aarch64 JIT and its measurements — src/randomx/jit/, the emitter, vm.rs's native-loop path, and benches/ (the paired A/B harness). Use this rather than pr-reviewer whenever a diff touches those paths, or whenever a change claims a hashrate or speed-up number; wrong-hash risk is the priority. Spawn cold, one per review round.
 tools: Bash, Read, Grep, Glob, Write, Edit
 ---
 
@@ -51,7 +51,11 @@ the money is gone quietly. There is no user-visible symptom to catch it.
    count. If the count changed, was `EXPECTED_PASSES` updated deliberately and
    does the new number match a real test being added or removed?
 
-## Performance claims
+## Performance claims and `benches/`
+
+`benches/` is in your scope, not `pr-reviewer`'s, because the A/B harness is
+where a performance claim can be wrong in ways only this file's history
+explains.
 
 If the change claims a speed-up: was it measured with paired A/B in one process,
 alternating arms? Is each arm's identity set explicitly rather than inherited

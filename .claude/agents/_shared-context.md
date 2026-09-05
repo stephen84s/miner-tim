@@ -43,6 +43,12 @@ If a change adds or relies on a test, **mutate the production code that test
 guards and confirm the test fails.** A test that still passes with its subject
 broken is testing nothing. State the mutation and the observed failure.
 
+This is the one sanctioned exception to working rule 4 below, and it is narrow:
+the mutation is **temporary and reverted before you finish**, it is never
+committed, and it never leaves the working tree dirty at the end of the review.
+Take a copy first (`cp file /tmp/…`) and restore from it rather than trusting an
+edit-back. If you cannot revert cleanly, say so loudly in the ledger.
+
 ## What CI does and does not prove
 
 - `lint`, `audit`, `test` run on **x86_64 Linux**, where `randomx::jit` is
@@ -59,7 +65,7 @@ broken is testing nothing. State the mutation and the observed failure.
 An earlier reviewer was kept alive across rounds until its context reached 560k
 tokens and it could no longer start. You are spawned cold on purpose.
 
-- **Never read `AUDIT.md` (~180 KB) or `REVIEW_MR1_ARCHIVE.md` (~175 KB) in
+- **Never read `AUDIT.md` (~210 KB) or `REVIEW_MR1_ARCHIVE.md` (~175 KB) in
   full.** `grep` them for a finding ID; `tail` for recent entries.
 - Prefer `sed -n 'A,Bp'` and `grep -n` over `cat` on large sources
   (`vm.rs` ~2200 lines, `compiler.rs` ~1700, `miner.rs` ~1100).
@@ -80,7 +86,8 @@ tokens and it could no longer start. You are spawned cold on purpose.
    (accuracy, clarity, test quality), **nit**.
 6. Finish by stating plainly whether the PR is mergeable, and say what you could
    **not** verify rather than implying you checked it.
-7. End commit messages with:
+7. End commit messages with both trailers this repo uses:
    ```
    Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+   Claude-Session: <the session URL you were given>
    ```

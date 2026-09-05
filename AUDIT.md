@@ -3878,7 +3878,7 @@ checkout parked on `main`:
 **`.gitignore` first, and this is not routine hygiene.** `.claude/worktrees/`
 and `.worktrees/` are now ignored. A tracked worktree directory is committed as
 a **gitlink** (mode 160000) — which is exactly what happened before:
-`.claude/worktrees/platform-neutral` was committed in `7851bdc`, and during the
+`.claude/worktrees/platform-neutral` was committed in `3b2cc9d`, and during the
 SHA-256 -> SHA-1 conversion it was the single line that had to be stripped from
 the fast-export stream, because a gitlink's object id cannot be remapped across
 hash algorithms. Adopting worktrees without ignoring the directory would have
@@ -3936,3 +3936,48 @@ Restore by copying it back; it is ignored now, so it will stay put.
   full-size blob — the ten largest objects in the repository are all the same
   file, roughly half the pack. The head/archive split used for `REVIEW_MR1.md`
   is the eventual answer.
+
+### Corrections to this branch's own entries (round 1 review of PR #9)
+
+**The append-only rule was invoked in the commit that broke it.** Commit
+`0a11083` rewrote a sentence of PROC-02 *in place* while adding a paragraph
+headed "Correction, appended per the append-only rule". That is the rule
+`pr-reviewer` item 6 introduces two files away. Stating the working distinction,
+since the reviewer was right that it was never written down: **an entry already
+merged to `main` is corrected by appending; an entry added on an unmerged branch
+may still be edited in place, because it is not yet part of the record.**
+PROC-02 was unmerged, so the edit was defensible — the claim of appending was
+not.
+
+**Dead commit id.** `7851bdc` does not resolve in this repository: it is a
+pre-migration **SHA-256** id, and `SHA256_TO_SHA1_MAP.txt` maps it to
+`3b2cc9d` ("feat: Initialize project management agent protocol"). It was copied
+out of an older `AUDIT.md` line into `.gitignore` and `CLAUDE.md`, where it would
+have sent a future reader to nothing. Corrected in both, and in PROC-03.
+The occurrence at `AUDIT.md:3573` is inside the already-merged conversion entry
+and is corrected here rather than edited there. Worth adding: the gitlink is not
+visible at `3b2cc9d` either, because the conversion stripped it — it survives
+only in the archived GitLab project.
+
+**The PR #7 collision is a conflict, not a renumbering.** `git merge-tree`
+reports real content conflicts in **both** `CLAUDE.md` (same protocol slot) and
+`AUDIT.md` (same insertion point). And there is a second consequence that was
+not stated: if #9 merges first, `PROC-01` lands *after* `PROC-04` in a ledger
+that is meant to read chronologically.
+
+**`AUDIT.md` size.** `_shared-context.md` said "~180 KB" while PROC-04 said
+210 KB. Measured on `main`: **215,635 bytes**. PROC-04 was right; the agent file
+is corrected.
+
+**Protocol step 0 restructured.** The first fix used `0a.`/`0b.` markers, which
+are not valid CommonMark either — the reviewer's nit was that `0b.` folds into
+the preceding item, and relabelling did not address it. Step 0 is now one
+numbered item with bullet sub-items, which is valid, unambiguous, and shrinks the
+conflict surface with PR #7: its "branch and PR, always" rule becomes a third
+bullet at merge rather than a competing `0.`.
+
+**PROC-04 overstated one detail.** It says `settings.local.json` was "modified in
+every `git status`". It is byte-identical to `HEAD` and was committed only four
+times in 181 commits. The clean state is precisely what makes the silent-delete
+warning true — a pull deletes a file that matches `HEAD` without complaint — so
+the warning stands and the description of it does not.

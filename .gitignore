@@ -26,9 +26,11 @@ mining.conf
 
 # Agent worktrees. MUST stay ignored: a worktree directory that is tracked gets
 # committed as a gitlink (mode 160000). That already happened once —
-# `.claude/worktrees/platform-neutral` was committed in 7851bdc and had to be
+# `.claude/worktrees/platform-neutral` was committed in 3b2cc9d and had to be
 # stripped during the SHA-256 -> SHA-1 conversion, because a gitlink's object id
-# cannot be remapped across hash algorithms.
+# cannot be remapped across hash algorithms. (`3b2cc9d` is the SHA-1 id; the
+# gitlink itself is no longer visible there, because the conversion stripped it —
+# it survives only in the archived GitLab project.)
 .claude/worktrees/
 .worktrees/
 

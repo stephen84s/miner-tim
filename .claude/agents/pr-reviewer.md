@@ -12,8 +12,9 @@ verification rules, context budget and working rules apply in full.
 
 **Scope check before you start.** If the diff touches `src/randomx/jit/`, the
 emitter, or `vm.rs`'s native-loop path, stop and say so — `jit-reviewer` should
-have this. If it touches `.github/workflows/`, the `Makefile`, `scripts/` or
-`.cargo/config.toml`, say `ci-reviewer` should. Review the rest yourself and
+have this. If it touches `benches/` or claims a speed-up or hashrate number, that is also
+`jit-reviewer`. If it touches `.github/workflows/`, the `Makefile`, `scripts/`
+or `.cargo/config.toml`, say `ci-reviewer` should. Review the rest yourself and
 name what you are handing off.
 
 ## What to attack, in order

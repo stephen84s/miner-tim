@@ -379,8 +379,9 @@ Two of the six are executable automation, not prose:
   That is a change to the JIT gate's own build configuration — the verification
   apparatus this project treats as its highest-stakes artifact — pushed to
   `main` with no branch, no PR and no review.
-- **`bcad873`** *adds* `.github/workflows/release.yml`, 39 lines that publish a
-  GitHub Release on any `v*` tag, and edits the `Makefile`. A release pipeline
+- **`bcad873`** *adds* `.github/workflows/release.yml`, 39 lines that create the
+  GitHub Release entry on a `v[0-9]*` tag (verified in the file: `on: push:
+  tags: ['v[0-9]*']`), and edits the `Makefile`. A release pipeline
   reaching `main` unreviewed is the substance of the risk, not a pedantic
   exception to a rounding-off phrase.
 
@@ -661,4 +662,8 @@ reviewer's remit; it is taken from the quoted `GH006` output and from
 `enforce_admins: true` being live), the mechanism behind run `33941786130`'s
 cancellation (round 1's O3 — still an open question and still worth an issue),
 and nothing was run of the test suite or the JIT gate, because this branch
-changes no code.
+changes no code. One causal claim is also left unverified and is repeated here
+only as the correction states it: that `e460643` was the fix for `445466b`'s
+`jit-macos` failure rests on the chronology (three minutes apart) and on
+`e460643`'s own commit message, not on the failed run's logs, which this round
+did not read.

@@ -22,14 +22,36 @@
 # the local gate. That assertion is load-bearing — libtest exits 0 when a filter
 # matches nothing — so nothing here may weaken or bypass it.
 #
-# Kept separate from ci.yml on purpose: the interpreter suite takes ~19 minutes
-# and must not gate the JIT verdict, nor be gated by it (issue #9).
+# Kept separate from ci.yml on purpose: the two gates here are the slow pair
+# (13.94 and 11.65 min measured) and must not gate the interpreter verdict, nor
+# be gated by it (issue #9).
 
 name: JIT gate (aarch64)
 
 on:
-  push:
-    branches: [main]
+  # Deliberately NOT `push: branches: [main]`. `main` is protected with
+  # "require branches to be up to date before merging", so a PR's head already
+  # contains the latest main and its run validates exactly the content that
+  # lands. Re-running on the merge commit tests an identical tree and costs a
+  # second full pass. Measured over every completed run to date, as the mean of
+  # each job's duration (n=12-14 per job):
+  #
+  #   jit-macos      13.94 min  (11.20-16.43)
+  #   jit-linux-arm  11.65 min  (11.58-11.77)
+  #   test            4.07 min  ( 3.28- 5.43)
+  #   audit           0.49 min  ( 0.22- 3.32, the high value is a cold cache)
+  #   lint            0.29 min  ( 0.23- 0.53)
+  #   ---------------------------------------
+  #   30.4 min of RUNNER time, but the five jobs run concurrently, so a pass is
+  #   ~15 min of WALL-CLOCK (bounded by jit-macos; the CI workflow finishes in
+  #   ~4 min and does not gate it).
+  #
+  # The repo is public, so `billable.total_ms` is 0 on every run: this saves no
+  # billed minutes. What it saves is the second ~15-minute wait per merge, and
+  # the runner capacity that pass would occupy.
+  #
+  # `workflow_dispatch` stays, so main can still be checked on demand — after a
+  # dependency bump, or if branch protection is ever relaxed.
   pull_request:
   workflow_dispatch:
 
@@ -38,7 +60,8 @@ permissions:
 
 concurrency:
   group: jit-${{ github.ref }}
-  # See ci.yml: cancel superseded PR runs only, never a verdict for main.
+  # See ci.yml: PR runs only. A workflow_dispatch of main shares this group, and
+  # killing a manual verification of main is the one thing that must not happen.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

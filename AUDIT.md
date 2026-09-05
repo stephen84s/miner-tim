@@ -4087,3 +4087,126 @@ it exists, so a future session reads it before working rather than after. The
 merge `0002d05` brought `main` (including PR #9's reviewer agents) into this
 branch and settled that collision: PR #9's step 0 is the one that survives, with
 PROC-01's rule added to it as a bullet rather than as a competing step.
+
+### CI-03 (2026-09-05): workflows run on pull requests only
+
+User asked to cut CI CPU time by building only when a PR exists.
+
+**Change.** Removed `push: branches: [main]` from `ci.yml` and `jit.yml`. Both
+now trigger on `pull_request` and `workflow_dispatch` only. `release.yml` is
+untouched — it fires on `v*` tags and must keep doing so.
+
+**Why this is safe rather than a coverage cut.** `main` is protected with
+*"require branches to be up to date before merging"* (PROC-01), so a PR's head
+already contains the latest `main`. Its run therefore validates exactly the tree
+that lands, and the post-merge run tested an identical tree at a different SHA.
+That second pass bought nothing.
+
+**Saving — corrected twice; see the round-2 note below.** Measured over every
+completed run to date, as the mean of each job's duration:
+
+| job | n | mean | median | range |
+|---|---|---|---|---|
+| `jit-macos` | 12 | **13.94** | 14.29 | 11.20–16.43 |
+| `jit-linux-arm` | 12 | **11.65** | 11.65 | 11.58–11.77 |
+| `test` | 14 | **4.07** | 4.03 | 3.28–5.43 |
+| `audit` | 14 | **0.49** | 0.28 | 0.22–3.32 |
+| `lint` | 14 | **0.29** | 0.26 | 0.23–0.53 |
+| **sum** | | **30.44** | | |
+
+`audit`'s 3.32 outlier is a cold-cache run and is kept in the mean rather than
+dropped — dropping it is what made an earlier figure look tighter than the data.
+
+**Runner time is not wall-clock, and the distinction matters here.** The five
+jobs run concurrently (no `needs:` anywhere), so 30.4 runner-minutes is ~15
+minutes of wall-clock, bounded by `jit-macos`; the CI workflow finishes in ~4
+minutes and does not gate it. Measured from run timestamps across **every**
+successful run: JIT workflow **15.01 min** mean (n=17, median 14.52, range
+11.72–21.50), CI workflow **4.34 min** mean (n=20, median 4.21, range
+3.58–5.78).
+
+The two sample sets have different cut-off points: the per-job table was taken at
+run `33966976457`, the wall-clock figures later, at the branch head. Recomputing
+the per-job sum at the later cut gives 30.28 rather than 30.44 — the conclusion
+is unchanged, but "every completed run" means *every run up to its own cut*, not
+a single shared epoch.
+
+*Corrected during round 3, before that round had reported.* The first version of
+this paragraph quoted
+n=4 for both — an arbitrary truncation, because the command that produced it
+piped through `head -8`. The same entry claims the per-job figures use every
+completed run, so it criticised the previous round for quoting a subset and then
+quoted one itself, three paragraphs later. The truncation was never disclosed,
+which is the part that matters.
+
+**The currency.** The repository is public, so `billable.total_ms` is **0** for
+both `MACOS` and `UBUNTU` on every run — this frees no billed minutes. What it
+saves is the second ~15-minute wait per merge and the runner capacity that pass
+occupies. Verified via `actions/runs/<id>/timing`; note that
+`actions/workflows/<id>/timing` returns `{"billable":{}}` and is evidence of
+nothing — an earlier revision of this entry cited that endpoint.
+
+### Round-2 review corrections
+The first correction replaced invented numbers with differently-derived ones and
+mislabelled them, which the second round caught:
+
+- The figures were labelled "mean of 3 completed runs each". They were not.
+  `jit-macos` 13.4 was round 1's *median* relabelled as a mean; no 3-run subset
+  yields it (all ten subsets of the five samples give 12.76–14.69). `audit` 0.2
+  and `lint` 0.2 were obtainable only by taking the three fastest runs. Only
+  `jit-linux-arm` and `test` survived. Now: every completed run, n stated, mean
+  *and* median *and* range given, so the label cannot drift from the method.
+- **The PR description was never updated** — it still carried the ~50-minute
+  table and the claim that `cancel-in-progress` is "now unconditionally `true`",
+  which the branch's own code contradicts. Fixing the code and the audit while
+  leaving the PR body stale left the review record wrong. Rewritten.
+- `ci.yml` asserted "~19 minutes on GitLab's x86_64 runners" as fact while
+  `jit.yml` simultaneously said that figure was never measured. **No 19-minute
+  measurement exists anywhere in this repo** — `.gitlab-ci.yml.archived` records
+  only `timeout: 1h`. The claim is dropped rather than restated.
+- Benefit sentence said "wall-clock and queue time" directly after a
+  runner-minute total, conflating the two. Separated above.
+
+### Verification
+Both workflows parse (`YAML.load_file`); triggers confirmed as
+`pull_request` + `workflow_dispatch` only; `release.yml` byte-identical and
+still tag-triggered; the five required check contexts still match the job
+`name:` fields. Durations measured via
+`actions/runs/<id>/jobs`, every completed run per job (n in the table above,
+12–14 depending on the job). Billing checked via the *per-run* endpoint
+`actions/runs/<id>/timing`. Both of those were stated wrongly here in an earlier
+revision — "three completed runs per job" and the per-*workflow* timing endpoint
+— which contradicted the corrections made further up this same entry; round 3
+caught that the summary had not been updated along with the body.
+**Not verified:** the effect on Actions cache
+population — see below; deliberately left unquantified rather than guessed at,
+which is the error this section exists to prevent.
+
+**Open, from the review: Actions cache scoping.** The eight existing caches
+(~496 MB) are scoped to `refs/heads/main` and were written by the push runs this
+change deletes. PR runs write to `refs/pull/N/merge`, which other PRs cannot
+read. Nothing repopulates `main`'s scope any more, so `CACHE_EPOCH` effectively
+cannot be bumped and PRs after a `Cargo.lock` change fall back to stale prefix
+matches. Not measured, not fixed here.
+
+**Open, from round 3: no `merge_group:` trigger (latent).** With `push` removed,
+`pull_request` is the sole gating trigger. There is no merge queue today
+(`rulesets` is `[]`, and the PR reported `CLEAN` rather than `QUEUED`), so this
+costs nothing now — but enabling a merge queue later would leave the required
+checks with no trigger that fires in the queue, deadlocking every PR. Recorded
+rather than pre-emptively fixed: adding a trigger would change the gating
+behaviour that round 3 has just verified, for a configuration nobody has asked
+for.
+
+**Non-findings, checked and dismissed.** `cargo audit` drift is not a real loss:
+every merge is preceded by a PR run that includes `audit`. The genuine gap is
+that **no workflow has a `schedule:` trigger** at all, which predates this change
+and is unaffected by it. There is no README badge to break.
+
+**Considered and rejected: path filters** (skipping the suite for docs-only
+changes). With required status checks, a workflow skipped by a path filter never
+reports its check, and the PR stays blocked forever rather than passing. Making
+that work needs a stub job reporting success in the skipped case — real
+complexity for a saving that only applies to documentation commits. Not worth it
+today; revisit if docs-only PRs become frequent.
+

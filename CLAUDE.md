@@ -8,6 +8,14 @@
 - **Constraint:** **No implementation is complete until it is committed to `AUDIT.md`.**
 
 ## Operational Protocol
+0.  **Branch and PR, always.** `main` is protected: direct pushes are rejected,
+    a pull request is required, and all five CI checks must pass — including for
+    admins. Work on a branch, open a PR, and have an **independent reviewer
+    agent** examine it before merge. This is a standing user instruction, not a
+    preference. It was followed for MRs !1–!4, then quietly dropped during the
+    GitHub migration: six commits reached `main` unreviewed, among them the
+    changes correcting earlier mistakes — the worst place to skip review. The
+    protection exists so the rule no longer depends on remembering it.
 1.  **Task Analysis:** Break user requests into atomic steps.
 2.  **Execution:** Implement changes in the repository.
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.

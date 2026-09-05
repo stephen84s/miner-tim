@@ -3794,3 +3794,43 @@ maintainer's.
 sections whose premise had changed, producing files that contradicted
 themselves — which is how issue #2's third acceptance criterion came to be
 unmet while looking done. When a premise changes, rewrite the section.
+
+### PROC-01 (2026-09-05): `main` protected after six unreviewed commits reached it
+
+User asked, plainly, "Are you working directly on main?" The answer was yes.
+
+Standing instruction from early in the project: branch-based development, merge
+requests, and independent subagent review before merge. It was honoured for all
+four GitLab MRs. It then lapsed at the GitHub migration — the initial push to
+`main` was unavoidable when bootstrapping the repository, and the habit never
+resumed. **Six commits reached `main` with no branch, no PR and no review:**
+`e460643`, `bcad873`, `966ffda`, `7c92e4c`, `6414ba1`, `d621978`.
+
+Two of those — `7c92e4c` (sections that contradicted themselves) and `6414ba1`
+(four factual errors, including an unsupported "~3x faster" claim) — were
+corrections of earlier mistakes. This project's own review history is that
+**every round on MR !1 found a defect in the fix written for the previous
+round's finding**, so skipping review on corrections is the worst available
+place to skip it. Contributing factor, not an excuse: three subagents died on
+session limits, work shifted to direct execution, and the review habit went with
+it.
+
+**Fix — structural, not a resolution to try harder.** Branch protection on
+`main`: PR required, all five checks required (`lint`, `audit`, `test`,
+`jit-macos`, `jit-linux-arm`), branch must be up to date, force-push and
+deletion blocked, and **`enforce_admins: true`** so it binds the maintainer as
+well as the agent. Verified by attempting a direct push and being refused with
+`GH006: Protected branch update failed — Changes must be made through a pull
+request`, rather than by reading back the configuration.
+
+Approvals required is **0** deliberately: a solo maintainer cannot approve their
+own PR, so a non-zero count would block every merge. The gate is the PR plus the
+five checks plus the independent reviewer agent, which is the arrangement that
+has actually been catching defects.
+
+The six commits are left in place. They are all documentation, CI is green on
+them, and rewriting published history to make the process look observed would be
+worse than the lapse it concealed.
+
+`CLAUDE.md`'s Operational Protocol gains a step 0 stating the rule and why it
+exists, so a future session reads it before working rather than after.

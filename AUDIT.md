@@ -4013,8 +4013,17 @@ dropped — dropping it is what made an earlier figure look tighter than the dat
 **Runner time is not wall-clock, and the distinction matters here.** The five
 jobs run concurrently (no `needs:` anywhere), so 30.4 runner-minutes is ~15
 minutes of wall-clock, bounded by `jit-macos`; the CI workflow finishes in ~4
-minutes and does not gate it. Measured from run timestamps: JIT workflow 14.8
-min mean (n=4, max 16.7), CI workflow 4.1 min (n=4).
+minutes and does not gate it. Measured from run timestamps across **every**
+successful run: JIT workflow **15.01 min** mean (n=17, median 14.52, range
+11.72–21.50), CI workflow **4.34 min** mean (n=20, median 4.21, range
+3.58–5.78).
+
+*Corrected after round 3 flagged it.* The first version of this paragraph quoted
+n=4 for both — an arbitrary truncation, because the command that produced it
+piped through `head -8`. The same entry claims the per-job figures use every
+completed run, so it criticised the previous round for quoting a subset and then
+quoted one itself, three paragraphs later. The truncation was never disclosed,
+which is the part that matters.
 
 **The currency.** The repository is public, so `billable.total_ms` is **0** for
 both `MACOS` and `UBUNTU` on every run — this frees no billed minutes. What it

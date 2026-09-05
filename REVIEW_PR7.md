@@ -7,19 +7,25 @@ Date of review: 2026-09-05.
 
 ## Verdict
 
-**Mergeable once four prose claims are corrected on this branch.**
+**Mergeable once B1 is corrected on this branch.** One blocker, one
+scoped-blocker, four minors.
 
 The mechanism is right. Branch protection is configured exactly as the PR table
 says, and the five required contexts are string-exact — the highest-stakes
-check, and it passes. What does not hold up is the prose. Four claims in the two
-files are wrong, unstated, or overstated, and one of them ("CI is green on
-them") is a false factual assertion inside a PR whose entire subject is that
-unreviewed documentation commits contained false factual assertions.
+check, and it passes.
 
-They must be fixed **on this branch, before merge**, not in a follow-up. `AUDIT.md`
-is an append-only ledger by this project's own rule; a false claim merged into it
-is permanent, and the correction would then itself be a doc commit of the kind
-this PR exists to stop shipping unreviewed.
+The one thing that must not merge as written is **B1**: "CI is green on them" is
+false, and it is entering `AUDIT.md`, which is an append-only ledger by this
+project's own rule. A false factual claim, made permanent, inside a PR whose
+entire subject is that unreviewed documentation commits contained false factual
+claims. Fix it on this branch — a follow-up correction commit would itself be a
+doc commit of exactly the kind this PR exists to stop shipping unreviewed.
+
+**B2** is blocking only for the one sentence in `CLAUDE.md` step 0; the PR body's
+own wording is careful and is not at fault. **B3** and **B4** are minors —
+neither defect was introduced by this diff, but both are cheap to fold in while
+the branch is open, and B3 in particular is the self-contradiction failure mode
+this PR cites as its own motivation.
 
 ---
 
@@ -56,11 +62,17 @@ has no aarch64 verdict at all; one was unverified at time of writing.
 was still running." The argument for not rewriting history survives this
 correction intact — it does not depend on all six being green.
 
-### B2 (Blocking, overclaim) — protection does not enforce the thing that lapsed
+### B2 (Blocking — scoped to one sentence in `CLAUDE.md`) — protection does not enforce the thing that lapsed
 
-`CLAUDE.md` step 0 closes with "The protection exists so the rule no longer
-depends on remembering it." `AUDIT.md` calls the fix "structural, not a
-resolution to try harder."
+**Scope first, because the PR body is not at fault here.** The PR body is
+careful and accurate: "The real gate is the PR plus the five checks plus the
+independent reviewer agent." That correctly separates what protection enforces
+from what it does not. The charge is against **`CLAUDE.md` step 0's closing
+sentence alone**: "The protection exists so the rule no longer depends on
+remembering it." In step 0, "the rule" is the rule the same paragraph just
+stated — which includes "have an **independent reviewer agent** examine it
+before merge". Protection does not enforce that half. `AUDIT.md`'s "structural,
+not a resolution to try harder" leans the same way, though it is less explicit.
 
 What lapsed was **independent review**. What protection enforces is *branch +
 PR + five checks*. With `required_approving_review_count: 0` the author can open
@@ -83,7 +95,7 @@ is stronger than the mechanism. Two supporting points:
 **Fix:** narrow the claim to what is enforced. "Branch, PR and the five checks no
 longer depend on remembering; the reviewer step still does."
 
-### B3 (Blocking, contradiction) — step 0 contradicts step 6 and Platform coverage
+### B3 (Minor, contradiction) — step 0 contradicts line 127's "blocks a push"
 
 Item 5 of the review brief. `CLAUDE.md` now says three inconsistent things about
 what enforces the JIT gate:
@@ -96,13 +108,17 @@ what enforces the JIT gate:
   "**every push**"; and line 127: "the gate that used to depend on a human now
   **blocks a push**."
 
-Both workflows trigger on `push: branches: [main]` and `pull_request`. So:
+Both workflows trigger on `push: branches: [main]` and a bare `pull_request:`.
+The bare `pull_request` trigger includes `synchronize`, so once a PR is open,
+every push to its head branch does run all five checks — which is what PR #7's
+own rollup shows. **"Every push" is therefore loose, not false**, for the case
+that matters, and steps 6 and the Platform coverage rows are defensible as-is.
 
-- A push to a feature branch runs **nothing**. "Every push" was already wrong
-  before this PR.
-- After step 0, a direct push to `main` is rejected by protection before CI is
-  ever consulted. CI cannot "block a push" to `main` because no such push can
-  happen. The gate now blocks a **merge**, via the required contexts on the PR.
+The line that is now actually wrong is **line 127**: "the gate that used to
+depend on a human now **blocks a push**." After step 0 a direct push to `main`
+is rejected by protection *before* CI is ever consulted, so CI cannot block it —
+no such push can happen. The gate now blocks a **merge**, via the required
+contexts on the PR.
 
 Step 0 does not create the error, but it makes it load-bearing and leaves it
 uncorrected in the same file, in the same commit. This is precisely the failure
@@ -111,10 +127,12 @@ files that contradicted themselves" — and this PR cites that commit as evidenc
 for why review matters. Changing the premise and not rewriting the dependent
 sections is the same defect one paragraph later.
 
-**Fix:** in step 6 and the two Platform coverage rows, replace "every push" with
-"every pull request, and on `main` after merge".
+**Fix:** line 127 — "now blocks a push" becomes "now blocks a merge". Optionally
+tighten "every push" in step 6 and the two Platform coverage rows to "every pull
+request, and on `main` after merge", which is more precise but not currently
+wrong.
 
-### B4 (Blocking, incomplete account) — the six-commit boundary is never defined
+### B4 (Minor, incomplete account) — the bootstrap carve-out is stated but not enumerated
 
 Item 4. The list of six (`e460643`, `bcad873`, `966ffda`, `7c92e4c`, `6414ba1`,
 `d621978`) is correct as far as it goes: none has an associated PR
@@ -136,8 +154,11 @@ head SHA, which exactly explains why `f6f351e` and `4cfdf85` have no runs and
 `445466b` has all five. So `445466b` was mechanically the head of the import
 push the PR carves out as "unavoidable when bootstrapping".
 
-The problem is that the carve-out is never stated, so a reader cannot tell
-whether the count is six or nine. And two of the three are not imported history:
+The PR body **does** state the carve-out — "the initial push to `main` was
+unavoidable when bootstrapping the repo". What it never does is say *which
+commits it covers*, so a reader cannot tell whether the count is six or nine, and
+`AUDIT.md` — the durable record — omits the carve-out sentence entirely. And two
+of the three are not imported history:
 `4cfdf85` and `445466b` were authored **37 and 39 minutes after the repository
 already existed** — new work, pushed straight to `main`.
 
@@ -146,7 +167,7 @@ push left `main` red on the aarch64 gate, and `e460643` — the first of the
 acknowledged six — was the fix for it. That undercuts the PR's implicit framing
 that the migration-era direct pushes were the harmless part.
 
-**Fix:** say where the boundary is and why. One sentence: "`f6f351e`, `4cfdf85`
+**Fix:** enumerate the boundary in `AUDIT.md`. One sentence: "`f6f351e`, `4cfdf85`
 and `445466b` went up in the bootstrap push and are excluded on that basis,
 though the last two were authored after the repo existed and `445466b` left
 `main` red on `jit-macos`."
@@ -283,12 +304,14 @@ exercise of the flow it establishes.
 | # | Severity | Finding |
 |---|---|---|
 | B1 | Blocking | "CI is green on them" false — `6414ba1` has no aarch64 verdict (run cancelled, 0 jobs); `d621978`'s was still running |
-| B2 | Blocking | Protection does not enforce independent review — the practice that actually lapsed; "no longer depends on remembering" overclaims |
-| B3 | Blocking | Step 0 contradicts step 6 and the Platform coverage table ("every push" / "blocks a push") — the same self-contradiction defect `7c92e4c` fixed |
-| B4 | Blocking | The six-commit boundary is undefined; `4cfdf85` and `445466b` were authored after repo creation and `445466b` left `main` red on `jit-macos` |
+| B2 | Blocking (scoped) | `CLAUDE.md` step 0's "no longer depends on remembering it" covers the reviewer agent, which protection does not enforce. The PR body's own wording is correct and not at fault |
+| B3 | Minor | Line 127's "blocks a push" is now impossible for `main` — protection rejects the push before CI runs. ("Every push" elsewhere is loose but defensible: the bare `pull_request` trigger covers head-branch pushes) |
+| B4 | Minor | The bootstrap carve-out is stated but never enumerated, and `AUDIT.md` omits it; `4cfdf85`/`445466b` were authored after repo creation and `445466b` left `main` red on `jit-macos` |
 | M1 | Minor | 0 approvals is defensible, but the table omits `required_conversation_resolution: true`, the setting that makes it non-vacuous |
 | M2 | Minor | The push-refusal test is presented as superior to reading the config; it proves only 2 of the 6 table rows |
 | M3 | Minor | No `PROC-01` row added to the Current Task Board, contrary to the file's own step 4 |
 
-All four blockers are one-paragraph text edits inside the two files already in
-the diff.
+**B1 must be fixed before merge.** B2 is a one-sentence edit to `CLAUDE.md` step
+0. B3, B4, M1–M3 are corrections worth folding in while the branch is open, none
+of them introduced by this diff. Every one is a text edit inside the two files
+already in the diff.

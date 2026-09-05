@@ -3828,9 +3828,38 @@ own PR, so a non-zero count would block every merge. The gate is the PR plus the
 five checks plus the independent reviewer agent, which is the arrangement that
 has actually been catching defects.
 
-The six commits are left in place. They are all documentation, CI is green on
-them, and rewriting published history to make the process look observed would be
-worse than the lapse it concealed.
+The six commits are left in place: they are all documentation, and rewriting
+published history to make the process look observed would be worse than the
+lapse it concealed.
+
+**Correction — "CI is green on them" was false, and the review caught it.**
+Check-runs per commit: `e460643` 5/5, `bcad873` 5/5, `966ffda` 5/5, `7c92e4c`
+5/5, `d621978` 5/5 — but **`6414ba1` has only 3**. Its JIT-gate run
+(`33941786130`) concluded `cancelled` with **zero jobs**, so that commit carries
+no aarch64 verdict and never will. Five of six are fully green; one is not
+verified at all. Writing an unchecked "CI is green" into an append-only ledger,
+in an entry whose subject is unreviewed commits containing false claims, is the
+same failure one level up.
+
+**The bootstrap carve-out, now enumerated.** Three further commits reached
+`main` without a PR — `445466b`, `4cfdf85`, `f6f351e` — in the initial import
+push, when there was no `main` to protect and no PR was possible. The original
+entry gestured at that carve-out without naming them. Worth recording that
+`445466b`'s `jit-macos` concluded **failure**: the bootstrap push left `main`
+red, and `e460643` was the fix.
+
+**What protection does not do.** It enforces branch, PR and checks — not review.
+At 0 required approvals an author can merge their own PR unreviewed with every
+rule satisfied, so spawning the reviewer stays a responsibility rather than a
+mechanism, and `enforce_admins` does not protect the setting itself: the same
+account can disable protection. What 0 approvals does *not* mean is "no gate" —
+`required_conversation_resolution: true` is set and is independent of the review
+block, so an unresolved thread blocks a merge on its own.
+
+**Scope of the push-refusal test.** It demonstrated 2 of the 6 rows — that a PR
+is required, and that `enforce_admins` binds pushes. It says nothing about the
+five contexts, `strict`, force-push or deletion; those were verified against the
+live API. The original entry implied the push test covered more than it did.
 
 `CLAUDE.md`'s Operational Protocol gains a step 0 stating the rule and why it
 exists, so a future session reads it before working rather than after.

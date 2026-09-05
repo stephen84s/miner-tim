@@ -14,8 +14,11 @@
     agent** examine it before merge. This is a standing user instruction, not a
     preference. It was followed for MRs !1–!4, then quietly dropped during the
     GitHub migration: six commits reached `main` unreviewed, among them the
-    changes correcting earlier mistakes — the worst place to skip review. The
-    protection exists so the rule no longer depends on remembering it.
+    changes correcting earlier mistakes — the worst place to skip review. Protection enforces the **branch, the PR and the checks**; it
+    does not and cannot enforce that a reviewer looked. At
+    `required_approving_review_count: 0` an author can still open and merge
+    their own PR unreviewed with every rule satisfied, and the same account
+    can disable protection. **Spawning the reviewer is still on you.**
 1.  **Task Analysis:** Break user requests into atomic steps.
 2.  **Execution:** Implement changes in the repository.
 3.  **Audit:** **Immediately** after implementation, append a detailed entry to `AUDIT.md`.
@@ -54,6 +57,7 @@
 | **Completed** | **MEM-01** | **Test-suite peak RSS (issue #7).** The binary held two never-freed 2 GiB `LazyLock` datasets; now one. Measured, not inferred: release `--lib` peak **8.16 GB → 6.23 GB** at this host's 12-thread default, **~4.07 GB** at `--test-threads=3` (the macos-14 runner's core count, ~2.9 GB headroom under 7 GB); debug `verify-jit` filter **6.27 GB → 5.43 GB**; wall clock 94s→50s and 316s→193s. The issue's "~4.5 GiB" estimate was wrong — the real 12-thread baseline was 8.16 GB. (Review corrections: the debug pair was first recorded as 6.77→4.50 GB and does not reproduce; and "already over #9's budget" holds only at 12 threads — at the runner's 3 cores `main` measured 6.00 GB, marginal rather than over.) Differential coverage is unchanged: the diff tests' programs, entropy, ma/mx and `dataset_offset` all derive from the seed, not the key, and both paths read the same dataset. The verifier rotation test genuinely needs a second distinct dataset (R9-F2), so it got a synthetic zeroed one. `make verify-jit` 92/92 debug+release; 131 lib + 10 bin green. Unblocks #9. |
 | **Completed** | **CI-02** | **GitHub Actions workflows (issue #9, workflows only).** `.github/workflows/ci.yml` ports `.gitlab-ci.yml`'s three x86_64 jobs to pinned `ubuntu-24.04` (`lint` = clippy `-D warnings`, no fmt gate and the reason preserved; `audit` = cargo-audit, keeping the "binary already exists in destination" install guard; `test` = `cargo test --release --locked`). `.github/workflows/jit.yml` adds the two jobs that are the point of the move: **`jit-macos`** (`macos-14`, `make verify-jit` — the Darwin `MAP_JIT`/W^X path no GitLab tier can run) and **`jit-linux-arm`** (`ubuntu-24.04-arm`, `scripts/verify-jit.sh` **directly** — the colima/Docker wrapper dropped because the runner *is* native aarch64; its toolchain pin and host-facts print kept). All five are hard gates — no `continue-on-error`, no `|| true`, no step-level `if:`. The 7 GB `macos-14` box is handled with a job-level `RUST_TEST_THREADS=3` (MEM-01: 4.07 GB at 3 threads vs 6.23 GB at 12), set explicitly rather than left to the runner's core count; libtest's reading of that env var was verified empirically, not assumed. Two files so the ~19-min interpreter suite and the JIT verdict do not gate each other. *(State at the time of writing: nothing had run on GitHub — runner specs and RAM headroom were asserted from the issue, not tested. Superseded by MIGRATE-01, which ran them.)* |
 | **Completed** | **MIGRATE-01** | **Migrated to GitHub; aarch64 JIT under CI for the first time.** GitLab could not run it — x86_64 runners, `no_matching_runner` for arm64, then `ci_quota_exceeded` — and no GitLab tier offers macOS at any price. Repo converted SHA-256→SHA-1 (GitHub supports only SHA-1, established from its own protocol advertisement and from REST/GraphQL having no object-format parameter); 181 commits and 3 tags preserved, trees identical bar an accidental gitlink, 118 commit references remapped from a verified 188-entry mapping, `SHA256_TO_SHA1_MAP.txt` committed. Five jobs green: `lint`/`audit`/`test` on `ubuntu-24.04`, **`jit-macos`** (`macos-14`) and **`jit-linux-arm`** (`ubuntu-24.04-arm`), each running the 92-test gate in debug **and** release. The first `macos-14` run caught a latent build failure invisible for the project's life: `-C target-cpu=native` resolves to a feature-poor model on a virtualised runner and trips a `ring` compile-time assertion; fixed with `target-cpu=apple-m1`, matching `make dist`. GitLab archived read-only with a pointer; working copy moved to `code/github/miner-tim`. Closes issues #2 and #4. |
+| **Completed** | **PROC-01** | **`main` protected after six unreviewed commits reached it.** PR required, all five checks required, strict up-to-date, `enforce_admins: true`, force-push and deletion blocked, 0 approvals (a solo maintainer cannot approve their own PR). Verified by a refused direct push (`GH006`) *and* by reading the live API — the push test alone covers only 2 of the 6 settings. Enforces branch/PR/checks, **not** that a reviewer looked. Reviewed by an independent agent, which found the entry's "CI is green on them" claim false (`6414ba1`'s JIT gate was cancelled with zero jobs) and three further bootstrap commits unenumerated; both corrected. Ledger: `REVIEW_PR7.md`. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---
@@ -124,7 +128,8 @@ no arm64 runner (probed — `no_matching_runner`), no GitLab tier offers macOS a
 any price, and a self-hosted runner on a public repo would let fork MRs run code
 on the host. The GitHub migration closed it — `macos-14` and `ubuntu-24.04-arm`
 are free for public repositories, so the gate that used to depend on a human now
-blocks a push. Both issues that tracked the gap are closed.
+blocks a merge — protection rejects a direct push before CI is even
+consulted. Both issues that tracked the gap are closed.
 
 Linux aarch64 is a *test* platform, not a shipping one: `make dist` builds an
 apple-m1 tarball only, and the Linux JIT backend pays two `mprotect` syscalls

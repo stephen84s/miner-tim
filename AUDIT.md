@@ -3684,3 +3684,19 @@ commands and zero `gitlab` mentions remain in `RELEASING.md`.
 wording should be relaxed now that CI enforces it — but only once the gates have
 a track record, and it is a separate change. Issue #6's checklist item covering
 it stays open.
+
+### Working copy relocated (2026-09-05)
+The live checkout is now **`/Users/stephen/code/github/miner-tim`**, alongside
+the other GitHub clones, since the project no longer lives under GitLab. The
+SHA-256 GitLab repository is retained on disk at
+`/Users/stephen/code/gitlab/miner-tim-ARCHIVED-sha256` (verified intact after the
+move: `sha256`, `main` at `a453477`, `fsck` clean) and remains archived read-only
+on gitlab.com.
+
+One stale absolute path in `NEON_FP_PORT_NOTES.md` pointed into the old
+directory; made repo-relative. `AUDIT.md`'s own historical mentions of the old
+path were left alone — they are a record of where work happened at the time.
+
+Full pre-conversion backup remains at
+`~/miner-tim-backups/miner-tim-FULL-presha1-20260905-070130.tar.gz` (787 MB,
+restore-verified, SHA-256 sidecar alongside).

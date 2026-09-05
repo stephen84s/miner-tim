@@ -84,7 +84,7 @@ constexpr uint32_t FSQRT = 0x6EE1F800;   // FSQRT Vd.2D, Vn.2D
 ```
 
 Instruction counts below are *emitted 32-bit words per program instruction*.
-Ours are counted from `emit_*` in `/Users/stephen/code/gitlab/miner-tim/src/randomx/jit/compiler.rs`;
+Ours are counted from `emit_*` in `src/randomx/jit/compiler.rs`;
 "addr" = our `emit_mem_addr` (`mov_imm64` ≈ 2 words for a typical 32-bit imm,
 `add_reg`, `and_bitmask` ≈ 4 total); "cvt" = our `emit_cvt_packed_int`
 (add + ldrsw + scvtf + ldrsw + scvtf = 5).

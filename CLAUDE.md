@@ -59,9 +59,13 @@ Monero (XMR) CPU miner for macOS (Apple Silicon). Pure Rust — no C/FFI depende
 make build        # Release binary (target-cpu=native via .cargo/config.toml)
 make run          # Build + run (reads mining.conf)
 make test         # Rust unit tests, debug, whole suite (NOT the JIT gate)
-make verify-jit   # aarch64 JIT gate on this Mac - mandatory for jit/ changes
+make verify-jit   # aarch64 JIT gate on this Mac (CI runs this too)
 make verify-jit-linux  # the same gate under native linux/arm64 (colima)
+make bench        # criterion benchmarks
 make check        # Quick type-check
+make audit        # cargo-audit against the RustSec advisory DB
+make dist         # Portable apple-m1 tarball + SHA256SUMS
+make release      # Tag and push a release
 make clean        # cargo clean
 ```
 
@@ -124,6 +128,8 @@ Linux"; no Linux throughput has ever been measured.
 
 | Component | Version |
 |---|---|
+| MinerTim | 0.1.2 (`Cargo.toml`; drives the Stratum agent string) |
+| Rust toolchain | 1.97.1 (pinned in CI) |
 | Rust edition | 2024 |
 | serde_json | 1.0 |
 | rustls | 0.23 |
@@ -138,6 +144,7 @@ src/
 ├── hex.rs                  # Shared hex_encode / hex_decode utilities
 ├── miner.rs                # Miner struct, worker thread pool, hashrate tracking
 ├── pool_connection.rs      # Stratum TCP/TLS, JSON-RPC 2.0, keepalive
+├── donate.rs               # Donation addresses + rolling login rotation
 └── randomx/
     ├── mod.rs              # Module exports; jit gated on target_arch = "aarch64"
     ├── vm.rs               # RandomXVm: program execution, JIT dispatch, pipelining
@@ -153,8 +160,14 @@ src/
         ├── mod.rs          # Re-exports JitCompiler
         ├── memory.rs       # JitMemory: MAP_JIT + W^X (macOS), mmap/mprotect (Linux)
         ├── aarch64.rs      # ARM64 instruction emitter (Emitter + reg constants)
-        └── compiler.rs     # BytecodeInstruction[256] → ARM64; JitFn type alias
+        └── compiler.rs     # BytecodeInstruction → ARM64 (256 instrs for rx/0,
+                            #   384 for rx/2); body JIT + native-loop JIT
 ```
+
+Also at the repo root: `benches/` (criterion + the paired A/B harness),
+`scripts/verify-jit.sh` (the JIT gate), `.github/workflows/` (CI: `ci.yml`,
+`jit.yml`, `release.yml`), `AUDIT.md` (append-only change log) and the
+`REVIEW_*.md` independent-review ledgers.
 
 ## Architecture
 
@@ -168,7 +181,11 @@ src/
 3. `Miner::start()` — spawns N workers; `dataset_cache = Arc::new(Mutex::new(None))`
 4. Thread 0 calls `get_or_generate_dataset()` — generates 2 GiB dataset (~46s M2 Max); other threads wait on the same mutex
 5. Each worker: `RandomXVm::new_full(seed, dataset)` → `prepare_scratchpad(blob)` → loop `calculate_hash_pipelined(next_blob)`
-6. On hash ≤ target: `pool.submit_share(job_id, nonce_hex, hash_hex)`
+6. On hash ≤ target: if the verifier is armed, recompute the hash on the
+   reference path (`ShareVerifier::reference`, a second VM with
+   `set_native_loop(false)`) and compare. `classify_share` maps the outcome to a
+   `ShareVerdict`; a mismatch **withholds** the share rather than submitting it.
+   Otherwise `pool.submit_share(job_id, nonce_hex, hash_hex)`
 7. Nonces interleaved: `nonce += thread_count`
 8. New job from pool: worker picks it up via `pool.get_work()` → reinitialises VM if seed changed
 
@@ -181,12 +198,39 @@ src/
 `prepare_scratchpad(input)` must be called once before entering the pipeline loop.
 
 ### JIT Compiler (`jit/compiler.rs`)
-Active on aarch64. `JitCompiler::compile(bytecode)`:
+Active on aarch64. Two modes, and which one runs is decided by
+`native_loop_applies(use_native_loop, version, has_dataset, has_jit)`
+(`vm.rs:1167`) — **one predicate, called both by `execute_vm_inner`'s guard and
+by `RandomXVm::native_loop_effective()`**, so what the miner reports and what it
+runs cannot drift apart. All four conditions must hold: the switch is on, the
+version is rx/0, the VM is in full (dataset) mode, and a `JitCompiler` was
+successfully allocated.
+
+- **Native-loop JIT (default).** `compile_native_loop` emits the whole
+  2048-iteration loop as ARM64, so the register file is not reloaded and
+  re-stored per iteration. Measured **+6.8%–7.4%** at 11 threads across two
+  independent paired A/B runs (`benches/nativeloop_ab.rs`). Entered as
+  `f(nreg, scratchpad, dataset, iterations, out)`.
+- **Body JIT (fallback).** One program body per call, the loop staying in Rust.
+  Reached when any precondition fails, or when the operator sets
+  `--native-loop off`. This is also the reference path the share verifier
+  compares against.
+
+`JitCompiler::compile(bytecode)` (the body JIT):
 1. Emits ARM64 prologue: saves callee-saved regs, loads nreg/scratchpad/config pointers
 2. Translates each `BytecodeInstruction` to ARM64 via `emit_*` functions
 3. Emits epilogue: restores regs, returns
 4. Writes to `JitMemory` (MAP_JIT region), toggles W^X via `pthread_jit_write_protect_np`
 5. `get_fn()` returns the function pointer; called as `f(nreg, scratchpad, config)`
+
+`get_fn()` and `get_loop_fn()` each reject code compiled in the other mode, so a
+body-JIT blob cannot be entered with the native loop's ABI or vice versa.
+
+A failed `mmap(MAP_JIT)` is logged at `error!` and leaves `jit: None` — the VM
+still mines correct hashes via the interpreter, but `native_loop_effective()`
+then returns false and the share verifier disarms itself, because both paths
+would otherwise be the interpreter and the comparison would be vacuous
+(issue GitLab #4).
 
 **Register allocation:**
 - `r[0..7]` → `x8..x15`; scratchpad → `x16`; e_mask → `x19/x20`; nreg ptr → `x21`
@@ -196,7 +240,7 @@ Active on aarch64. `JitCompiler::compile(bytecode)`:
 
 ### Stratum Protocol (`pool_connection.rs`)
 - Newline-delimited JSON-RPC 2.0 over TCP; TLS via rustls + webpki-roots
-- Login: `{"method":"login","params":{"login":"<wallet>","pass":"x","agent":"MinerTim/1.0","algo":"rx/0"}}`
+- Login: `{"method":"login","params":{"login":"<wallet>","pass":"x","agent":"MinerTim/<version>","algo":"rx/0"}}` — the agent string is `concat!("MinerTim/", env!("CARGO_PKG_VERSION"))` (`pool_connection.rs:249`), so it tracks `Cargo.toml`; it is **not** the literal `MinerTim/1.0`
 - Job: `{"blob":"<168hex>","target":"<8hex>","job_id":"..."}`
 - Submit: `{"method":"submit","params":{"job_id":"...","nonce":"<8hex>","result":"<64hex>"}}`
 - Keepalive: `{"method":"keepalived"}` every 60s
@@ -204,8 +248,21 @@ Active on aarch64. `JitCompiler::compile(bytecode)`:
 ### Dataset & Cache (`dataset.rs`)
 `SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`. `DatasetCache` holds `seed_hash` + `Arc<RandomXDataset>`. Thread 0 generates; others call `get_or_generate_dataset()` which waits on the mutex, then clones the `Arc`.
 
+### Runtime switches (`bin/minertim.rs`)
+`--native-loop` / `MINERTIM_NATIVE_LOOP` / `NATIVE_LOOP` and `--verify-shares` /
+`MINERTIM_VERIFY_SHARES` / `VERIFY_SHARES`. Both default on. Malformed input
+fails **safe**, which differs per switch: an unparseable `--native-loop` falls
+back to *off* (slower but cannot mine wrong hashes), while an unparseable
+`--verify-shares` falls back to *on* (keeps the safety net). An empty value
+warns and leaves any earlier explicit setting intact. The startup line reports
+the *request*; each worker logs its own *effective* state once its VM exists.
+
 ### Optimisation Flags
-`.cargo/config.toml` sets `rustflags = ["-C", "target-cpu=native"]` for `aarch64-apple-darwin`. `Cargo.toml` release profile: `lto=true`, `opt-level=3`, `codegen-units=1`, `strip=true`.
+`.cargo/config.toml` sets `rustflags = ["-C", "target-cpu=native"]` for
+`aarch64-apple-darwin`. **CI overrides this** with `target-cpu=apple-m1` on
+`macos-14`: on a virtualised runner `native` resolves to a model whose static
+feature set omits aes/sha2/neon, which trips a `ring` compile-time assertion.
+`make dist` uses `apple-m1` for the same portability reason. `Cargo.toml` release profile: `lto=true`, `opt-level=3`, `codegen-units=1`, `strip=true`.
 
 ## Conventions
 - **Rust:** `snake_case` functions/variables, `PascalCase` types, `UPPER_SNAKE_CASE` consts

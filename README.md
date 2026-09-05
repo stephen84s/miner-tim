@@ -1,283 +1,248 @@
-# MinerTim - Monero CLI Miner
+# MinerTim — a Monero miner for Apple Silicon Macs
 
-CPU-based Monero (XMR) miner optimised for macOS (Apple Silicon). Pure Rust mining engine — no C/FFI dependencies. Stratum TCP/TLS pool support. aarch64 JIT compiler for maximum hashrate on M-series Macs.
+A CPU miner for Monero (XMR), written entirely in Rust, tuned for M-series Macs.
 
-> **MinerTim is a direct translation of [XMRig](https://github.com/xmrig/xmrig)'s
-> RandomX miner into Rust, produced with AI assistance.** It is not an independent
-> design — see [Acknowledgements](#acknowledgements).
+> **This is a translation of [XMRig](https://github.com/xmrig/xmrig) into Rust,
+> written with AI assistance.** It is not an independent design. If you mine
+> seriously, use XMRig — it is mature, tested by many people, and runs
+> everywhere. See [Acknowledgements](#acknowledgements).
 
-## Requirements
+## What you need
 
-- **macOS** on Apple Silicon (M1/M2/M3)
-- **Rust 1.97+** via [rustup](https://rustup.rs)
+- A Mac with Apple Silicon (M1/M2/M3)
+- [Rust](https://rustup.rs) 1.97 or newer
+- About 3 GB of free memory while mining
 
-Other platforms build and run, but only Apple Silicon is a supported target —
-see [Platform support and how it is verified](#platform-support-and-how-it-is-verified).
-
-## Platform support and how it is verified
-
-| Platform | Hashing path | Verified by |
-|---|---|---|
-| **macOS aarch64** (the shipping target) | aarch64 JIT + native iteration loop | **CI** — `jit-macos` on `macos-14`, every push |
-| **Linux aarch64** | same JIT; tests only, no release artifact | **CI** — `jit-linux-arm` on `ubuntu-24.04-arm`, every push |
-| Linux/macOS x86_64 | interpreter only — `randomx::jit` is `cfg`'d out of the build | **CI** — `lint`, `test`, `audit` on `ubuntu-24.04` |
-
-**The x86_64 jobs still say nothing about the JIT.** `src/randomx/mod.rs` gates
-it behind `#[cfg(target_arch = "aarch64")]`, so those runners never compile — let
-alone execute — a single emitted ARM64 instruction. They are a real regression
-guard for the interpreter, the Stratum client, the miner loop and the dependency
-audit, and nothing more. A JIT defect does not crash; it silently produces wrong
-hashes, which means rejected shares.
-
-What covers the JIT is `scripts/verify-jit.sh`: 92 tests — the JIT unit tests,
-the differential tests (emitted native loop vs the interpreter, from
-byte-identical state) and the known-answer vectors — in **both** the debug and
-release profiles. It exits non-zero on any failing test *or* on an unexpected
-test count, because libtest reports a filter that matches nothing as success, so
-a renamed module could otherwise leave the gate green while testing nothing.
-
-That gate now runs in CI on both architectures on every push, and fails the
-workflow. You can also run it locally before pushing:
+## Getting started
 
 ```bash
-make verify-jit         # this Mac, aarch64 darwin
-make verify-jit-linux   # native linux/arm64 via colima
-```
-
-This was a genuine single point of failure until September 2026: GitLab's shared
-runners are x86_64 only, an arm64 runner request returned `no_matching_runner` on
-that tier, and no GitLab tier offers macOS at any price — so the JIT rested
-entirely on a human remembering to run the gate. Moving to GitHub Actions closed
-it. The first `macos-14` run promptly earned its keep by catching a build failure
-that had been latent for the life of the project (`-C target-cpu=native` in
-`.cargo/config.toml` resolves to a feature-poor model on a virtualised runner,
-which trips a `ring` compile-time assertion).
-
-## Quick Start
-
-```bash
-# 1. Configure
-cp mining.conf.example mining.conf
-# Edit mining.conf — set WALLET to your Monero address
-
-# 2. Build and run
+cp mining.conf.example mining.conf   # then put your wallet address in it
 make run
 ```
 
-## Build Commands
+That is the whole setup. The first run spends about 45 seconds building a 2 GB
+table in memory before it starts hashing — that is normal and happens once per
+run.
 
-| Command | Description |
-|---|---|
-| `make build` | Build release binary |
-| `make run` | Build and run (reads `mining.conf`) |
-| `make test` | Run Rust unit tests (debug, whole suite — **not** the JIT gate) |
-| `make verify-jit` | aarch64 JIT gate on this Mac — mandatory before any MR touching `src/randomx/jit/` |
-| `make verify-jit-linux` | The same gate under native linux/arm64 (colima) |
-| `make check` | Quick type-check |
-| `make clean` | Remove build artifacts |
+## Configuration
 
-Override config on the command line:
+`mining.conf` holds the settings:
+
+```ini
+POOL=pool.supportxmr.com:443
+WALLET=4...your_monero_address
+THREADS=                 # blank = one fewer than your core count (recommended)
+DONATE_LEVEL=5
+NATIVE_LOOP=             # blank = on
+VERIFY_SHARES=           # blank = on
+```
+
+You can override any of them on the command line:
 
 ```bash
 make run POOL=pool.hashvault.pro:443 WALLET=4...addr THREADS=12
 ```
 
-Or run the binary directly:
+Or run the built binary directly:
 
 ```bash
 ./target/release/minertim pool.supportxmr.com:443 <wallet> 12
 ```
 
-## Configuration
+### The two switches
 
-Create `mining.conf` from the example:
+Both are on by default and both exist as safety valves. You should not normally
+need to touch them.
 
-```bash
-cp mining.conf.example mining.conf
-```
+- **`NATIVE_LOOP`** — turns on the faster version of the mining inner loop
+  (about 7% more hashes). If a future change ever breaks it, turning this off
+  falls back to the slower version that has been in use much longer.
+- **`VERIFY_SHARES`** — before sending a winning share to the pool, the miner
+  recomputes it a second way and compares. If the two disagree, the share is
+  thrown away rather than sent. This costs about 0.005% of mining time and
+  protects against a bug silently producing wrong results.
 
-```ini
-POOL=pool.supportxmr.com:443
-WALLET=4...your_monero_address
-THREADS=12
-```
+These two are linked: verification works by comparing the fast path against the
+slower one, so if you turn `NATIVE_LOOP` off there is nothing left to compare
+against and verification switches off too. The miner tells you at startup which
+are actually running, not just what you asked for.
 
-## Donation (donate-level)
+If you set either to something the miner does not understand, it says so at
+startup and picks the safe option rather than guessing.
 
-Like [XMRig](https://xmrig.com/docs/miner/donate), MinerTim donates a small,
-configurable fraction of mining time. This is **on by default and disclosed** —
-it is logged at startup every run.
+## Commands
 
-- **Default: 5%** of mining time, split **50/50**: 2.5% to the MinerTim author and
-  2.5% to **XMRig** (since MinerTim is an AI-assisted Rust translation of XMRig,
-  a share goes upstream).
-- **Configurable** down to a **minimum of 1%**:
+| Command | What it does |
+|---|---|
+| `make run` | Build and start mining, reading `mining.conf` |
+| `make build` | Build the release binary only |
+| `make test` | Run the test suite |
+| `make verify-jit` | Run the machine-code tests on this Mac |
+| `make verify-jit-linux` | Run the same tests under Linux on ARM (needs colima) |
+| `make check` | Fast type-check, no binary |
+| `make clean` | Delete build output |
+
+## How fast is it
+
+Measured on an **Apple M2 Max** (8 performance + 4 efficiency cores, 32 GB RAM),
+plugged in, with Low Power Mode off:
+
+| | |
+|---|---|
+| Peak hashrate | ~5,010 H/s |
+| Sustained over an hour | ~4,925 H/s |
+| Startup delay | ~45 seconds to build the 2 GB table |
+| On battery, Low Power Mode on | ~3,800 H/s (about 20% slower) |
+
+Three things matter more than they look:
+
+**Leave one core free.** Using every core does not mine faster — 11 threads
+measured 4,925 H/s and all 12 measured 4,960 H/s — but it starves the thread that talks
+to the pool, so roughly 15% of your shares arrive too late and are rejected. At
+11 threads, none were rejected over a full hour. That is about 18% more shares
+you actually get paid for, which is why one-fewer-than-your-cores is the
+default.
+
+**Stay plugged in.** On battery with Low Power Mode on, macOS slows the CPU and
+you lose about 20%.
+
+**The first minute reads low.** The hashrate shown is an average that includes
+the 45-second startup, so it climbs for a minute or two before settling. Nothing
+is warming up — the average is just catching up.
+
+## Which platforms are tested
+
+| Platform | What runs | Tested by |
+|---|---|---|
+| macOS on Apple Silicon | Machine-code (JIT) path — this is the target | Automatically, on every change |
+| Linux on ARM | Same machine-code path, tests only | Automatically, on every change |
+| Linux/macOS on Intel | Slower fallback path only | Automatically, on every change |
+
+The miner writes ARM64 machine code at runtime and jumps into it — that is where
+the speed comes from, and it is also the riskiest part of the project. A mistake
+there does not crash; it quietly produces wrong answers, and the pool rejects
+your shares. So that code is tested on real Apple Silicon and real ARM Linux
+every time anything changes, in two build modes, and a failure blocks the change.
+
+The Intel tests are still useful — they cover the pool connection, the mining
+loop and the dependency security audit — but they cannot say anything about the
+machine-code path, because it is not even compiled on Intel.
+
+You can run the same checks yourself with `make verify-jit`.
+
+## Donations
+
+Like [XMRig](https://xmrig.com/docs/miner/donate), MinerTim mines for its authors
+a small part of the time. This is on by default and printed at startup every run.
+
+- **Default 5%** of mining time, split evenly: 2.5% to the MinerTim author and
+  2.5% to XMRig, since this project is a translation of theirs.
+- You can lower it to **1%**:
 
   ```bash
   ./target/release/minertim <pool> <wallet> --donate-level 1
   # or in mining.conf:  DONATE_LEVEL=1
   ```
 
-- Going **below 1% (or to zero) is intentionally not possible at runtime** — it
-  requires editing `MIN_DONATE_LEVEL` in `src/donate.rs` and recompiling.
+- Going below 1% is deliberately not possible without editing
+  [`src/donate.rs`](src/donate.rs) and rebuilding.
 
-Mechanically, the miner briefly switches the pool login to each donation address
-on a rolling 100-minute cycle (the same model XMRig uses). The donation
-addresses live in [`src/donate.rs`](src/donate.rs).
+It works by briefly logging into the pool with a different wallet address on a
+rolling 100-minute cycle — the same approach XMRig uses.
 
-## Project Structure
-
-```
-miner-tim/
-├── Cargo.toml                  # Dependencies: serde_json, rustls, env_logger, ctrlc
-├── .cargo/config.toml          # target-cpu=native for aarch64-apple-darwin
-├── src/
-│   ├── lib.rs                  # Crate root — re-exports modules
-│   ├── bin/minertim.rs         # CLI entry point (args, Ctrl+C, stats loop)
-│   ├── hex.rs                  # Shared hex encoding/decoding
-│   ├── miner.rs                # Worker thread pool, hashrate tracking, share submission
-│   ├── pool_connection.rs      # Stratum protocol: TCP/TLS, JSON-RPC 2.0, keepalive
-│   └── randomx/                # Pure Rust RandomX implementation (rx/0)
-│       ├── mod.rs
-│       ├── vm.rs               # RandomX VM: program execution, hash computation, pipelining
-│       ├── blake2b.rs          # Blake2b hash
-│       ├── blake2gen.rs        # Blake2 generator for key/program derivation
-│       ├── soft_aes.rs         # Software AES
-│       ├── aes_hash.rs         # AES-based hash functions (fillAes1Rx4, hashAes1Rx4)
-│       ├── argon2d.rs          # Argon2d cache initialisation (256 MiB)
-│       ├── superscalar.rs      # SuperscalarHash program generation
-│       ├── dataset.rs          # Dataset item computation from cache (2 GiB)
-│       ├── tests.rs            # Known-answer vectors + differential tests
-│       └── jit/                # aarch64 JIT compiler
-│           ├── mod.rs
-│           ├── memory.rs       # JIT memory: MAP_JIT + W^X (macOS), mmap/mprotect (Linux)
-│           ├── aarch64.rs      # ARM64 instruction emitter
-│           └── compiler.rs     # BytecodeInstruction[256] → native ARM64
-├── Makefile
-├── mining.conf.example
-└── CLAUDE.md                   # Architecture reference for AI sessions
-```
-
-## Architecture
+## How it works
 
 ```
-CLI (bin/minertim.rs)
-  └── Miner (miner.rs)
-        ├── PoolConnection (pool_connection.rs)  — Stratum TCP/TLS
+CLI (src/bin/minertim.rs)
+  └── Miner (src/miner.rs)
+        ├── Pool connection (src/pool_connection.rs) — Stratum over TCP/TLS
         └── Worker threads × N
-              └── RandomXVm (randomx/vm.rs)
-                    ├── Full dataset (2 GiB, shared across workers via Arc)
-                    ├── JIT compiler (aarch64) — compiles each program to native ARM64
-                    └── Interpreter fallback (non-aarch64)
+              └── RandomX engine (src/randomx/)
+                    ├── 2 GB dataset, built once and shared by all workers
+                    ├── JIT compiler (Apple Silicon / ARM Linux)
+                    └── Interpreter fallback (everything else)
 ```
 
-### Mining Flow
+Mining is a loop: the pool sends a job, each worker tries different nonces, and
+anything that beats the target gets sent back as a share.
 
-1. `Miner::initialize()` — connects to pool, sends Stratum `login`
-2. Pool sends job (blob + target + job_id)
-3. Thread 0 generates shared 2 GiB RandomX dataset (~46s on M2 Max)
-4. All workers start: `prepare_scratchpad` → pipelined `calculate_hash_pipelined` loop
-5. Each worker writes nonce at `blob[39..43]`, computes hash, checks against target
-6. Share found → `pool.submit_share()` sends Stratum `submit`
-7. New job from pool → workers pick it up atomically via `Arc<Mutex<Option<Arc<Job>>>>`
+**The JIT.** RandomX generates a fresh random program for every hash. Rather than
+interpreting those instructions one at a time, MinerTim translates them into
+ARM64 machine code and runs them directly. It goes further and emits the whole
+2048-iteration loop as machine code, instead of returning to Rust between
+iterations — worth about 7% (measured over paired A/B runs; the same work, in the
+same process, alternating between the two versions).
 
-### JIT Compiler (aarch64)
+**Pipelining.** While finishing the current hash, the miner is already preparing
+memory for the next one, so waiting on memory overlaps with useful work.
 
-Active on aarch64 — macOS (the shipping target) and Linux (tests only). For each
-of the 8 RandomX program chains per hash:
+**Talking to the pool.** Standard Stratum: newline-separated JSON-RPC over TCP,
+optionally wrapped in TLS. Login, receive jobs, submit shares, ping every 60
+seconds to stay connected.
 
-1. `JitCompiler::compile()` translates `BytecodeInstruction[256]` to ARM64 machine code
-2. Stored in a `MAP_JIT` region with the W^X toggle (`pthread_jit_write_protect_np`) on macOS, or `mmap(RW)` → `mprotect(RX)` + `__clear_cache` on Linux
-3. Executed directly via function pointer — ~3× faster than interpreter
+## Layout
 
-### Pipelined Hashing
+```
+src/
+├── bin/minertim.rs      Command line, startup, statistics
+├── miner.rs             Worker threads, hashrate, share submission and checking
+├── pool_connection.rs   Stratum protocol, TCP/TLS
+├── hex.rs               Hex encoding helpers
+└── randomx/             The RandomX algorithm, in pure Rust
+    ├── vm.rs            Runs the generated programs; picks JIT or interpreter
+    ├── dataset.rs       Builds and reads the 2 GB dataset
+    ├── argon2d.rs       Builds the 256 MB cache the dataset comes from
+    ├── superscalar.rs   Generates the programs used to build the dataset
+    ├── aes_hash.rs      AES-based memory filling and hashing
+    ├── soft_aes.rs      AES without hardware instructions
+    ├── blake2b.rs       Blake2b hashing
+    ├── blake2gen.rs     Derives programs and keys from a seed
+    ├── tests.rs         Known-answer tests and JIT-vs-interpreter comparisons
+    └── jit/             Writes ARM64 machine code at runtime
+        ├── compiler.rs  Turns RandomX instructions into ARM64
+        ├── aarch64.rs   Encodes individual ARM64 instructions
+        └── memory.rs    Gets executable memory (differs on macOS and Linux)
 
-`calculate_hash_pipelined` overlaps the AES scratchpad fill for the *next* input with the final Blake2b hash of the *current* output, hiding dataset-read latency.
+benches/                 Performance comparisons
+scripts/verify-jit.sh    The machine-code test gate
+.github/workflows/       Automated testing
+```
 
-### Stratum Protocol
+`AUDIT.md` is a running log of every change and why it was made. `CLAUDE.md` is
+the reference for AI coding sessions.
 
-- Newline-delimited JSON-RPC 2.0 over TCP (TLS via rustls)
-- Login: `{"method":"login", "params":{"login":"<wallet>", "pass":"x", "agent":"MinerTim/1.0", "algo":"rx/0"}}`
-- Pool sends `job` with `blob` (168 hex), `target` (8 hex), `job_id`
-- Submit: `{"method":"submit", "params":{"job_id":"...", "nonce":"...", "result":"..."}}`
-- Keepalive ping every 60s
-
-## Performance
-
-Measured on **Apple M2 Max** (11 threads — the default `cores − 1`), **plugged in
-with macOS Low Power Mode OFF** — the power state matters a lot (see notes):
-
-| Metric | Value |
-|---|---|
-| Hardware | Apple M2 Max (8 performance + 4 efficiency cores), 32 GB RAM |
-| Dataset init | ~45s (one-time, ~2 GiB, before hashing begins) |
-| Peak 1m hashrate | ~5,010 H/s |
-| Sustained (1-hour average) | ~4,925 H/s |
-| Stale-share rejects | ~0% (11 threads) vs ~15% (all 12) |
-| On battery / Low Power Mode | ~3,800 H/s (≈20% lower) |
-| Optimisation flags | `target-cpu=native`, LTO, `codegen-units=1` |
-
-Measured over continuous 1-hour runs: **11 threads** → ~4,925 H/s avg, 5,013 peak,
-**0 rejected shares**; **all 12 cores** → ~4,960 H/s avg (no faster) but ~15%
-rejected. 11 threads earns ~18% more paid shares — see the acceptance note below.
-
-**Notes**
-
-- **Power state dominates.** On battery with Low Power Mode enabled, macOS caps
-  CPU clocks and hashrate drops ~20%. For peak hashrate, plug in and turn Low
-  Power Mode off. Sustained figures also sit a few percent under the cold-start
-  peak once the chip heat-soaks under continuous load.
-- **Leave one core free — this is the sweet spot.** RandomX is memory-bound, so
-  the last thread adds almost nothing: on the M2 Max, 11 threads (4,925 H/s) and
-  all 12 (4,960 H/s) have the same raw hashrate. But mining on *all* cores starves
-  the pool receiver thread, so ~15% of shares are rejected as stale; 11 threads
-  gives **0% rejects**, i.e. ~18% more accepted (paid) shares. The default is
-  therefore `cores − 1` (11 here). Using 8 P-cores only would leave ~1,600 H/s on
-  the table — the efficiency cores do contribute.
-- **`target-cpu` barely affects hashrate.** The RandomX inner loop is JIT-compiled
-  to ARM64 at runtime, so `native` and the portable `apple-m1` build (used by
-  `make dist`) measure the same; `native` only helps the non-JIT support code.
-- Hashrate is a rolling average that includes the ~45s dataset-init dead time at
-  startup, so the `1m`/`5m`/`10m` figures read low for the first minute or two
-  and then flatten — that is the average catching up, not the CPU ramping.
-- **Share acceptance.** If you mine on *every* core, the pool receiver thread is
-  CPU-starved, the current job goes stale, and shares are rejected as "Invalid
-  job id" (~15% over a 1-hour run, even with the receiver at raised scheduling
-  priority — the priority hint helps only marginally). The reliable fix is the
-  default `cores − 1`, which measured **0 rejects** over a full hour. Prefer that
-  over `THREADS=<all cores>`.
-
-## Distribution
-
-The binary is self-contained (pure Rust, no dynamic C dependencies).
+## Building a copy to share
 
 ```bash
-make build
-# Binary: target/release/minertim
+make dist
+```
 
-# Ad-hoc codesign for local distribution (avoids Gatekeeper warning):
+This builds a version that runs on any M-series Mac, rather than tuning to the
+one that built it, and produces a `.tar.gz` with checksums. See
+[RELEASING.md](RELEASING.md).
+
+To avoid a Gatekeeper warning on your own machine:
+
+```bash
 codesign -s - target/release/minertim
 ```
 
 ## Acknowledgements
 
-**MinerTim is a direct, AI-assisted translation of [XMRig](https://github.com/xmrig/xmrig)
-into Rust.** Its RandomX engine — the Argon2d cache, SuperscalarHash generation,
-dataset/scratchpad construction, AES and Blake2 routines, the VM execution model,
-and the aarch64 JIT (register allocation, MAP_JIT memory handling, prefetch
-strategy) — all follow XMRig's C++ line by line. The Rust in this repository is a
-re-expression of that prior work, generated with AI assistance; it is not an
-independent implementation.
+**MinerTim is a direct, AI-assisted translation of
+[XMRig](https://github.com/xmrig/xmrig) into Rust.** The RandomX engine — the
+cache and dataset construction, the AES and Blake2 routines, the way the virtual
+machine executes programs, and the ARM64 JIT including its register allocation
+and memory handling — follows XMRig's C++ closely. The Rust here is a
+re-expression of that work, not an independent implementation.
 
-- **[XMRig](https://github.com/xmrig/xmrig)** — the miner this project is
-  translated from. Mature, battle-tested, and multi-platform; if you mine
-  seriously, use XMRig. GPL-3.0. All the hard design work is theirs.
+- **[XMRig](https://github.com/xmrig/xmrig)** — the miner this is translated
+  from. GPL-3.0. All the hard design work is theirs.
 - **[tevador/RandomX](https://github.com/tevador/RandomX)** — the RandomX
-  proof-of-work algorithm and C++ reference implementation that XMRig itself is
-  built on. BSD 3-Clause.
+  algorithm and reference implementation XMRig itself builds on. BSD 3-Clause.
 
-Because MinerTim is a translation of GPL-3.0 XMRig code, it is a derivative work
-and is distributed under the same [GPL-3.0](LICENSE) license.
+Because this is a translation of GPL-3.0 code, it is a derivative work and
+carries the same licence.
 
 ## License
 

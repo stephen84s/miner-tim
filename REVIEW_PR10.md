@@ -71,7 +71,20 @@ Mutation (on a copy in the scratchpad; **the working tree was never modified**):
 `scripts/verify-jit.sh` copied to `$SCRATCH/vj-mutant.sh` with
 `EXPECTED_PASSES=92` → `91`.
 
-RESULT_PLACEHOLDER
+Observed (full log in the run, both profiles executed):
+
+```
+verify-jit: FAIL — debug profile (debug_assert! live) ran '92' tests, expected 91.
+verify-jit: FAIL — release profile (shipping profile) ran '92' tests, expected 91.
+verify-jit: GATE FAILED on Darwin arm64
+EXIT=1
+```
+
+The unmutated script on the same tree: `GATE PASSED on Darwin arm64 — 92 tests,
+debug + release`, `EXIT=0`, and no `paste` line. **The gate can still go red,
+and it goes red for the right reason** — the exact-count assertion that exists
+because libtest reports an empty filter as success. Working tree left clean; the
+mutation lived only in the scratchpad copy.
 
 ## Findings
 
@@ -179,4 +192,20 @@ two texts landed in the same commit and disagree on the fact.
 
 ## Verdict
 
-VERDICT_PLACEHOLDER
+**No blockers. No majors.** The mechanism is intact: the gate still fails and
+still fails for the right reason, the required-check names are string-exact, no
+workflow gained a `paths:`/`if:`/`continue-on-error:` escape hatch, the removed
+`echo` is provably inert, and the PR's central factual claim — including the
+precise "with no open PR" qualifier — is true.
+
+So on the diff alone: **MERGEABLE**.
+
+The one lever worth pulling first is `Closes #6`. F2 shows box 4 is half-met and
+F1 shows six leftovers of exactly the kind this PR set out to remove, one of them
+in the file it edited. If the issue closes on merge, that work closes with it.
+Recommended: either (a) drop `Closes #6` from the PR body and leave the issue
+open for the `verify-jit.sh` header, the workflow comments and step 6's wording,
+or (b) fold F1 and the `CLAUDE.md` half of box 4 into this branch and then close
+it. Merging as-is is not unsafe; it is a documented loss of follow-up.
+
+F3, F4 and F5 are minors/nits that can land separately.

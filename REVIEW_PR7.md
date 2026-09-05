@@ -850,3 +850,19 @@ outside a reviewer's remit — it is taken from the quoted output and from
 `enforce_admins: true` being live); and the mechanism behind run `33941786130`'s
 cancellation, which is round 1's O3 and still an open question worth an issue.
 No test suite or JIT gate was run: this branch changes no code.
+
+### R3-O2 — the red-test record for coverage item 1
+
+`pulls/7.mergeable_state` was `clean` at head `0002d05` (all five green). Pushing
+`e1a52e3` (this ledger) re-triggered the checks; at `2026-09-06T20:32:40Z`, head
+`e1a52e3`:
+
+```
+state=blocked :: jit-macos=queued lint=queued audit=queued
+                 jit-linux-arm=in_progress test=in_progress
+```
+
+`blocked`, not `unstable`, is the discriminating value: it means the five
+contexts are genuinely required and consulted, so the wiring can stop a merge.
+(Side effect to expect, not a defect: PR #7 reads blocked until all five finish;
+`jit-macos` is the long pole.)

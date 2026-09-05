@@ -17,8 +17,15 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # Deliberately NOT `push: branches: [main]`. `main` is protected with
+  # "require branches to be up to date before merging", so a PR's head already
+  # contains the latest main and its run validates exactly the content that
+  # lands. Re-running on the merge commit tests an identical tree and costs a
+  # second full pass — on this repo roughly 45 minutes of runner time per merge,
+  # most of it the two JIT gates.
+  #
+  # `workflow_dispatch` stays, so main can still be checked on demand — after a
+  # dependency bump, or if branch protection is ever relaxed.
   pull_request:
   workflow_dispatch:
 
@@ -27,9 +34,10 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Cancel superseded PR runs, but never a run for a commit already on main:
-  # a rapid second push must not silently cancel the verdict for the first.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Every run is now either a PR or a manual dispatch, so a superseded run is
+  # always safe to cancel: pushing again to a PR means the earlier verdict is
+  # about code nobody will merge.
+  cancel-in-progress: true
 
 env:
   # Matches `.gitlab-ci.yml`'s RUST_VERSION. The JIT is compiler-sensitive and

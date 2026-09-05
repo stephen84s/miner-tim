@@ -28,8 +28,15 @@
 name: JIT gate (aarch64)
 
 on:
-  push:
-    branches: [main]
+  # Deliberately NOT `push: branches: [main]`. `main` is protected with
+  # "require branches to be up to date before merging", so a PR's head already
+  # contains the latest main and its run validates exactly the content that
+  # lands. Re-running on the merge commit tests an identical tree and costs a
+  # second full pass — on this repo roughly 45 minutes of runner time per merge,
+  # most of it the two JIT gates.
+  #
+  # `workflow_dispatch` stays, so main can still be checked on demand — after a
+  # dependency bump, or if branch protection is ever relaxed.
   pull_request:
   workflow_dispatch:
 
@@ -38,8 +45,8 @@ permissions:
 
 concurrency:
   group: jit-${{ github.ref }}
-  # See ci.yml: cancel superseded PR runs only, never a verdict for main.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # See ci.yml: with no push trigger, superseded runs are always safe to cancel.
+  cancel-in-progress: true
 
 env:
   RUST_VERSION: "1.97.1"

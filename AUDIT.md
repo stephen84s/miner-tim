@@ -3794,3 +3794,40 @@ maintainer's.
 sections whose premise had changed, producing files that contradicted
 themselves — which is how issue #2's third acceptance criterion came to be
 unmet while looking done. When a premise changes, rewrite the section.
+
+### CI-03 (2026-09-05): workflows run on pull requests only
+
+User asked to cut CI CPU time by building only when a PR exists.
+
+**Change.** Removed `push: branches: [main]` from `ci.yml` and `jit.yml`. Both
+now trigger on `pull_request` and `workflow_dispatch` only. `release.yml` is
+untouched — it fires on `v*` tags and must keep doing so.
+
+**Why this is safe rather than a coverage cut.** `main` is protected with
+*"require branches to be up to date before merging"* (PROC-01), so a PR's head
+already contains the latest `main`. Its run therefore validates exactly the tree
+that lands, and the post-merge run tested an identical tree at a different SHA.
+That second pass bought nothing.
+
+**Saving.** One full pass is ~50 runner-minutes: `test` 19, `jit-linux-arm` 12,
+`jit-macos` 11, `audit` 6, `lint` 2. That is now spent once per change instead of
+twice, so **~50 minutes saved per merged PR**, most of it the two JIT gates.
+
+**Concurrency simplified as a consequence.** `cancel-in-progress` was
+conditioned on `github.event_name == 'pull_request'`, to avoid cancelling a
+verdict for a commit already on `main`. With no push trigger, that case cannot
+arise, so it is now unconditionally `true`: pushing again to a PR means the
+earlier verdict concerns code nobody will merge.
+
+**What is given up, stated plainly.** `main` no longer has CI runs of its own.
+If branch protection were ever relaxed and someone pushed directly, nothing
+would check it. `workflow_dispatch` remains on both workflows, so `main` can be
+verified on demand — worth doing after a dependency bump, or if protection is
+ever loosened.
+
+**Considered and rejected: path filters** (skipping the suite for docs-only
+changes). With required status checks, a workflow skipped by a path filter never
+reports its check, and the PR stays blocked forever rather than passing. Making
+that work needs a stub job reporting success in the skipped case — real
+complexity for a saving that only applies to documentation commits. Not worth it
+today; revisit if docs-only PRs become frequent.

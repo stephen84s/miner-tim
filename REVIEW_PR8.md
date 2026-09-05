@@ -254,12 +254,12 @@ numbers, unsafe cancellation"`. Round 1's two blockers are the subject.
 
 | # | Check | State |
 |---|---|---|
-| A | Re-measure durations from the API; reconcile every figure on the branch | in progress |
-| B | Billing claim (`billable` really zero; not over-corrected) | pending |
-| C | `cancel-in-progress` reverted in BOTH workflows; comment accurate | pending |
-| D | Did the corrections introduce anything new that is wrong (esp. `ci.yml` `timeout-minutes` comment) | pending |
-| E | Safety argument still sound under `strict: true` | pending |
-| F | Overclaims / omissions; cache-scoping finding honestly scoped | pending |
+| A | Re-measure durations from the API; reconcile every figure on the branch | **done — R2-1, R2-2, R2-8** |
+| B | Billing claim (`billable` really zero; not over-corrected) | **done — R2-5** |
+| C | `cancel-in-progress` reverted in BOTH workflows; comment accurate | **done — R2-6 (pass)** |
+| D | Did the corrections introduce anything new that is wrong (esp. `ci.yml` `timeout-minutes` comment) | **done — R2-3, R2-4** |
+| E | Safety argument still sound under `strict: true` | **done — R2-7 (pass)** |
+| F | Overclaims / omissions; cache-scoping finding honestly scoped | **done — R2-9, R2-10** |
 
 ## R2-1 The PR body was never corrected — both Round-1 blockers survive verbatim — **MAJOR**
 

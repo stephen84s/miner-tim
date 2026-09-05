@@ -7,12 +7,12 @@ Reviewer spawned cold; did not write this change.
 
 | # | Item | State |
 |---|---|---|
-| 1 | Agent files as agent definitions (YAML, name/description/tools, selection, gaps/overlaps) | in progress |
-| 2 | `_shared-context.md` failure table — spot-check >=3 rows against history | pending |
-| 3 | Untracking `settings.local.json` — correctness/completeness, pull consequence | pending |
-| 4 | `.gitignore` worktree entries actually match | pending |
-| 5 | `CLAUDE.md` steps 0/0b — contradictions, PR #7 numbering collision | pending |
-| 6 | AUDIT PROC-02/03/04 factual claims | pending |
+| 1 | Agent files as agent definitions (YAML, name/description/tools, selection, gaps/overlaps) | **done** — F6 (sound), **F7 (major)** |
+| 2 | `_shared-context.md` failure table — spot-check >=3 rows against history | **done** — all 9 rows checked, F13 (sound) |
+| 3 | Untracking `settings.local.json` — correctness/completeness, pull consequence | **done** — F5 (sound, one nit) |
+| 4 | `.gitignore` worktree entries actually match | **done** — F4 (sound) |
+| 5 | `CLAUDE.md` steps 0/0b — contradictions, PR #7 numbering collision | **done** — F8, F10, F11 |
+| 6 | AUDIT PROC-02/03/04 factual claims | **done** — F1, F2, F3, F9 |
 
 ## Findings
 

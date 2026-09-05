@@ -667,3 +667,186 @@ only as the correction states it: that `e460643` was the fix for `445466b`'s
 `jit-macos` failure rests on the chronology (three minutes apart) and on
 `e460643`'s own commit message, not on the failed run's logs, which this round
 did not read.
+
+---
+
+# Round 3 — re-review of the round-2 corrections, plus the merge of `main`
+
+Reviewer: third independent agent, spawned cold. Branch `chore/branch-protection`
+@ `0002d05` (a merge of `main` @ `10d5b2e`, which landed PR #9). Base: `main` @
+`10d5b2e`. Diff: `AUDIT.md` +92, `CLAUDE.md` +16/-1, `REVIEW_PR7.md` +669. No code.
+Date: 2026-09-06.
+
+## Verdict (round 3)
+
+**MERGEABLE.** No blockers, no majors. Six minors and two nits, all prose.
+
+The mechanism is right and was re-verified end to end this round from the live
+API, not from the ledger. Every round-1/round-2 finding that had to land, landed.
+What has not converged is `AUDIT.md`'s PROC-01 entry, for one identifiable
+reason — see R3-1.
+
+## Coverage of the eight infrastructure checks
+
+1. **Can the gate go red?** Partly. The five required contexts are consulted:
+   after pushing this ledger commit, `pulls/7.mergeable_state` went
+   `clean` → `blocked` while the re-triggered checks were pending (recorded
+   below), which is the wiring test — a non-required context would leave it
+   `unstable`. A *failing* required check was not exercised.
+2. **Commands / targets exist and mean what is claimed.** `ci.yml` and `jit.yml`
+   read; job `name:` fields match the protected contexts verbatim (item 3).
+   `scripts/verify-jit.sh` is invoked unwrapped, `EXPECTED_PASSES` untouched;
+   this PR changes no build command.
+3. **Required-check names.** Exact, and app-pinned. Live contexts vs. the five
+   check-run names on head `0002d05`: `lint (clippy, x86_64 linux)`,
+   `audit (cargo-audit / RustSec)`, `test (cargo test --release, x86_64 linux)`,
+   `jit-macos (aarch64 darwin, make verify-jit)`,
+   `jit-linux-arm (aarch64 linux, scripts/verify-jit.sh)` — all five string-equal,
+   all `app_id: 15368`. No typo, no PR that blocks forever.
+4. **Path filters / conditional execution.** Neither workflow has a `paths:`
+   filter, `continue-on-error:` or a step-level `if:`; both trigger on a bare
+   `pull_request`. So no required check can be skipped and leave a PR hanging —
+   the trap this change would otherwise have armed by making all five required.
+5. **Live config vs. the description.** Verified by `gh api`, every row (R3-O1).
+   `rulesets` re-checked this round: still `[]`, so classic protection is the
+   only layer and there is no bypass list.
+6. **Platform assumptions.** Re-confirmed from primary logs, not prose: the
+   `macos-14` runner reports `Apple M1 (Virtual)`, and `jit.yml`'s
+   `RUSTFLAGS: -C target-cpu=apple-m1` override is present and unmodified.
+7. **Resource limits.** `RUST_TEST_THREADS: "3"` still set job-level on
+   `jit-macos`; the runner logs `cores: 3`, `ram: 7168 MiB`, matching the
+   documented budget. This PR changes no parallelism or dataset count.
+8. **Coverage given up.** None in CI — no trigger removed, no matrix narrowed.
+   One operational cost the entry narrates but does not name: with
+   `enforce_admins: true`, the 3-minute `445466b` → `e460643` fix for a red
+   `main` would now require a branch, a PR and the full five-check gate. That is
+   the right trade, and worth stating rather than discovering under pressure.
+
+## Round-2 findings: fixed or not
+
+| # | round-2 finding | state at `0002d05` |
+|---|---|---|
+| F1 | "they are all documentation" false | **Fixed, and correctly.** Verified independently: `e460643` = `.github/workflows/jit.yml` only (+13); `bcad873` adds `.github/workflows/release.yml` (39 lines, `on: push: tags: ['v[0-9]*']`), moves `.gitlab-ci.yml` → `.archived`, edits `Makefile`. "The remaining four are documentation" checks out per `git show --stat`. |
+| F2 | PR body never corrected | **Fixed.** Body now carries the corrected "two changed executable CI configuration", drops the "rather than" ranking, adds a `Conversation resolution` row, and states the 0-reviews/0-comments fact. |
+| F3 | "never will" overstated | **Half fixed** — see R3-1(b). |
+| F4 | carve-out framing | **Fixed** — "not cleanly for `445466b`". Verified: repo `created_at` `2026-09-04T20:26:36Z`, `445466b` authored `2026-09-04T21:05:22Z` = 38m46s later, "39 minutes" is right; `4cfdf85` is a merge of `f6f351e` (`20:02:52Z`, pre-creation). |
+| F5 | conversation-resolution rhetoric | **Fixed** — now "in practice that setting is currently gating nothing". |
+| F6 | `PROC-01` "Completed", review described as concluded | **Improved** ("Two review rounds so far"), still **Completed** while unmerged. Nit stands, and the row is now stale at three rounds. |
+| F7 | 137-char line | **Fixed** — step 0's bullet is re-flowed at ~75. One 91-char line remains in `AUDIT.md` (R3-3). |
+
+Every check-run figure the entry states was re-pulled fresh this round and is
+correct: `e460643`/`bcad873`/`966ffda`/`7c92e4c`/`d621978` = 5/5 success,
+`6414ba1` = 3 (`lint`/`audit`/`test` only), `445466b` = 5 with
+`jit-macos: failure`, `4cfdf85`/`f6f351e` = 0. `git diff --stat 6414ba1 d621978`
+is `AUDIT.md | 52 +`, as claimed. No 64-hex SHA-256 id anywhere in the diff; all
+nine short SHAs resolve to commits.
+
+**Round 2's one open causal claim is now closed.** "`e460643` was the fix" was
+carried on chronology and a commit message. Job `101174240328`'s log
+(`445466b`'s failed `jit-macos`) shows
+`error[E0080] ... _AARCH64_APPLE_TARGETS_EXPECTED_FEATURES` in
+`ring-0.17.14/src/cpu/arm/darwin.rs:44` — exactly what
+`-C target-cpu=apple-m1` fixes. The claim is true and is now evidenced.
+
+## R3-1 (Minor, root cause) — PROC-01 is being corrected by accretion, and it now contradicts itself three times
+
+Each round's fix has **appended a paragraph** rather than rewriting the sentence
+that was wrong, so the false clause and its correction both sit in the entry:
+
+(a) **"rather than by reading back the configuration"** (the fix paragraph) vs.
+    **"those were verified against the live API"** (the scope paragraph, four
+    paragraphs later). Round 2's M2 was fixed in the PR body and by *addition*
+    here; the ranking clause it objected to is still standing.
+(b) **"one is not verified at all"** vs., in the *same paragraph*, "the identical
+    source tree *is* covered by `d621978`'s green run". F3's fix landed beside
+    the sentence it contradicts instead of replacing it.
+(c) **The `445466b` sentence is duplicated verbatim in one paragraph**: "It is
+    also the one whose `jit-macos` concluded **failure**, so the import push left
+    `main` red and `e460643` was the fix" and, three sentences later, "Worth
+    recording that `445466b`'s `jit-macos` concluded **failure**: the bootstrap
+    push left `main` red, and `e460643` was the fix."
+
+This is the shape round 2 called blocking (a correction that edits one clause and
+leaves the defect beside it) — but none of these three is load-bearing: no
+argument in the entry rests on them, unlike "all documentation, CI is green on
+them". Hence minor, not blocking.
+
+**Fix, and it is authorised:** `CLAUDE.md` lines 34–37 say an entry on an
+*unmerged* branch may be edited in place. PROC-01 is unmerged. Rewrite it once as
+a single coherent entry rather than appending a fifth correction paragraph.
+
+## R3-2 (Minor) — "`CLAUDE.md`'s Operational Protocol gains a step 0" is false after the merge
+
+PROC-01's closing sentence. `main` @ `10d5b2e` already added step 0 (PROC-02);
+`0002d05` correctly resolved this branch's rule into a **fourth bullet inside**
+it (`CLAUDE.md:39–49`). `AUDIT.md` itself says so ~200 lines above, in PROC-02:
+PR #7's rule "becomes a third bullet at merge rather than a competing `0.`". The
+entry's last sentence contradicts an entry in its own file and mis-describes its
+own diff. One word.
+
+## R3-3 (Minor) — the push-test scope count disagrees across the three artifacts
+
+`AUDIT.md`: "2 of the 6 rows". `CLAUDE.md` task board: "2 of the 6 settings".
+PR body: "2 of the **7** rows" — and the body's table does have 7. `AUDIT.md` has
+no table at all, so "the 6 rows" is a dangling reference. Its enumeration of what
+the push test does *not* cover ("the five contexts, `strict`, force-push or
+deletion") also omits conversation-resolution and approvals.
+
+## R3-4 (Minor) — the PR body's "Known collision" is stale
+
+"PR #9 adds its own Operational Protocol step 0 ... Whichever merges second must
+renumber." PR #9 merged as `10d5b2e`, `0002d05` resolved it, and **no renumbering
+was needed**. The section describes a future that already happened, differently.
+
+## R3-5 (Minor) — the merge that resolved the collision is not in `AUDIT.md`
+
+`0002d05` is a substantive resolution (it chose which of two step-0s survives and
+which wording of this branch's rule is used). PROC-01 does not mention it, so the
+durable record does not say how the collision was settled.
+
+## R3-6 (Nit) — no blank line before `### PROC-01` in `AUDIT.md`
+
+Line 3983/3984. PROC-02, PROC-03 and PROC-04 each have one. Renders under
+CommonMark; inconsistent with the file.
+
+## R3-7 (Nit) — one 91-char line left in `AUDIT.md`
+
+"`required_conversation_resolution: true` is set and blocks" — the F5 fix spliced
+in without re-flowing, the same mechanical trace F7 flagged.
+
+## R3-O1 — live protection, re-read this round
+
+`gh api repos/stephen84s/miner-tim/branches/main/protection`: `strict: true`;
+5 contexts (above); `enforce_admins.enabled: true`;
+`allow_force_pushes.enabled: false`; `allow_deletions.enabled: false`;
+`required_conversation_resolution.enabled: true`;
+`required_approving_review_count: 0`; `required_linear_history: false`;
+`lock_branch: false`; `block_creations: false`; no `restrictions`.
+`rulesets` = `[]`. Every row of the PR's table matches. `collaborators` returns
+exactly `["stephen84s"]`, which is the premise the 0-approvals argument rests on
+(GitHub forbids self-approval), and it holds.
+
+## Summary (round 3)
+
+| # | Severity | Finding |
+|---|---|---|
+| R3-1 | Minor | PROC-01 corrected by accretion: three self-contradictions left standing (push-test framing, "not verified at all", a verbatim-duplicated sentence). Fix by rewriting the entry in place, which the unmerged-branch rule permits |
+| R3-2 | Minor | "gains a step 0" is false post-merge — it gains a bullet inside the step 0 PROC-02 added, as PROC-02 itself predicts |
+| R3-3 | Minor | "2 of the 6 rows" (AUDIT, task board) vs "2 of the 7 rows" (PR body); AUDIT has no table for "rows" to refer to |
+| R3-4 | Minor | PR body's "Known collision" section is stale — #9 merged, `0002d05` resolved it, no renumbering happened |
+| R3-5 | Minor | `AUDIT.md` does not record `0002d05`, the merge that resolved the step-0 collision |
+| R3-6 | Nit | Missing blank line before `### PROC-01` |
+| R3-7 | Nit | One 91-char line in `AUDIT.md` (F5's fix, un-reflowed) |
+
+**Mergeable.** Nothing here is load-bearing and nothing touches the mechanism,
+which this round re-verified from the live API and from CI logs rather than from
+the ledger. R3-1 and R3-2 are worth folding in while the branch is open, in one
+in-place rewrite of PROC-01 rather than a fifth appended paragraph — the pattern
+that produced them.
+
+**What round 3 could not verify:** a *failing* required check (only a pending one
+was exercised, via `blocked`); the `GH006` push refusal (pushing to `main` is
+outside a reviewer's remit — it is taken from the quoted output and from
+`enforce_admins: true` being live); and the mechanism behind run `33941786130`'s
+cancellation, which is round 1's O3 and still an open question worth an issue.
+No test suite or JIT gate was run: this branch changes no code.

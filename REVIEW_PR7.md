@@ -674,7 +674,8 @@ did not read.
 
 Reviewer: third independent agent, spawned cold. Branch `chore/branch-protection`
 @ `0002d05` (a merge of `main` @ `10d5b2e`, which landed PR #9). Base: `main` @
-`10d5b2e`. Diff: `AUDIT.md` +92, `CLAUDE.md` +16/-1, `REVIEW_PR7.md` +669. No code.
+`10d5b2e`. Diff (`--numstat`): `AUDIT.md` +92/-0, `CLAUDE.md` +15/-1,
+`REVIEW_PR7.md` +669/-0. No code.
 Date: 2026-09-06.
 
 ## Verdict (round 3)
@@ -702,7 +703,10 @@ reason — see R3-1.
    `audit (cargo-audit / RustSec)`, `test (cargo test --release, x86_64 linux)`,
    `jit-macos (aarch64 darwin, make verify-jit)`,
    `jit-linux-arm (aarch64 linux, scripts/verify-jit.sh)` — all five string-equal,
-   all `app_id: 15368`. No typo, no PR that blocks forever.
+   all pinned to the same `app_id` (`15368`). Stronger than string equality: PR
+   #9 merged through this exact protection (`10d5b2e`, merged
+   `2026-09-05T13:47:35Z`, 5/5 green), so the five contexts are demonstrably
+   satisfiable end to end. No typo, no PR that blocks forever.
 4. **Path filters / conditional execution.** Neither workflow has a `paths:`
    filter, `continue-on-error:` or a step-level `if:`; both trigger on a bare
    `pull_request`. So no required check can be skipped and leave a PR hanging —
@@ -780,7 +784,9 @@ a single coherent entry rather than appending a fifth correction paragraph.
 PROC-01's closing sentence. `main` @ `10d5b2e` already added step 0 (PROC-02);
 `0002d05` correctly resolved this branch's rule into a **fourth bullet inside**
 it (`CLAUDE.md:39–49`). `AUDIT.md` itself says so ~200 lines above, in PROC-02:
-PR #7's rule "becomes a third bullet at merge rather than a competing `0.`". The
+PR #7's rule "becomes a third bullet at merge rather than a competing `0.`" —
+it landed fourth, PROC-02 having since gained a bullet of its own, which
+`0002d05`'s message states correctly. The
 entry's last sentence contradicts an entry in its own file and mis-describes its
 own diff. One word.
 
@@ -809,7 +815,7 @@ durable record does not say how the collision was settled.
 Line 3983/3984. PROC-02, PROC-03 and PROC-04 each have one. Renders under
 CommonMark; inconsistent with the file.
 
-## R3-7 (Nit) — one 91-char line left in `AUDIT.md`
+## R3-7 (Nit) — one 90-char line left in `AUDIT.md`
 
 "`required_conversation_resolution: true` is set and blocks" — the F5 fix spliced
 in without re-flowing, the same mechanical trace F7 flagged.
@@ -836,7 +842,7 @@ exactly `["stephen84s"]`, which is the premise the 0-approvals argument rests on
 | R3-4 | Minor | PR body's "Known collision" section is stale — #9 merged, `0002d05` resolved it, no renumbering happened |
 | R3-5 | Minor | `AUDIT.md` does not record `0002d05`, the merge that resolved the step-0 collision |
 | R3-6 | Nit | Missing blank line before `### PROC-01` |
-| R3-7 | Nit | One 91-char line in `AUDIT.md` (F5's fix, un-reflowed) |
+| R3-7 | Nit | One 90-char line in `AUDIT.md` (line 4062) (F5's fix, un-reflowed) |
 
 **Mergeable.** Nothing here is load-bearing and nothing touches the mechanism,
 which this round re-verified from the live API and from CI logs rather than from
@@ -854,7 +860,8 @@ No test suite or JIT gate was run: this branch changes no code.
 ### R3-O2 — the red-test record for coverage item 1
 
 `pulls/7.mergeable_state` was `clean` at head `0002d05` (all five green). Pushing
-`e1a52e3` (this ledger) re-triggered the checks; at `2026-09-06T20:32:40Z`, head
+`e1a52e3` (this ledger) re-triggered the checks; at `20:32:40Z` (UTC, this
+session; the poll printed time only), head
 `e1a52e3`:
 
 ```
@@ -866,3 +873,21 @@ state=blocked :: jit-macos=queued lint=queued audit=queued
 contexts are genuinely required and consulted, so the wiring can stop a merge.
 (Side effect to expect, not a defect: PR #7 reads blocked until all five finish;
 `jit-macos` is the long pole.)
+
+### R3-O3 — corrections to round 3's own numbers
+
+Recorded rather than silently amended, since this ledger is subject to the same
+rule as the entry it reviews. Three slips in the first draft of round 3, all
+found by re-measuring:
+
+- `CLAUDE.md` was stated as `+16/-1`. `--stat`'s column is insertions+deletions;
+  `--numstat` gives **`+15/-1`**. Corrected above.
+- R3-7 said "91-char". The detector measured the *diff* line, whose leading `+`
+  is not in the file. `AUDIT.md:4062` is **90**. Corrected above.
+- R3-O2 quoted `2026-09-06T20:32:40Z`. The poll printed `%H:%M:%S` only; the date
+  component was inferred, not observed. Reduced to the observed time.
+
+Also added: PROC-02 predicted a *third* bullet and this branch's rule landed
+*fourth* (R3-2), and the app-pinning claim is now backed by PR #9 having actually
+merged through this protection rather than by asserting what `app_id: 15368` is
+(R3, coverage item 3).

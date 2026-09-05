@@ -21,10 +21,22 @@ on:
   # "require branches to be up to date before merging", so a PR's head already
   # contains the latest main and its run validates exactly the content that
   # lands. Re-running on the merge commit tests an identical tree and costs a
-  # second full pass — measured at **29.5 minutes** of runner time across the
-  # five jobs (jit-macos 13.4, jit-linux-arm 11.7, test 4.0, audit 0.2,
-  # lint 0.2; mean of 3 completed runs each). The repo is public, so those are
-  # free minutes: what this saves is wall-clock and queue time, not money.
+  # second full pass. Measured over every completed run to date, as the mean of
+  # each job's duration (n=12-14 per job):
+  #
+  #   jit-macos      13.94 min  (11.20-16.43)
+  #   jit-linux-arm  11.65 min  (11.58-11.77)
+  #   test            4.07 min  ( 3.28- 5.43)
+  #   audit           0.49 min  ( 0.22- 3.32, the high value is a cold cache)
+  #   lint            0.29 min  ( 0.23- 0.53)
+  #   ---------------------------------------
+  #   30.4 min of RUNNER time, but the five jobs run concurrently, so a pass is
+  #   ~15 min of WALL-CLOCK (bounded by jit-macos; the CI workflow finishes in
+  #   ~4 min and does not gate it).
+  #
+  # The repo is public, so `billable.total_ms` is 0 on every run: this saves no
+  # billed minutes. What it saves is the second ~15-minute wait per merge, and
+  # the runner capacity that pass would occupy.
   #
   # `workflow_dispatch` stays, so main can still be checked on demand — after a
   # dependency bump, or if branch protection is ever relaxed.
@@ -180,9 +192,11 @@ jobs:
   test:
     name: test (cargo test --release, x86_64 linux)
     runs-on: ubuntu-24.04
-    # Took ~19 minutes on GitLab's x86_64 runners; measures **4.0 minutes** here
-    # (mean of 3 completed runs). 1h is inherited head-room for a cold cache, not
-    # an expectation — do not read the timeout as an estimate of the runtime.
+    # Measures 4.07 min here (mean of 14 completed runs, 3.28-5.43). The 1h
+    # timeout is inherited head-room for a cold cache, not an expectation — do
+    # not read it as an estimate of the runtime. (An earlier comment claimed
+    # "~19 minutes on GitLab"; no such measurement exists anywhere in the repo,
+    # so the claim is dropped rather than repeated.)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

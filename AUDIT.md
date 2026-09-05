@@ -3809,37 +3809,54 @@ already contains the latest `main`. Its run therefore validates exactly the tree
 that lands, and the post-merge run tested an identical tree at a different SHA.
 That second pass bought nothing.
 
-**Saving — corrected after review; the original figures were invented.** One
-full pass is **29.5 runner-minutes**, measured from the API as the mean of three
-completed runs per job: `jit-macos` 13.4, `jit-linux-arm` 11.7, `test` 4.0,
-`audit` 0.2, `lint` 0.2. That is spent once per change instead of twice.
+**Saving — corrected twice; see the round-2 note below.** Measured over every
+completed run to date, as the mean of each job's duration:
 
-The original entry claimed ~50 minutes, and the workflow comments said 45 — three
-figures in circulation, none measured. `test` was quoted at 19 minutes, copied
-from a `jit.yml` comment describing GitLab's runner; on GitHub it is 4.0. `audit`
-and `lint` were overstated 30x and 10x. `jit-macos` was *under*stated.
+| job | n | mean | median | range |
+|---|---|---|---|---|
+| `jit-macos` | 12 | **13.94** | 14.29 | 11.20–16.43 |
+| `jit-linux-arm` | 12 | **11.65** | 11.65 | 11.58–11.77 |
+| `test` | 14 | **4.07** | 4.03 | 3.28–5.43 |
+| `audit` | 14 | **0.49** | 0.28 | 0.22–3.32 |
+| `lint` | 14 | **0.29** | 0.26 | 0.23–0.53 |
+| **sum** | | **30.44** | | |
 
-**And the currency was wrong.** The repository is public, so Actions minutes are
-free — `billable.total_ms` is zero across all workflows. This change frees **no
-billed minutes at all**. What it saves is wall-clock and queue time, which is a
-real benefit but not the one the entry claimed.
+`audit`'s 3.32 outlier is a cold-cache run and is kept in the mean rather than
+dropped — dropping it is what made an earlier figure look tighter than the data.
 
-**Concurrency — an attempted simplification, reverted after review.** The
-original change made `cancel-in-progress` unconditionally `true`, reasoning that
-with no push trigger the "cancel a verdict for a commit already on main" case
-could not arise. **That reasoning was wrong.** `workflow_dispatch` sets
-`github.ref` to `refs/heads/main`, so two manual dispatches of `main` share the
-concurrency group and the second silently kills the first — and a manual
-dispatch is precisely the mitigation this entry nominates for `main` no longer
-having push runs. It has been left conditioned on
-`github.event_name == 'pull_request'`, as before. The reviewer demonstrated the
-collision from this repo's own run history rather than arguing it.
+**Runner time is not wall-clock, and the distinction matters here.** The five
+jobs run concurrently (no `needs:` anywhere), so 30.4 runner-minutes is ~15
+minutes of wall-clock, bounded by `jit-macos`; the CI workflow finishes in ~4
+minutes and does not gate it. Measured from run timestamps: JIT workflow 14.8
+min mean (n=4, max 16.7), CI workflow 4.1 min (n=4).
 
-**What is given up, stated plainly.** `main` no longer has CI runs of its own.
-If branch protection were ever relaxed and someone pushed directly, nothing
-would check it. `workflow_dispatch` remains on both workflows, so `main` can be
-verified on demand — worth doing after a dependency bump, or if protection is
-ever loosened.
+**The currency.** The repository is public, so `billable.total_ms` is **0** for
+both `MACOS` and `UBUNTU` on every run — this frees no billed minutes. What it
+saves is the second ~15-minute wait per merge and the runner capacity that pass
+occupies. Verified via `actions/runs/<id>/timing`; note that
+`actions/workflows/<id>/timing` returns `{"billable":{}}` and is evidence of
+nothing — an earlier revision of this entry cited that endpoint.
+
+### Round-2 review corrections
+The first correction replaced invented numbers with differently-derived ones and
+mislabelled them, which the second round caught:
+
+- The figures were labelled "mean of 3 completed runs each". They were not.
+  `jit-macos` 13.4 was round 1's *median* relabelled as a mean; no 3-run subset
+  yields it (all ten subsets of the five samples give 12.76–14.69). `audit` 0.2
+  and `lint` 0.2 were obtainable only by taking the three fastest runs. Only
+  `jit-linux-arm` and `test` survived. Now: every completed run, n stated, mean
+  *and* median *and* range given, so the label cannot drift from the method.
+- **The PR description was never updated** — it still carried the ~50-minute
+  table and the claim that `cancel-in-progress` is "now unconditionally `true`",
+  which the branch's own code contradicts. Fixing the code and the audit while
+  leaving the PR body stale left the review record wrong. Rewritten.
+- `ci.yml` asserted "~19 minutes on GitLab's x86_64 runners" as fact while
+  `jit.yml` simultaneously said that figure was never measured. **No 19-minute
+  measurement exists anywhere in this repo** — `.gitlab-ci.yml.archived` records
+  only `timeout: 1h`. The claim is dropped rather than restated.
+- Benefit sentence said "wall-clock and queue time" directly after a
+  runner-minute total, conflating the two. Separated above.
 
 ### Verification
 Both workflows parse (`YAML.load_file`); triggers confirmed as

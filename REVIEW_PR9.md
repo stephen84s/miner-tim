@@ -353,3 +353,143 @@ land out of order), **F12** (missing `Claude-Session:` trailer), and the nit
 
 F1, F2, F3 and F9 are all instances of the discipline this PR exists to enforce,
 applied to itself — which is the fairest test of it, and it does not fully pass.
+
+---
+
+## Corrections to this ledger
+
+*Appended, not edited in place — the same discipline F9 asks of `AUDIT.md`. The
+original F1 and F7 text above stands so a reader can see what was withdrawn.*
+
+### F1 — **largely retracted.** My denominator was wrong; the claim mostly reproduces
+
+I divided the top-ten blobs' `objectsize:disk` by the **pack** size without
+checking whether those blobs are *in* the pack. They are not — all ten are loose:
+
+```
+$ for o in $(awk '{print $1}' top.txt | head -10); do
+    test -f .git/objects/${o:0:2}/${o:2} && echo "LOOSE $o" || echo "PACKED $o"; done
+LOOSE 8e2a1974…   (×10, all ten)
+```
+
+They date from after the SHA-1 conversion pack was written (`.pack` mtime
+Sep 5 07:03) and are standalone-zlib, which is exactly why their disk figures
+sit at ~44 % of raw rather than delta-compressed. So `972,478 / 4,272,022 =
+22.8 %` divided a loose-object sum by a pack size — a category error, and one my
+own F1 standard would catch. My "most generous reading, 3.01 MiB / 4.07 MiB =
+74 %" has the same defect: it summed loose and packed disk together.
+
+Done properly — packed AUDIT.md revisions against the pack:
+
+```
+$ git verify-pack -v .git/objects/pack/*.idx > vp.txt
+$ git rev-list --objects --all | grep ' AUDIT.md$' | cut -d' ' -f1 | sort -u > ab.txt
+packed AUDIT.md blobs: 62   (14 more are loose)
+sum of their in-pack bytes: 1,910,487   = 1.82 MiB
+pack:                       4,272,022   = 4.07 MiB
+```
+
+**44.7 % — "roughly half the pack" reproduces.** PROC-04's substantive point is
+correct: `AUDIT.md` really is about half the repository's packed storage, and the
+in-pack revisions really do resist delta-compression (62 revisions, 7.8 MB raw,
+1.82 MiB packed).
+
+What survives of F1 is only a **nit**: the sentence *"the ten largest objects in
+the repository are all the same file, roughly half the pack"* is ambiguous, and
+under its literal reading — *those ten* are half the pack — it is false, because
+those ten are loose objects and contribute nothing to the pack. Under the
+intended reading — AUDIT.md collectively — it is right. Rephrasing to "AUDIT.md's
+revisions are roughly half the pack" would remove the ambiguity. The other
+figures in that paragraph stand as verified above.
+
+### F7 — **downgraded from major to minor**, and one supporting sentence withdrawn
+
+Withdrawn: *"The wrong-hash framing … has no agent that operationalises it off
+the JIT path."* That is wrong. All three agents are told to read
+`_shared-context.md` **first and in full**, and it carries the wrong-hash
+framing, the `verify-jit.sh` 92-test/exact-count section and the break-testing
+requirement. A `pr-reviewer` on `soft_aes.rs` inherits all of it.
+
+I also asserted the routing gaps from the prose without testing selection, which
+is the task's actual question. Three probes, same headless path as F6:
+
+| Diff | Selected |
+|---|---|
+| `src/randomx/soft_aes.rs` + `src/randomx/argon2d.rs` | `pr-reviewer` |
+| `benches/nativeloop_ab.rs` | `pr-reviewer` |
+| `src/randomx/jit/memory.rs` + `Makefile` + `scripts/verify-jit.sh` | `jit-reviewer`, `ci-reviewer` |
+
+So two of my three legs weaken on contact with behaviour:
+
+- The `"or a hash"` over-claim in `jit-reviewer`'s description does **not**
+  mis-route interpreter hashing code; selection lands on `pr-reviewer` cleanly.
+  The residual point is narrower and still worth fixing: `pr-reviewer`'s own body
+  has no "run the known-answer vectors / `make verify-jit`" item for a change
+  that alters a hash, and `jit-reviewer`'s description should not claim ground
+  its body does not cover.
+- **JIT ∩ CI resolves fine** — the selector picked *both* agents unprompted,
+  despite neither description mentioning the other. Worth a sentence in the
+  descriptions, not a finding.
+
+The one leg that stands, and is now empirically confirmed rather than inferred:
+**`benches/` is unrouted**, and `benches/nativeloop_ab.rs` — the paired-A/B
+harness whose misuse produced the retracted "+9.01%" — selects the single agent
+with **no** paired-A/B section, while `jit-reviewer` carries it. Add `benches/`
+to `jit-reviewer`'s path list.
+
+Severity minor, not major, for two further reasons: the pre-PR baseline was
+ad-hoc briefs with no routing rules at all, so this is not a regression; and I
+was applying a code-severity ladder ("a safety net that cannot fire") to a
+process document where the net does fire, just with an imperfect checklist.
+
+### F12 — restated so it is actionable
+
+The `Claude-Session:` trailer embeds a per-session URL, so `_shared-context.md`
+obviously cannot hardcode it — my "the trailer is incomplete" phrasing invites a
+maintainer to discard the finding as impossible. The actionable form: rule 7
+presents its block as *the* trailer, when this repo's commits carry two lines.
+It should say the session trailer supplied by the harness applies as well, so a
+cold reviewer does not read rule 7 as exhaustive and drop it. (28 of the last 30
+commits on `main` carry both, in equal number.)
+
+### F9 — pre-empting the obvious rebuttal
+
+Expect: *"append-only governs the merged record, not commits on an unmerged
+branch."* The finding survives it, because the added paragraph says
+*"Correction, **appended per the append-only rule**"* in the very commit that
+deleted the sentence it corrects. The entry invokes the rule as its
+justification; the rule was not followed.
+
+### PROC-04's `.claude/settings.json` claim — verified sound
+
+*"Shared, reviewable settings belong in `.claude/settings.json`, which stays
+tracked."* Confirmed: `git ls-files .claude/` on this branch returns
+`.claude/settings.json` plus the four new agent files, and nothing else. On
+`main` the directory holds `settings.json` and `settings.local.json`; this branch
+drops only the latter. The claim is exactly right.
+
+## Revised verdict
+
+**Mergeable.** Unchanged — and the corrections above move it further that way,
+not less. Net finding list after correction:
+
+- **minor** — F7 (`benches/` unrouted, empirically confirmed; `jit-reviewer`'s
+  description over-claims "or a hash"; `pr-reviewer` has no known-answer-vector
+  item)
+- **minor** — F2 (`7851bdc` is a dead SHA-256 id, now copied into `.gitignore`
+  and `CLAUDE.md`; use `3b2cc9d`)
+- **minor** — F3 (`~180 KB` vs `210 KB` for `AUDIT.md`, contradiction inside one
+  changeset)
+- **minor** — F8 (break-testing vs working rule 4, unreconciled)
+- **minor** — F9 (in-place AUDIT edit in the entry invoking the append-only rule)
+- **minor** — F10 (a real merge conflict in two files, and PROC IDs landing out
+  of order — not "renumbering")
+- **minor** — F12 (rule 7's trailer block reads as exhaustive)
+- **nit** — F1 (ambiguous pack sentence; the number itself reproduces at 44.7 %)
+- **nit** — F11 (`0b.` is not a list marker)
+- **nit** — F5's caveat ("modified in every `git status`" is false now)
+
+No blockers, no majors. The two things this PR most needed to get right — that
+the agents actually load with a frontmatter-less file beside them (F6), and that
+the failure table records real defects rather than plausible ones (F13, nine of
+nine) — both hold under direct verification.

@@ -3742,3 +3742,55 @@ is still a different set from the gate's filtered subset — the issue-#5 review
 measured it at 0.79 GB higher peak — so a `debug_assert!` outside the JIT paths
 is still only exercised by a full debug run nobody does routinely. The issue
 named three specific JIT asserts and those are covered.
+
+### DOC-01 (2026-09-05): README rewritten for readers; factual errors corrected in both docs
+
+User asked for `README.md` and `CLAUDE.md` to be checked for contradictions and
+staleness, and for the README specifically to be written **for humans — simple
+terms, no jargon, no salesmanship**.
+
+**Four factual errors found, none of them tone problems:**
+
+1. **The Stratum agent string was documented as `MinerTim/1.0` in both files.**
+   It is `concat!("MinerTim/", env!("CARGO_PKG_VERSION"))`
+   (`pool_connection.rs:249`), so it currently sends `MinerTim/0.1.2` and moves
+   with `Cargo.toml`. Both corrected, and `CLAUDE.md` now records that it is
+   derived rather than literal so it cannot rot again.
+2. **"~3× faster than interpreter" had no supporting measurement anywhere** —
+   not in `AUDIT.md`, not in the benches. **Removed rather than restated.** The
+   number that *was* measured is +6.8–7.4% for the native loop over the body
+   JIT, from paired A/B runs; that is what the README now quotes.
+3. **The JIT was described as compiling one program at a time**, omitting the
+   native iteration loop that has been the default since JIT-01 — the single
+   largest architectural change in the project was absent from both documents.
+4. **`--native-loop` and `--verify-shares` were undocumented entirely**, in both
+   files, despite being operator-facing safety valves.
+
+**Also documented for the first time:** the two switches are *linked* — turning
+`NATIVE_LOOP` off disables verification too, because verification compares the
+fast path against the slow one and there is then nothing left to compare. An
+operator could not have deduced that from anything previously written.
+
+**README** now leads with what the miner is, what you need and two commands, and
+the CI/verification internals moved to `CLAUDE.md` where the audience is a
+developer. 284 → ~250 lines.
+
+**CLAUDE.md** gained: the native-loop vs body-JIT split and the
+`native_loop_applies` predicate (one definition shared by the guard and the
+reporter, so state cannot drift); the share verifier's step in the mining flow;
+both switches with their **asymmetric** fail-safe directions (bad
+`--native-loop` → off, bad `--verify-shares` → on); the CI `target-cpu`
+override and why; and the missing `donate.rs`, `benches/`, `scripts/`,
+`.github/`, plus toolchain and project versions.
+
+**Correction to an earlier claim of mine.** I repeated a reviewer's "96 GB M2
+Max" in issue text; the machine has **32 GB** (`hw.memsize`). The README's
+performance table was right and I was wrong. Recorded because the figure was
+used as background when sizing the 7 GB runner constraint — the conclusion there
+is unaffected, since that argument turned on the *runner's* memory, not the
+maintainer's.
+
+**Lesson carried forward.** MIGRATE-01's doc pass edited sentences inside
+sections whose premise had changed, producing files that contradicted
+themselves — which is how issue #2's third acceptance criterion came to be
+unmet while looking done. When a premise changes, rewrite the section.

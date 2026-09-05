@@ -3794,3 +3794,190 @@ maintainer's.
 sections whose premise had changed, producing files that contradicted
 themselves — which is how issue #2's third acceptance criterion came to be
 unmet while looking done. When a premise changes, rewrite the section.
+
+### PROC-02 (2026-09-05): repo-tuned reviewer agents replace ad-hoc briefs
+
+User asked for PR reviewers tuned to this repo rather than general-purpose
+agents. Every review so far was driven by a hand-written brief, ~2–3k tokens,
+re-deriving the same standing context each time — wasteful, and a place for the
+briefing to quietly omit a lesson learned three rounds earlier.
+
+**Added `.claude/agents/`:**
+
+- **`_shared-context.md`** — not an agent; the material all three quote. Holds
+  the wrong-hash framing, the verify-don't-trust rule, the **table of failure
+  modes this repo has actually produced** (a benchmark measuring a path against
+  itself; an assertion that could not fail; a signed/unsigned bound 2x too
+  loose; an inverted fail-safe; an empty value erasing an explicit setting; a
+  256 MiB allocation never read; orphaned doc comments; unreproducible
+  measurements; a filter matching nothing that libtest called success), the
+  break-testing requirement, what CI does and does not prove, the context budget
+  and the ledger rules.
+- **`jit-reviewer`** — `src/randomx/jit/`, the emitter, `vm.rs`'s native-loop
+  path. Instruction encodings, signed/unsigned bounds, the four native-loop
+  preconditions and their single definition, AAPCS64 and W^X, FPCR containment,
+  whether both arms of a differential test are still genuinely different code,
+  and paired-A/B discipline for any performance claim.
+- **`ci-reviewer`** — workflows, `Makefile`, `scripts/`, `.cargo/config.toml`,
+  branch protection. Leads with the infrastructure failure mode: application
+  bugs announce themselves, **infrastructure bugs go green**. Requires breaking
+  the gate to prove it can still go red; covers exact required-check name
+  matching, the skipped-workflow-blocks-a-required-check trap, the
+  `target-cpu=native` platform assumption, and the 7 GB runner budget.
+- **`pr-reviewer`** — everything else, with an explicit scope check that hands
+  off to the other two. Silent failure, fail-safe direction per switch, tests
+  that cannot fail, unread allocations, **documentation and audit accuracy**
+  (every number traces to a measurement; rewrite a section whose premise
+  changed rather than editing sentences inside it), and concurrency.
+
+`CLAUDE.md` gains an Operational Protocol step 0 naming which agent covers what,
+and repeating the cold-spawn rule. (Numbered 0 here, not 0a: the branch-and-PR
+step of the same number lives on the `chore/branch-protection` branch, which
+this one does not contain. Whichever merges second must renumber — recorded so
+the collision is not a surprise.)
+
+### Verification
+The three agent files parse with valid YAML frontmatter (`name`, `description`,
+`tools` on each); `_shared-context.md` deliberately has none, being reference
+material rather than an agent. No Rust changed, so the build and suite are
+untouched by this commit. **Not verified:** that the agents behave as intended
+when invoked — that needs a real review round, and the next one is the test.
+
+*Correction, appended per the append-only rule: an earlier revision of this
+entry claimed the `CLAUDE.md` change had landed when the edit had in fact failed
+and only the agent files were committed. The claim was written before the result
+was checked.*
+
+**Why this is more than tidying.** The briefs were the only place several
+lessons lived, and they were reconstructed from memory each time. Two of them
+had already been dropped once: the empty-value composition trap and the
+asymmetric fail-safe directions did not appear in later briefs even though both
+were findings from earlier rounds. Encoding them in the repo means the next
+session inherits them without depending on a conversation that will not exist.
+
+### PROC-03 (2026-09-05): worktrees for concurrent branches
+
+User asked for worktrees whenever more than one branch is in flight. Prompted by
+a concrete failure earlier the same day: with three PRs open and two reviewer
+agents running, the shared checkout was switched between branches mid-review, so
+**PR #7's reviewer committed its ledger onto the agents branch** instead of the
+one it was reviewing. Recovered by moving the commit, but it should not have been
+possible. `feedback_auto_review` already said "never edit the working tree while
+a review is running"; a single checkout makes that rule depend on discipline.
+
+**Setup.** One worktree per active branch under `.claude/worktrees/`, primary
+checkout parked on `main`:
+
+```
+~/code/github/miner-tim                                    [main]
+~/code/github/miner-tim/.claude/worktrees/chore-branch-protection
+~/code/github/miner-tim/.claude/worktrees/ci-run-on-pr-only
+~/code/github/miner-tim/.claude/worktrees/chore-pr-reviewer-agents
+```
+
+**`.gitignore` first, and this is not routine hygiene.** `.claude/worktrees/`
+and `.worktrees/` are now ignored. A tracked worktree directory is committed as
+a **gitlink** (mode 160000) — which is exactly what happened before:
+`.claude/worktrees/platform-neutral` was committed in `3b2cc9d`, and during the
+SHA-256 -> SHA-1 conversion it was the single line that had to be stripped from
+the fast-export stream, because a gitlink's object id cannot be remapped across
+hash algorithms. Adopting worktrees without ignoring the directory would have
+re-created the same defect.
+
+Verified the rule matches (`git check-ignore -v .claude/worktrees` resolves to
+`.gitignore:32`) rather than assuming — the bare path returns non-zero until the
+directory exists, since a trailing-slash pattern only matches directories, which
+makes a naive check look like a failure.
+
+**Baseline:** `cargo check` clean in the worktree. The full suite was **not** run
+per worktree — each has its own `target/`, and three cold release builds plus
+2 GiB dataset generation is a poor trade for a change that touches no Rust. Say
+so rather than implying a baseline was taken.
+
+**Cost worth knowing:** every worktree carries an independent `target/`, so disk
+grows quickly on a project with `lto=true` release artifacts. Remove worktrees as
+their PRs merge (`git worktree remove`).
+
+### PROC-04 (2026-09-05): `.claude/settings.local.json` untracked
+
+Found during a repo-size audit the user asked for. The file was tracked from the
+initial commit and had shown as modified in `git status` for the life of the
+project — it is the file every session had to work around.
+
+**It should never have been tracked.** `settings.local.json` is per-machine
+Claude Code state: a 48-entry permission allow-list containing one developer's
+exact command line, pool and wallet. Shared, reviewable settings belong in
+`.claude/settings.json`, which stays tracked.
+
+`git rm --cached` plus a `.gitignore` entry: removed from the index, left on
+disk, ignored from here.
+
+**No secret was exposed.** The audit checked: the Monero address in that file
+matches one already in `src/donate.rs`, so it is the project's published
+donation address, not a private wallet. `mining.conf`, which holds the operator's
+actual mining wallet, has never been committed. No keys or tokens in any tracked
+file.
+
+**Consequence for anyone with an existing checkout, and it bites silently.**
+This commit deletes the file from the repository, so a `pull` deletes it from a
+working tree where it matches `HEAD` — taking the local permission list with it,
+with no warning. Backed up beforehand to
+`~/miner-tim-backups/settings.local.json.backup-20260905-224526` (48 entries,
+verified as parseable JSON, outside the repo per the destructive-ops rule).
+Restore by copying it back; it is ignored now, so it will stay put.
+
+### Repo-size audit (the reason this was found)
+- `.git` **6.1 MB**, pack **4.10 MiB**; **54 tracked files, 1.3 MB**.
+- Largest blobs in the whole history are `AUDIT.md` revisions at ~205–216 KB.
+  **No blob anywhere in history exceeds 500 KB**, so the earlier `target/`
+  history rewrite (174 MB -> 536 KB) is genuinely clean.
+- The 154 MB on disk is `target/` (71 MB) and worktrees (75 MB), both ignored.
+- **Growth to watch:** `AUDIT.md` is 210 KB and every entry commits a fresh
+  full-size blob — the ten largest objects in the repository are all the same
+  file, roughly half the pack. The head/archive split used for `REVIEW_MR1.md`
+  is the eventual answer.
+
+### Corrections to this branch's own entries (round 1 review of PR #9)
+
+**The append-only rule was invoked in the commit that broke it.** Commit
+`0a11083` rewrote a sentence of PROC-02 *in place* while adding a paragraph
+headed "Correction, appended per the append-only rule". That is the rule
+`pr-reviewer` item 6 introduces two files away. Stating the working distinction,
+since the reviewer was right that it was never written down: **an entry already
+merged to `main` is corrected by appending; an entry added on an unmerged branch
+may still be edited in place, because it is not yet part of the record.**
+PROC-02 was unmerged, so the edit was defensible — the claim of appending was
+not.
+
+**Dead commit id.** `7851bdc` does not resolve in this repository: it is a
+pre-migration **SHA-256** id, and `SHA256_TO_SHA1_MAP.txt` maps it to
+`3b2cc9d` ("feat: Initialize project management agent protocol"). It was copied
+out of an older `AUDIT.md` line into `.gitignore` and `CLAUDE.md`, where it would
+have sent a future reader to nothing. Corrected in both, and in PROC-03.
+The occurrence at `AUDIT.md:3573` is inside the already-merged conversion entry
+and is corrected here rather than edited there. Worth adding: the gitlink is not
+visible at `3b2cc9d` either, because the conversion stripped it — it survives
+only in the archived GitLab project.
+
+**The PR #7 collision is a conflict, not a renumbering.** `git merge-tree`
+reports real content conflicts in **both** `CLAUDE.md` (same protocol slot) and
+`AUDIT.md` (same insertion point). And there is a second consequence that was
+not stated: if #9 merges first, `PROC-01` lands *after* `PROC-04` in a ledger
+that is meant to read chronologically.
+
+**`AUDIT.md` size.** `_shared-context.md` said "~180 KB" while PROC-04 said
+210 KB. Measured on `main`: **215,635 bytes**. PROC-04 was right; the agent file
+is corrected.
+
+**Protocol step 0 restructured.** The first fix used `0a.`/`0b.` markers, which
+are not valid CommonMark either — the reviewer's nit was that `0b.` folds into
+the preceding item, and relabelling did not address it. Step 0 is now one
+numbered item with bullet sub-items, which is valid, unambiguous, and shrinks the
+conflict surface with PR #7: its "branch and PR, always" rule becomes a third
+bullet at merge rather than a competing `0.`.
+
+**PROC-04 overstated one detail.** It says `settings.local.json` was "modified in
+every `git status`". It is byte-identical to `HEAD` and was committed only four
+times in 181 commits. The clean state is precisely what makes the silent-delete
+warning true — a pull deletes a file that matches `HEAD` without complaint — so
+the warning stands and the description of it does not.

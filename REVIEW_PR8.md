@@ -261,3 +261,275 @@ numbers, unsafe cancellation"`. Round 1's two blockers are the subject.
 | E | Safety argument still sound under `strict: true` | pending |
 | F | Overclaims / omissions; cache-scoping finding honestly scoped | pending |
 
+## R2-1 The PR body was never corrected — both Round-1 blockers survive verbatim — **MAJOR**
+
+`gh pr view 8` on the live PR still reads:
+
+| Job | PR body still says | Reality |
+|---|---|---|
+| `test` | ~19 min | 4.0 min |
+| `jit-linux-arm` | ~12 min | 11.7 min |
+| `jit-macos` | ~11 min | ~13.8 min |
+| `audit` | ~6 min | 0.3 min |
+| `lint` | ~2 min | 0.3 min |
+| **Total** | **~50 runner-minutes**, "~50 minutes saved per merged PR" | ~30 min |
+
+and, under "Concurrency simplified as a consequence":
+
+> "With no push trigger that case cannot arise, so it is now unconditionally `true`."
+
+That sentence is now **flatly contradicted by the code on the branch**, where
+`cancel-in-progress: ${{ github.event_name == 'pull_request' }}` was restored in
+both files. A reader of the PR is told the opposite of what merges.
+
+So the fix commit corrected the two blockers in the tree and left them standing
+in the artifact a maintainer actually reads. "Fixed in the tree only" is not
+fixed — and it means a *fourth* set of figures is now in circulation (PR body
+50 / old comments 45 / corrected comments 29.5 / measured ~30), which is the
+same defect Round 1 blocked on, one artifact to the left.
+
+**Scoped honestly:** this does not reach `main`'s permanent history.
+`gh api repos/stephen84s/miner-tim` gives `squash_merge_commit_message:
+COMMIT_MESSAGES` and `merge_commit_message: PR_TITLE`, so neither merge style
+copies the PR body into the commit. The damage is to the review record, not to
+git history. That is why this is major and not blocking.
+
+## R2-2 `13.4`, `0.2`, `0.2` are not what they are labelled — **MAJOR**
+
+Both workflow comments and `AUDIT.md` state the figures as "mean of 3 completed
+runs each". I re-derived every one from the API, over **all** completed
+`event=push` runs (the runs this PR deletes), from `started_at`/`completed_at`
+on `actions/runs/<id>/jobs`:
+
+| Job | Run IDs | Durations (s) | Mean | Claimed |
+|---|---|---|---|---|
+| `jit-macos` | 33919683141, 33936008111, 33941437894, 33921568817, 33941945603 | 691, 802, 804, 986, 854 | **827.4 s = 13.79 min** | 13.4 |
+| `jit-linux-arm` | same five | 698, 706, 699, 695, 701 | **699.8 s = 11.66 min** | 11.7 ✓ |
+| `test` | 33919479186, 33919683137, 33921569019, 33936008172, 33941437757, 33941786081, 33941945621 | 257, 231, 235, 244, 248, 230, 235 | **240.0 s = 4.00 min** | 4.0 ✓ |
+| `audit` | same seven | 199\*, 17, 17, 17, 17, 14, 18 | warm mean **16.7 s = 0.28 min** | 0.2 |
+| `lint` | same seven | 32, 20, 16, 21, 15, 15, 14 | **19.0 s = 0.32 min** | 0.2 |
+
+\* `33919479186`'s `audit` at 199 s is the cold-cache run; excluded from the
+warm mean, and its exclusion is itself unstated — see R2-5.
+
+Honest total: **~30.1 min**, against the stated 29.5. The 2% gap is not the
+finding. The provenance is:
+
+- **`jit-macos` 13.4 cannot be a mean of any three of these runs.** The eight
+  candidate 3-subsets give 12.8, 13.0, 13.0, 13.7, 14.4 min — none is 13.4.
+  13.4 min = 804 s is the **median of Round 1's four-run set**, i.e. verbatim
+  Round 1's *"Typical"* column. The number was lifted from the reviewer's table
+  and re-labelled with a provenance it does not have.
+- **`audit` 0.2 is not obtainable at all.** The three fastest warm runs are
+  14/17/17 s → 16 s → 0.27 min → 0.3. Round 1's own table said 0.3. 0.2 is a
+  *fresh* understatement invented in the fix commit, not a copy.
+- **`lint` 0.2** requires cherry-picking the three fastest (14/15/15 s = 0.24);
+  the mean over all seven is 0.32. Round 1 said 0.3.
+- **`jit-macos` is quoted to one decimal over a 691–986 s spread** — a 43%
+  range on a virtualised macOS runner. "13.4" is false precision; a range
+  (11.5–16.4 min) is the only honest form for that job.
+
+This is the shared-context failure mode reproduced *inside the fix for the
+finding that named it*: a figure quoted without a reproduction, and a stated
+method ("mean of 3 completed runs") that does not produce the stated number.
+
+## R2-3 The corrected number and the corrected benefit are in different currencies — **MAJOR (new, introduced by the fix)**
+
+Both workflow comments now read, in consecutive sentences:
+
+> "...costs a second full pass — measured at **29.5 minutes** of runner time
+> across the five jobs ... The repo is public, so those are free minutes: what
+> this saves is wall-clock and queue time, not money."
+
+29.5 is a **sum across five jobs that all run concurrently**. `grep -n 'needs:'`
+returns no match in either workflow, so nothing serialises them, and the two
+workflows fire on the same event simultaneously. The API agrees:
+`actions/runs/33941945603/timing` → `run_duration_ms: 1014000` (16.9 min, the
+JIT workflow) and `.../33941945621/timing` → `263000` (4.4 min, CI). The
+wall-clock the deleted post-merge pass actually occupies is **~17 minutes**,
+set by `jit-macos` on the critical path — not 29.5.
+
+Round 1's blocker was that 50 measured nothing. The fix measured something, then
+changed the claim's currency to wall-clock while keeping a number that is only
+meaningful as consumed runner-minutes. A sum-across-parallel-jobs is the right
+unit for the billed minutes the same sentence disavows. Either quote ~17 min of
+wall-clock, or quote 29.5 as consumed runner time and drop the wall-clock
+framing — not both.
+
+(Secondary: GitHub bills whole minutes per job, so under a runner-minute
+convention `audit` and `lint` are 1 min each and the total is ~32. 29.5 is only
+right under a raw-elapsed convention. Moot for cost, since billing is zero, but
+it is another way "runner time" is the wrong label for the arithmetic done.)
+
+## R2-4 The two workflows now contradict each other about the "~19 minutes" figure — **MINOR (new, introduced by the fix)**
+
+Same commit, `b039673`:
+
+- `ci.yml:183` — "**Took ~19 minutes on GitLab's x86_64 runners**; measures 4.0
+  minutes here" — asserts the GitLab attribution as established fact.
+- `jit.yml:26-28` — "The \"~19 minutes\" this comment used to quote for the
+  interpreter suite **was never measured** — it is 4.0."
+
+One figure, two mutually exclusive claims about it, in the same commit. I traced
+the provenance and the surviving assertion is the false half:
+
+- `main:.github/workflows/jit.yml:25` says only "the interpreter suite takes ~19
+  minutes" — **no mention of GitLab**. So `AUDIT.md:3818`'s account ("copied
+  from a `jit.yml` comment describing GitLab's runner") misdescribes its own
+  source.
+- `.gitlab-ci.yml.archived` contains no duration for the test job, only
+  `timeout: 1h`.
+- `CLAUDE.md` CI-02 records that at the time those workflows were written
+  "nothing had run on GitHub — runner specs and RAM headroom were **asserted
+  from the issue, not tested**."
+
+There is no measurement of 19 minutes anywhere in this repo, on GitLab or
+otherwise. The correction **hardened** an unmeasured figure into a factual
+assertion in `ci.yml` while correctly calling it unmeasured in `jit.yml`.
+
+## R2-5 The stated billing verification does not establish the billing claim — **MINOR**
+
+The claim is true. The cited method does not show it.
+
+`AUDIT.md`'s new Verification section says "Billing checked via
+`actions/workflows/<id>/timing`". I ran that on all three workflow IDs
+(350515410 `ci.yml`, 350515411 `jit.yml`, 350528605 `release.yml`) and every one
+returns `{"billable":{}}` — an **empty object**, which is evidence of nothing,
+not evidence of zero. The entry's phrasing "`billable.total_ms` is zero across
+all workflows" names a key that exists at neither level.
+
+The claim is nonetheless correct, established by the *per-run* endpoint:
+```
+actions/runs/33941945603/timing -> billable.MACOS.total_ms  = 0
+                                   billable.UBUNTU.total_ms = 0
+actions/runs/33941945621/timing -> billable.UBUNTU.total_ms = 0
+```
+with `visibility: public`, `private: false`. Round 1 used the per-run endpoint;
+the fix wrote down the workflow-level one.
+
+**Not over-corrected in the other direction.** The entry states the condition
+("The repository is public, so Actions minutes are free"), says plainly that the
+change "frees no billed minutes at all", and names the real benefit without
+inflating it. That part is honest.
+
+## R2-6 `cancel-in-progress` genuinely reverted in both files — **PASS**
+
+`git diff main...HEAD` shows the `cancel-in-progress:` line as *context* (no
+`+`/`-`) in both `ci.yml` and `jit.yml`; both read
+`${{ github.event_name == 'pull_request' }}`, byte-identical to `main`.
+
+`ci.yml:39-42`'s replacement comment is accurate: `workflow_dispatch` on `main`
+does set `github.ref` to `refs/heads/main`, the group `ci-${{ github.ref }}` is
+therefore shared between two such dispatches, and the dispatch is the
+mitigation this PR nominates. No cross-cancellation exists between a PR run
+(`refs/pull/N/merge`) and a dispatch on the same branch (`refs/heads/foo`), so
+"cancel superseded PR runs only" describes the behaviour correctly.
+
+*Nit:* `jit.yml:53`'s "killing a manual verification of main is the one thing
+that must not happen" is rhetorical overstatement in a file whose whole point is
+that a wrong-hash JIT defect is the thing that must not happen.
+
+## R2-7 Safety argument unchanged and still sound — **PASS**
+
+The fix commit touched no `name:` field and no `release.yml`. Protection re-read
+fresh: `strict: true`, `enforce_admins: true`, `allow_force_pushes: false`, and
+the five required contexts still match the five job `name:` fields exactly
+(`lint (clippy, x86_64 linux)`, `audit (cargo-audit / RustSec)`, `test (cargo
+test --release, x86_64 linux)`, `jit-macos (aarch64 darwin, make verify-jit)`,
+`jit-linux-arm (aarch64 linux, scripts/verify-jit.sh)`). Round 1's analysis of
+merge/squash/rebase carries over unchanged. Nothing to re-litigate.
+
+## R2-8 In-tree figures are now internally consistent — **PASS**
+
+`grep -rn` across `.github/`, `AUDIT.md`, `CLAUDE.md`, `README.md`: both
+workflow comment blocks and the `AUDIT.md` entry carry the identical set
+(29.5 / 13.4 / 11.7 / 4.0 / 0.2 / 0.2). Round 1's "45 vs 50 in the same branch"
+is resolved *in the tree*. I confirmed the 45 it describes was real
+(`git show 18055cf:.github/workflows/ci.yml`). The remaining inconsistency is
+the PR body — R2-1.
+
+## R2-9 Cache-scoping finding is honestly scoped — **PASS**, with one coupling the entry misses
+
+Re-listed `actions/caches` myself: still `total_count = 8`, **all eight** at
+`ref: refs/heads/main`, 523,216,212 bytes (499.0 MiB). The AUDIT's "~496 MB" is
+Round 1's figure carried forward and is within rounding. This PR's own runs
+wrote no `refs/pull/8/merge` entry — consistent with exact-key restores, where
+`actions/cache` skips the save.
+
+The entry says "Not measured, not fixed here" and "deliberately left
+unquantified rather than guessed at". That is the correct treatment and it is
+the honest form. **Pass.**
+
+One coupling neither the entry nor R2-2's numbers acknowledge: the 29.5 figure
+is measured **on warm, `main`-scoped caches that this very change stops
+repopulating**. The one cold-cache data point in the set — `audit` at 199 s
+against a warm 17 s, a 12x factor — is the magnitude of what going cold costs,
+and it was silently dropped from the mean. The saving and the unquantified cost
+are measured in the same units against opposite signs; quoting one to a decimal
+place while leaving the other unquantified overstates the net.
+
+*Process nit:* this repo's convention (`CLAUDE.md`, JIT-01) is to file deferred
+findings as numbered issues. `gh issue list --state all` shows six, none for
+cache scoping. Recorded in `AUDIT.md` only.
+
+## R2-10 `CLAUDE.md`'s task board was not updated — **MINOR (process, still open)**
+
+`git diff main...HEAD --stat` shows four files; `CLAUDE.md` is not among them.
+`grep -n 'CI-03' CLAUDE.md` → no match; the board still ends
+`| **Pending** | - | **Awaiting User Task** |`.
+
+Operational Protocol step 4 requires the Current Task table to reflect the new
+state. Round 1 raised the sibling omission (the missing `AUDIT.md` Verification
+section); the fix added that one and not this one — the same protocol step, half
+applied.
+
+---
+
+## Round 2 summary
+
+| # | Item | Severity |
+|---|---|---|
+| R2-1 | PR body never corrected; both Round-1 blockers verbatim, one contradicting the code | **Major** |
+| R2-2 | `13.4` / `0.2` / `0.2` mislabelled "mean of 3 runs"; 13.4 lifted from Round 1's median, audit 0.2 unobtainable; false precision over a 691–986 s spread | **Major** |
+| R2-3 | 29.5 is a parallel-job sum sold as wall-clock; real wall-clock is ~17 min (new, from the fix) | **Major** |
+| R2-4 | `ci.yml` asserts the "~19 min GitLab" figure as fact while `jit.yml` calls it unmeasured; no such measurement exists (new, from the fix) | **Minor** |
+| R2-5 | `actions/workflows/<id>/timing` returns `{}`; the cited verification does not establish the (true) billing claim | **Minor** |
+| R2-6 | `cancel-in-progress` reverted in both files, comments accurate | **Pass** |
+| R2-7 | Safety argument / `strict: true` / contexts unchanged | **Pass** |
+| R2-8 | In-tree figures now mutually consistent (45-vs-50 resolved) | **Pass** |
+| R2-9 | Cache finding honestly scoped; misses that 29.5 is measured on caches the change stops warming | **Pass** |
+| R2-10 | `CLAUDE.md` task board not updated (Protocol step 4) | **Minor** |
+
+**Verdict: not mergeable as it stands.**
+
+Round 1's Blocking 2 (`cancel-in-progress`) is properly fixed — R2-6 verifies it
+against `main` byte-for-byte, and the replacement comment explains it correctly.
+
+Round 1's Blocking 1 (the invented numbers) is **not** fixed. It is fixed in two
+of the three places it appeared and re-committed with new invention in one of
+those two: `jit-macos` 13.4 is Round 1's median wearing a "mean of 3 runs"
+label, `audit` 0.2 matches no subset of any measurement, and the PR body still
+carries the original 50-minute table unchanged. Then the correction added a
+defect of its own (R2-3): it fixed the *currency* of the claim to wall-clock
+while keeping a number that is a sum across parallel jobs, so the headline
+figure now overstates the thing it purports to measure by ~1.7x — the same
+factor, in the same direction, as the error Round 1 caught.
+
+The mechanism remains sound and I would still support the trigger change on its
+merits; branch protection carries the safety argument and nothing here can put
+bad code on `main`. What blocks is unchanged in kind from Round 1: durable
+committed artifacts asserting measurements that were not made.
+
+To clear: correct the PR body (numbers **and** the `cancel-in-progress`
+paragraph); quote `jit-macos` as a range (11.5–16.4 min) or a mean over a named,
+complete run set; fix `audit`/`lint` to 0.3; either quote ~17 min wall-clock or
+drop the wall-clock framing from the 29.5 sum; reconcile `ci.yml`'s
+"Took ~19 minutes on GitLab" with `jit.yml`'s "never measured"; cite the
+per-run `timing` endpoint for billing; and add CI-03 to the `CLAUDE.md` board.
+
+**Not verified:** I did not run any workflow, dispatch anything, or exercise the
+concurrency collision live — R2-6 rests on reading the restored expression and
+on Round 1's empirical demonstration of the shared group, not on a fresh
+reproduction. I did not measure the cache-scoping cost either; R2-9 accepts the
+entry's own refusal to guess and adds only the one cold-cache data point already
+present in the run history.

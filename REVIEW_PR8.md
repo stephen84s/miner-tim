@@ -241,3 +241,23 @@ concurrency on the exact mechanism it nominates as its own safety net. Both are
 small edits: correct the durations to the measured ~30 minutes (and reconcile
 45 vs 50), restore the `cancel-in-progress` guard, and add the verification
 section `CLAUDE.md` requires. Then it should go in.
+
+---
+
+# Round 2 — re-review of the corrections (`b039673`)
+
+Branch `ci/run-on-pr-only` @ `b039673`, reviewed against `main`. The fix commit
+under review is `b039673 "ci: correct PR #8 per independent review — wrong
+numbers, unsafe cancellation"`. Round 1's two blockers are the subject.
+
+**Coverage ledger** (updated as I go):
+
+| # | Check | State |
+|---|---|---|
+| A | Re-measure durations from the API; reconcile every figure on the branch | in progress |
+| B | Billing claim (`billable` really zero; not over-corrected) | pending |
+| C | `cancel-in-progress` reverted in BOTH workflows; comment accurate | pending |
+| D | Did the corrections introduce anything new that is wrong (esp. `ci.yml` `timeout-minutes` comment) | pending |
+| E | Safety argument still sound under `strict: true` | pending |
+| F | Overclaims / omissions; cache-scoping finding honestly scoped | pending |
+

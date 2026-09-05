@@ -586,3 +586,191 @@ an uncorrected PR body asserting the opposite of the code it ships, and two
 committed artifacts stating a provenance ("mean of 3 completed runs each") that
 produces neither 13.4 nor 0.2. R2-3 at minor, R2-4, R2-5 and R2-10 are the
 remaining cleanup.
+
+---
+
+# Round 3 — verification of the round-1/2 fixes, and a fresh pass
+
+Branch `ci/run-on-pr-only` @ `19d2f78`, against `origin/main` @ `10d5b2e`.
+Diff: `ci.yml`, `jit.yml`, `AUDIT.md`, `CLAUDE.md`, `REVIEW_PR8.md`.
+
+**Verdict: mergeable — no blockers, one major, three minors.** The gating
+mechanism is sound and now verified empirically rather than by argument, and
+every quoted figure reproduces exactly from the API. The one major is a
+self-contradiction inside `AUDIT.md`, not a build risk.
+
+## Coverage ledger
+
+| # | Item | State |
+|---|---|---|
+| 1 | Can the gate still go red? | done — R3-P1, R3-P2, scope stated below |
+| 2 | Commands/targets mean what the change says | done — R3-P3 |
+| 3 | Required-check names match exactly | done — R3-P1 |
+| 4 | `paths:` / `if:` / `continue-on-error:` traps | done — R3-P3 (none exist) |
+| 5 | Live config vs description (`gh api`) | done — R3-P1 |
+| 6 | Platform assumptions (`target-cpu`) | done — untouched by this diff |
+| 7 | Resource limits (`RUST_TEST_THREADS=3`) | done — untouched by this diff |
+| 8 | Coverage given up | done — R3-P4, R3-3 |
+| — | Reproduce the numbers | done — R3-P5 |
+
+## R3-1 `AUDIT.md`'s Verification section contradicts its own entry — **MAJOR**
+
+`AUDIT.md:4059-4062`:
+
+> "Durations measured via `actions/runs/<id>/jobs`, **three completed runs per
+> job**. Billing checked via **`actions/workflows/<id>/timing`**."
+
+Both clauses are the exact charges of R2-2 and R2-5, and both are disavowed
+**earlier in the same entry**: the table at `AUDIT.md:4005-4012` states n=12-14
+(and I reproduced it at that n), and `AUDIT.md:4030-4033` says of the workflow
+endpoint that it "returns `{"billable":{}}` and is evidence of nothing — an
+earlier revision of this entry cited that endpoint." It still cites it, thirty
+lines later. The line-wrap break after "measured via" is the fingerprint: the
+endpoint name was edited, the sample-size clause and the billing sentence were
+not.
+
+Same shape as R2-1 (corrected in one artifact, left standing in another), third
+round running. It is self-contradicting rather than wrong — the correct n and
+the correct endpoint are both present in the same entry — which is what keeps it
+off blocker. Fix is a two-line edit.
+
+## R3-2 Per-job and wall-clock figures come from different sample epochs — **MINOR**
+
+The per-job table (n=12/14) is the cut through run `33966976457` (2026-09-05
+~13:00); the wall-clock figures (n=17/20) are the cut at branch-head time
+(20:12). Both are labelled "every completed run to date", so the per-job one was
+already five runs stale when `19d2f78` landed. Recomputed at the later cut the
+sum is **30.28** against the stated 30.44 — conclusion untouched, which is why
+this is minor and not a repeat of R2-2.
+
+## R3-3 The correction cites a review round that does not exist in the ledger — **MINOR**
+
+`AUDIT.md:4023` says "*Corrected after round 3 flagged it*", and `CLAUDE.md:77`
+says "Two review rounds". Before this section, `REVIEW_PR8.md` had no Round 3 —
+whatever prompted `19d2f78` was never recorded. This round confirms the
+correction it refers to does reproduce (R3-P5); `CLAUDE.md`'s CI-03 row now
+needs "three".
+
+## R3-4 No `merge_group:` trigger — **MINOR (latent)**
+
+`gh api repos/:owner/:repo/rulesets` → `[]`, classic protection has no merge
+queue, `mergeStateStatus` is `CLEAN` not `QUEUED`: no merge queue is live, so
+this is not a defect today. But with `push` gone, `pull_request` is the sole
+trigger; enabling a merge queue later would mean the five required contexts
+never report on `merge_group` and every PR would hang. Worth a line in the
+workflow comments next to the `workflow_dispatch` note.
+
+## R3-P1 The gate still gates, on every path — **PASS (empirical)**
+
+Required contexts and the check-run names produced by a **`pull_request`** run
+on `19d2f78` are a 1:1 byte match, both directions empty:
+
+```
+required not reported: []      reported not required: []
+lint (clippy, x86_64 linux) | audit (cargo-audit / RustSec)
+test (cargo test --release, x86_64 linux)
+jit-macos (aarch64 darwin, make verify-jit)
+jit-linux-arm (aarch64 linux, scripts/verify-jit.sh)   — all SUCCESS
+```
+
+Paths a commit can reach `main`:
+
+- **Merge / squash / rebase from a PR** — `strict: true`, so head contains the
+  base tip and the tested `refs/pull/N/merge` tree is the tree that lands under
+  all three methods (`allow_merge_commit`, `allow_squash_merge`,
+  `allow_rebase_merge` all true). Checks reported by the PR run.
+- **Direct push to `main`** — rejected: required status checks plus
+  `enforce_admins: true`, `allow_force_pushes: false`, `allow_deletions: false`.
+  The removed trigger cannot produce an unverified commit on `main`, because the
+  commit cannot get there.
+- **`merge_group`** — not enabled; see R3-4.
+- **Fork PR** — `pull_request` runs in the base repo and reports the same five
+  contexts; unchanged by this diff (the deleted trigger never covered forks).
+- **Tags** — `release.yml` is byte-identical (`git diff` empty) and still
+  `push: tags: [v[0-9]*]`.
+
+## R3-P2 `cancel-in-progress` cannot manufacture a green — **PASS (empirical)**
+
+Run `33968902195` was **cancelled** while its `jit-macos` job concluded
+`success` at 16.67 min. The run conclusion, and therefore the required check, is
+`cancelled` — not success — so branch protection still blocks. The fail-safe
+direction is correct.
+
+## R3-P3 No weakening of the gates — **PASS**
+
+Ruby `YAML.load_file` on all three workflows: `continue-on-error` nil for every
+job, no job-level `if:`, **zero** steps with a step-level `if:`, no `paths:`
+filter, no `|| true` / `set +e` in `.github/`, `scripts/` or the `Makefile`.
+`on:` parses to exactly `{pull_request, workflow_dispatch}` for `ci.yml` and
+`jit.yml`. `EXPECTED_PASSES=92` is intact, and this PR's own pull-request run
+(`33989440550`) logged `92 passed` in **debug and release on both platforms** —
+`verify-jit: GATE PASSED on Darwin arm64` and `on Linux aarch64`. The gate fired
+on precisely the trigger path this PR makes the only one.
+
+## R3-P4 Coverage given up — accurately stated — **PASS**
+
+`main` gets no runs of its own; with protection as configured nothing can land
+there unchecked, and if protection were relaxed nothing would check it — the PR
+body says exactly this. `audit` per-merge frequency is unchanged (every merge is
+preceded by a PR run); the time-based gap — a new advisory landing between
+merges — is real and predates this change, since push runs also only fired at
+merges. There is no `schedule:` trigger anywhere; the entry says so. I confirmed
+the entry's "no README badge to break": `grep -niE 'badge|shields\.io'` on
+`README.md` returns nothing. The cache-scoping cost remains open and
+unquantified, which the entry states plainly.
+
+## R3-P5 Every number reproduces — **PASS**
+
+Recomputed from `actions/runs/<id>/jobs` over successful runs through
+`33966976457` (per-job) and `33969996500` (wall-clock):
+
+| job | n | mean | median | range | claimed |
+|---|---|---|---|---|---|
+| `jit-macos` | 12 | 13.94 | 14.29 | 11.20–16.43 | identical |
+| `jit-linux-arm` | 12 | 11.65 | 11.65 | 11.58–11.77 | identical |
+| `test` | 14 | 4.07 | 4.03 | 3.28–5.43 | identical |
+| `audit` | 14 | 0.49 | 0.28 | 0.22–3.32 | identical |
+| `lint` | 14 | 0.29 | 0.26 | 0.23–0.53 | identical |
+| **sum** | | **30.44** | | | identical |
+
+Wall-clock from `run_started_at`→`updated_at`: JIT **15.01** min (n=17, median
+14.52, range 11.72–21.50); CI **4.34** min (n=20, median 4.21, range
+3.58–5.78) — both identical to the entry. Billing: `visibility: public`,
+per-run `timing` gives `billable.MACOS.total_ms = 0` and
+`billable.UBUNTU.total_ms = 0`. After two rounds of unreproducible figures,
+this is the headline result: the third set holds exactly, at the stated n, with
+mean, median and range each checkable.
+
+## Not verified
+
+- I did **not** re-run the deliberate-drift test on `scripts/verify-jit.sh`.
+  `git diff origin/main...HEAD --stat` touches no file under `scripts/` or the
+  `Makefile`, so the gate's redness mechanism is outside this diff's blast
+  radius; the evidence offered instead is R3-P3 (the assertion is present and
+  fired at 92 on this PR's own run). A synthetic-log simulation would have
+  proved nothing about this change.
+- I did not exercise a push to `main`, a fork PR or a `workflow_dispatch`
+  collision live. R3-P1's push and fork limbs rest on the protection config as
+  returned by the API, not on a reproduction.
+- The Actions cache-scoping cost is still unmeasured, by me and by the entry.
+
+## Round 3 summary
+
+| # | Item | Severity |
+|---|---|---|
+| R3-1 | `AUDIT.md` Verification section still says "three completed runs per job" and cites `actions/workflows/<id>/timing`, both disavowed earlier in the same entry | **Major** |
+| R3-2 | Per-job table (n=12/14) and wall-clock (n=17/20) are different sample cuts, both labelled "every completed run"; 30.44 → 30.28 at the later cut | Minor |
+| R3-3 | Entry cites a "round 3" absent from the ledger; `CLAUDE.md` says "two rounds" | Minor |
+| R3-4 | No `merge_group:` trigger — latent, no merge queue enabled today | Minor |
+| R3-P1 | Gate holds on every path to `main`; contexts byte-match a `pull_request` run | Pass |
+| R3-P2 | A cancelled run reports cancelled even with a successful job | Pass |
+| R3-P3 | No `continue-on-error`, `|| true`, `paths:` or any `if:`; 92/92 debug+release both platforms | Pass |
+| R3-P4 | Coverage loss accurately stated; no README badge; no `schedule:` (pre-existing) | Pass |
+| R3-P5 | All figures reproduce exactly, per-job and wall-clock | Pass |
+
+**Mergeable.** R3-1 is the same category that blocked rounds 1 and 2 — a durable
+committed artifact asserting a method that was not used — but it is a
+self-contradiction with the correct values present in the same entry, and it is
+a two-line edit. The call on whether to land first and correct, or correct
+first, belongs to the maintainer; nothing here can put an unverified commit on
+`main`.

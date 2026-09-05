@@ -4018,7 +4018,14 @@ successful run: JIT workflow **15.01 min** mean (n=17, median 14.52, range
 11.72–21.50), CI workflow **4.34 min** mean (n=20, median 4.21, range
 3.58–5.78).
 
-*Corrected after round 3 flagged it.* The first version of this paragraph quoted
+The two sample sets have different cut-off points: the per-job table was taken at
+run `33966976457`, the wall-clock figures later, at the branch head. Recomputing
+the per-job sum at the later cut gives 30.28 rather than 30.44 — the conclusion
+is unchanged, but "every completed run" means *every run up to its own cut*, not
+a single shared epoch.
+
+*Corrected during round 3, before that round had reported.* The first version of
+this paragraph quoted
 n=4 for both — an arbitrary truncation, because the command that produced it
 piped through `head -8`. The same entry claims the per-job figures use every
 completed run, so it criticised the previous round for quoting a subset and then
@@ -4058,8 +4065,13 @@ Both workflows parse (`YAML.load_file`); triggers confirmed as
 `pull_request` + `workflow_dispatch` only; `release.yml` byte-identical and
 still tag-triggered; the five required check contexts still match the job
 `name:` fields. Durations measured via
-`actions/runs/<id>/jobs`, three completed runs per job. Billing checked via
-`actions/workflows/<id>/timing`. **Not verified:** the effect on Actions cache
+`actions/runs/<id>/jobs`, every completed run per job (n in the table above,
+12–14 depending on the job). Billing checked via the *per-run* endpoint
+`actions/runs/<id>/timing`. Both of those were stated wrongly here in an earlier
+revision — "three completed runs per job" and the per-*workflow* timing endpoint
+— which contradicted the corrections made further up this same entry; round 3
+caught that the summary had not been updated along with the body.
+**Not verified:** the effect on Actions cache
 population — see below; deliberately left unquantified rather than guessed at,
 which is the error this section exists to prevent.
 
@@ -4069,6 +4081,15 @@ change deletes. PR runs write to `refs/pull/N/merge`, which other PRs cannot
 read. Nothing repopulates `main`'s scope any more, so `CACHE_EPOCH` effectively
 cannot be bumped and PRs after a `Cargo.lock` change fall back to stale prefix
 matches. Not measured, not fixed here.
+
+**Open, from round 3: no `merge_group:` trigger (latent).** With `push` removed,
+`pull_request` is the sole gating trigger. There is no merge queue today
+(`rulesets` is `[]`, and the PR reported `CLEAN` rather than `QUEUED`), so this
+costs nothing now — but enabling a merge queue later would leave the required
+checks with no trigger that fires in the queue, deadlocking every PR. Recorded
+rather than pre-emptively fixed: adding a trigger would change the gating
+behaviour that round 3 has just verified, for a configuration nobody has asked
+for.
 
 **Non-findings, checked and dismissed.** `cargo audit` drift is not a real loss:
 every merge is preceded by a PR run that includes `audit`. The genuine gap is

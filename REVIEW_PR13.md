@@ -318,3 +318,194 @@ Cheapest set of fixes: strike or restate the +0.13 pp sentence (F5, F7), print
 the spread levels and a within-run paired CI over rounds instead of just the
 mean (F2, F3, F4), soften two comments (F1, F6), correct the verification
 sentence and move the checksum assert out of the barriered loop (F8).
+
+---
+
+# Round 2 — independent, fresh reviewer
+
+Scope: commit `990786f` only (`git diff b315da1..HEAD`) — the fixes written for
+round 1's nine minors. Still bench + docs only; `git diff b315da1..HEAD --stat`
+shows `AUDIT.md`, `CLAUDE.md`, `benches/nativeloop_ab.rs`. No `src/`, so no
+emitted ARM64 changed and there is no wrong-hash exposure in this PR.
+
+## Coverage ledger
+
+| # | Item | State |
+|---|---|---|
+| 1 | Deadlock fix: panic paths, wait counts, per-pair/per-thread coverage, phase 1 | done — correct; R2-F4 (nit) |
+| 2 | Rewritten spread statistic: pairing, `mean_ci95` input, printed note | done — pairing correct; **R2-F3** |
+| 3 | Withdrawn claims: residue in AUDIT / CLAUDE / PR body / comments | done — clean; R2-F5 (nit) |
+| 4 | New numbers: arithmetic, internal consistency, strength vs sample | done — **R2-F1, R2-F2** |
+| 5 | `Checks`/`PhaseOut`, AUTHORITATIVE labelling, entry-vs-diff match | done — correct |
+| — | Break test, sharper than the author's (last thread, last pair) | done — passes |
+| — | clippy `--benches --release -D warnings` | done — clean |
+| — | CI final state | see below |
+
+## Item 1 — the deadlock fix is correct
+
+* **No panic path remains between two `sync()` calls that the fix was meant to
+  remove.** The barriered region contains only `round()`. Its `try_into().unwrap()`
+  is on `chunks_exact(8)` (infallible), `blob[39..43]` is in range for the fixed
+  76-byte blob, and `h / ta` yields `inf` rather than panicking. The assert was
+  the realistic panic and it is gone from that region.
+* **Wait counts unchanged and still `tid`-independent**: `2 + 4·pairs` on every
+  thread. Removing the assert did not touch a `sync()`.
+* **Coverage is per-pair and per-thread.** `assert_arms_agree` loops all pairs;
+  `main` loops all threads *after* `thread::scope` returns, so a divergence on
+  any thread at any pair is reached. (It stops at the first failure, which is
+  reporting, not detection.)
+* **The comparison is still the right one**: `(ca, cc) == (cb, cd)` is
+  `ca==cb && cc==cd`, matching the A-B-B-A nonce ranges. Unchanged.
+* **Phase 1 still asserts** (`assert_arms_agree("1 thread", &c1)`, before
+  `report`).
+
+**Break test, deliberately harder than the author's.** The author injected on
+thread 1, pair 0 — which cannot distinguish "checks every thread and pair" from
+"checks the first". I injected `cb ^ 1` on `tid == 2` (the **last** thread) at
+`_p == pairs - 1` (the **last** pair) and ran `cargo bench --bench nativeloop_ab
+-- 3 2 16`:
+
+```
+thread 'main' panicked at benches/nativeloop_ab.rs:192:9:
+assertion `left == right` failed: thread 2: native loop and body JIT produced
+different hashes in pair 1 — this is a correctness failure, not a benchmark result
+  left: (1877151405702922549, 10378506918665234298)
+ right: (1877151405702922548, 10378506918665234298)
+error: bench failed
+```
+
+Phase 1 passed first (not injected), the process **exited** rather than hanging,
+and the message names the last thread and the last pair. Mutation reverted;
+`git status` clean.
+
+## Item 4 — the numbers
+
+Arithmetic checks out: barriered half-widths 0.19–0.41 all below 0.43; asymmetry
+range 0.60−(−1.10) = 1.70 pp; "all eight point estimates in +7.05–7.50%" holds,
+and holds even including the two unbarriered aggregates. Run 4's −0.94 pp
+reconciles with the printed levels 8.03/7.08 under rounding.
+
+**R2-F1 (minor): "every run's own paired CI includes zero" is asserted for three
+runs that never computed one.** The paired CI across rounds is *new in this very
+commit*. Runs 1–2 are the author's originals and run 3 is round 1's reviewer,
+whose ledger quotes the old output verbatim — `asymmetry : -1.10 pp (native -
+body)`, no interval. Only run 4 (−0.94) can have printed a CI. The sentence
+appears in both `AUDIT.md` ("every run's own paired CI includes zero") and the
+PR body. This is the same defect class as the +0.13 pp claim it replaces: a
+statement quoted with a sample that cannot support it. Fix: "the one run
+measured with the new statistic has a paired CI including zero", or re-run the
+other three.
+
+**R2-F2 (minor): the baseline-sanity ranges exclude the run the entry now counts
+as one of its four.** `AUDIT.md` says "single-thread body JIT 568.1-572.7 H/s …
+11-thread body JIT 4982-5007 H/s … **No run discarded**". Round 1's ledger
+records its own run at **572.9 H/s** single-thread and **5020.7 H/s** at 11
+threads — outside both ranges. The author widened 5003→5007 to admit run 4 but
+never folded in run 3, whose figures are in the file being cited. Half-correction
+of exactly the shape this repo keeps producing. The correct ranges are
+568.1–572.9 and 4982–5020.7.
+
+**R2-F2b (minor, quantitative): the surviving CI-narrowing claim is carried by
+three observations, not four.** Run 4's ±0.41 against the tightest unbarriered
+±0.43 is a 0.02 margin, and a half-width is itself a random variable: with n=24,
+`SD(s)/σ ≈ 1/√(2·23) ≈ 15%`, so ±0.41 carries roughly ±0.06 of its own sampling
+noise. That ordering is unresolvable. Also note the claim rests on the *same*
+unpaired between-process design that the entry uses (correctly) to withdraw the
++0.13 pp claim two paragraphs earlier — the entry applies that caution to the
+tail-idle paragraph but not to this one. It survives on effect size and on 3 of
+4, which is worth saying rather than "reproduces across four observations".
+
+## Item 2 — the rewritten statistic
+
+**Correct where it matters.** `b[i]`/`n[i]` are the A-vs-B and D-vs-C antithetic
+pairs — the identical convention `report()` uses — so the paired CI is over the
+right pairing and `mean_ci95` is fed a genuine paired-difference sample (n=24 →
+df=23 → t=2.086, the deliberately-wide bucket). `d_mean` equals `n_mean −
+b_mean` exactly when the two vectors have equal length, so the four historical
+asymmetry values remain comparable across code versions and the table is
+coherent. The `if mean > 0.0` filter could in principle desynchronise `b` and
+`n`, but rates are strictly positive here — unreachable, noted only for the
+record. Rename away from `arm_cv` is complete (`grep arm_cv` → nothing) and the
+"coefficient of variation" string survives only inside the comment that
+disclaims it.
+
+**R2-F3 (minor): the printed interpretation note is stale on arrival and asserts
+an interval that does not exist.** Lines 265–271 hardcode "the asymmetry has
+been observed at -1.10, -0.40 and +0.60 pp across separate runs" — omitting
+**−0.94**, the observation produced by the run that exercised this very code and
+recorded four lines away in `AUDIT.md`. It then states "it moves between runs by
+more than any one run's interval", which is R2-F1 baked into program stdout: three
+of those runs computed no interval. Beyond the two errors, hardcoding a run log
+into a program's output guarantees permanent drift — this repo's numbers travel
+by being pasted out of harness stdout.
+
+## Item 3 — the withdrawals are complete
+
+Grepped `AUDIT.md`, `CLAUDE.md`, `benches/`, `README.md` for `0.13`, `7.27`,
+`7.40`, "still inside", "no divergence", "genuinely independent", "coefficient of
+variation", `arm_cv`, `4982`, `5003`. Every surviving mention is inside an
+explicit withdrawal. `7.27`/`7.40` and "genuinely independent" are gone
+entirely. The PR body carries the same withdrawals. No half-correction here.
+
+**R2-F5 (nit): one module-doc sentence went stale.** Line 34 still says the
+harness "asserts this on every round"; the assert now runs after the phase. The
+coverage is the same; the wording is not.
+
+## Item 5 — types, labelling, entry-vs-diff
+
+`Checks` / `PhaseOut` are honest aliases and are why `type_complexity` is
+satisfied; the AUDIT entry's account of them matches. The AUTHORITATIVE label is
+applied to the per-thread block in code, in the AUDIT table and in `CLAUDE.md`,
+consistently. Every claim the AUDIT entry makes about the diff (assert moved
+after join, level printed, paired CI, "common start not common duration",
+"exchangeability not independence") is present in the code I read.
+
+**R2-F4 (nit): the deadlock class is narrowed, not eliminated.** The write-ups
+scope the fix correctly ("on a real divergence"), so this is not an over-claim.
+For the record: any *other* panic inside `round()` — or in `new_full` /
+`prepare_scratchpad` before a thread's first `sync()` — still strands every
+sibling in `Barrier::wait()`, and `h.join()` on thread 0 never returns.
+Unreachable in the bench profile (debug-assertions off), but a `cargo test
+--benches` debug build would expose it.
+
+## CI and compile evidence
+
+`cargo clippy --benches --release -- -D warnings` clean locally. CI's `lint` job
+runs `cargo clippy --all-targets --locked -- -D warnings`, which **does** compile
+this bench on x86_64 — `lint` and `audit` passed on the current head; `test` and
+both `jit-*` jobs were still in flight when I finished. Note that no CI job ever
+*executes* this harness, and the JIT gate does not touch the changed file, so a
+green `jit-macos` is not evidence about this diff.
+
+## What I could not verify
+
+* I did not reproduce any of the six 11-thread performance runs. The point
+  estimates, CI half-widths, per-thread figures and asymmetry values in the
+  tables are taken as reported except where round 1's ledger contradicts them
+  (R2-F2).
+* I could not confirm from the repository which code version produced runs 1, 2
+  and 4; R2-F1 rests on run 3's output format as quoted in round 1's ledger plus
+  the fact that the paired CI is new in `990786f`.
+* The break test used 3 threads / 2 pairs / 16 hashes, not the 11×12×256
+  configuration the tables use.
+
+## Verdict — round 2
+
+**MERGEABLE.** No blockers, no majors. The deadlock fix is correct and survives
+a harder break test than the author's; the statistic's pairing is right; the
+four withdrawals are complete with no residue.
+
+**Three minors and two nits**, all in the write-ups or in printed prose:
+
+| ID | Sev | Summary |
+|---|---|---|
+| R2-F1 | minor | "every run's own paired CI includes zero" — 3 of the 4 runs predate the paired CI and computed none (AUDIT + PR body) |
+| R2-F2 | minor | Baseline-sanity ranges (568.1–572.7, 4982–5007) exclude round 1's run (572.9, 5020.7) while claiming "no run discarded" |
+| R2-F2b | minor | The CI-narrowing claim is carried by 3 of 4 observations; ±0.41 vs ±0.43 is inside the half-width's own ~15% sampling noise |
+| R2-F3 | nit→minor | The hardcoded stdout note omits the −0.94 observation and asserts intervals that were never computed |
+| R2-F4 | nit | Non-assert panics inside the barriered region still deadlock |
+| R2-F5 | nit | Module doc still says "asserts this on every round" |
+
+**Operational point:** R2-F1, R2-F2 and R2-F3 are cheap to fix now, while the
+entry is on an unmerged branch and may be edited in place. Once merged,
+`AUDIT.md` is append-only and each becomes a permanent correction.

@@ -4442,3 +4442,148 @@ two merge commits — and confirmed the cancel-in-flight claim from real run dat
 `concurrency:` block alone. Its two minors are fixed: both rationales assumed
 the branch's commits survive into `main`, which squash-merging discards, and the
 trigger mechanism was stated in two places. Ledger: `REVIEW_PR12.md`.
+
+### BENCH-02 (2026-09-06): barrier the multi-thread A/B phase (GitHub #5)
+
+`benches/nativeloop_ab.rs`'s multi-thread phase let each thread run its own
+A-B-B-A schedule with nothing synchronising them. The aggregation comment
+asserted that "round i of thread 0 is concurrent with round i of every other
+thread", which holds only while both arms take equal wall time — an assumption
+of exactly the thing the harness exists to measure. Once the arms differ the
+threads drift out of phase, so each arm's rounds partly overlap the *other*
+arm's rounds on sibling threads and both arms see a blend of both arms' memory
+pressure.
+
+Done first, ahead of GitHub #1, deliberately: #1 is a sub-1% JIT optimisation
+whose verdict comes from this harness, and judging it with an instrument that
+has a known defect would make the result unfalsifiable.
+
+**The fix, and the trap in it.** A barrier before every round makes the comment
+true. But it risks a second-order bias that is the original defect one level
+down: a round's wall time becomes max-over-threads, so threads that finish early
+idle in the tail and late-round memory pressure is lower than early-round. That
+is harmless only while both arms idle by *similar* amounts — otherwise the bias
+is a function of the very difference being measured. So the harness measures it
+rather than assuming it away.
+
+**Findings from review, and what changed because of them.** Round 1 returned
+mergeable with nine minors. Four were errors of reasoning rather than wording,
+and this entry was rewritten around them rather than defended.
+
+- **The claimed "+0.13 pp point-estimate rise" was an artefact and is
+  withdrawn.** Barriered minus unbarriered was +0.13 pp in both original pairs —
+  but run 2 minus run 1 was +0.12 pp *in both arms*, so the "effect" was the size
+  of uncontrolled between-run drift, from four separate unpaired processes whose
+  order the entry never recorded. Two further observations settle it: the
+  reviewer's barriered run gave +7.28% and a fourth gave **+7.05%**, below both
+  unbarriered runs. Four barriered aggregates now span 7.05–7.46 and straddle
+  the two unbarriered ones (7.21, 7.33). **There is no detectable point-estimate
+  shift**, and the original claim was this project's recurring error — a figure
+  quoted with a sample that does not support it.
+- **"Four runs, no divergence assert" was not evidence about the barrier.** Each
+  thread's hashes are a pure function of its own blob and nonce counter, so the
+  checksums are *invariant* to barrier placement: that assert could never have
+  failed because of a scheduling change. The claim is struck. What does test the
+  harness is a deliberate break, recorded below.
+- **The assert's failure mode had regressed, and that is a real defect this
+  change introduced.** A panic between two `sync()` calls leaves every sibling
+  blocked in `Barrier::wait()` forever — no timeout, no poisoning — so a genuine
+  divergence would print its message and then hang the process. Fixed:
+  checksums are collected per pair and asserted in `assert_arms_agree` after
+  every thread has joined. **Break-tested**: injecting a one-bit divergence on
+  the *last* thread at the *last* pair — which is what distinguishes "checks
+  every thread and pair" from "checks the first" — panics naming both and the
+  process exits instead of hanging.
+- **The spread statistic reported only the difference, never the level.**
+  -0.40 pp is unassessable without knowing what it is a difference of. Levels
+  are now printed: measured at **body 5.64–8.03%, native 4.54–7.08%**. That
+  single-digit level is *why* the conclusion is safe — at the 30–40% plausible
+  with 11 threads on 8P+4E cores there would have been enough tail idle for a
+  small asymmetry to matter, and the aggregate should have been dropped instead.
+  The first version reached the right conclusion for a reason it never gave.
+
+Also from review: the statistic is no longer misnamed a "coefficient of
+variation" (range/mean is not sd/mean); it now computes a **paired CI across
+rounds** instead of throwing away that power and comparing two point estimates;
+the aggregation comment no longer claims the barrier gives a common *duration*
+when it gives a common *start* (summing rates still assumes equal windows —
+measured at <=0.03 pp, an approximation rather than an identity); and the
+per-thread diffs are no longer called "independent", since the barrier *ties*
+each thread's window to the slowest and so increases the coupling. The honest
+claim is exchangeability. They are now labelled **AUTHORITATIVE**, which the
+first version left unstated while quoting the aggregate as the headline.
+
+**Measured.** Four barriered runs and two unbarriered, 11 threads x 12 pairs x
+256 hashes; one barriered run is the reviewer's, independently executed.
+
+| | unbarriered (`main`) | barriered |
+|---|---|---|
+| aggregate point estimate | +7.21%, +7.33% | +7.34%, +7.46%, +7.28%, +7.05% |
+| aggregate CI half-width | ±0.43, ±0.64 | ±0.24, ±0.29, ±0.19, ±0.41 |
+| per-thread paired (authoritative) | — | +7.37%, +7.50%, +7.31%, +7.11% |
+| tail-idle asymmetry | — | -0.40, +0.60, -1.10, -0.94 pp |
+
+**What survives:** the barrier makes the concurrency claim true, and the
+aggregate CI narrows. Stated precisely, because the margin is not uniform: three
+of the four barriered half-widths (0.19, 0.24, 0.29) sit clearly below both
+unbarriered ones (0.43, 0.64), while the fourth (0.41) is inside the noise of
+the comparison — a half-width at n=24 carries roughly 15% of its own sampling
+error, about ±0.06, so 0.41 against 0.43 is not a resolvable ordering. The
+narrowing is real and reproduced; "every one below every one" was too strong. It
+also rests on the same unpaired between-process design this entry invokes to
+withdraw the +0.13 pp figure, which argues for treating it as directional rather
+than measured. **What does not survive:** any claim of a point-estimate shift.
+
+**The tail-idle check, stated at the strength the data supports.** Four
+observations: -0.40, +0.60, -1.10, -0.94 pp. The sign is mixed and the spread
+across runs is 1.7 pp. **Only the fourth run has a CI at all** — the paired
+interval is new in this change set, so runs 1-3 printed a bare point estimate.
+That run gave -0.94 pp with a 95% CI of [-2.58, +0.70], which includes zero. An
+earlier draft said "every run's own paired CI includes zero", attributing an
+interval to three runs that never computed one — the same defect class as the
++0.13 pp claim it was written to replace. The evidence is consistent with no
+systematic asymmetry and is *not* proof of its absence. What would settle it is a barriered and an unbarriered arm
+measured **inside one process**, which the harness cannot currently do; the
+between-process comparison used here is exactly the design weakness that
+produced the withdrawn +0.13 pp claim. Recorded as an open limitation.
+
+**The barrier does not answer the whole issue.** It makes the *concurrency*
+claim true. It does not make 24 rounds independent — the threads share one
+machine, and the barrier increases their coupling. So the issue's *second*
+option was implemented as well rather than instead: per-thread paired
+differences print on every run and are the number to quote.
+
+**Relation to JIT-01's recorded +6.8%-7.4%.** All eight point estimates here lie
+in **+7.05% to +7.50%**, overlapping that range and extending slightly above it.
+An earlier draft of this entry said the results were "still inside" it, which is
+false for two of them.
+
+**Baseline sanity**, per the standing rule that a tight CI is not evidence of a
+quiet machine: single-thread body JIT **568.1-572.9** H/s against the known-good
+~570; 11-thread body JIT **4982-5020.7** H/s against a recorded ~4756. No run
+discarded, none near a throttled figure. (Both ranges were first written as
+568.1-572.7 and 4982-5007, which excluded the reviewer's run at 572.9 / 5020.7
+while counting it among the four — a half-correction, widened for the newest run
+and never folded back over the one before it.)
+
+**Files changed:** `benches/nativeloop_ab.rs` only. No `src/` change, so the
+miner's behaviour is untouched — this changes how it is measured, not what it
+does.
+
+**Verification.** `cargo clippy --benches --release -- -D warnings` clean (two
+drafts tripped `type_complexity`; the second is why `Checks`/`PhaseOut` exist).
+The divergence path is break-tested as described above, which is the only test
+here that proves anything about the assert.
+
+**Review:** two rounds, `jit-reviewer`, both mergeable with no blockers and no
+majors. Round 1 corrected itself mid-review, withdrawing an over-severe rating
+and an algebraic bias model its own run contradicted. Round 2 reviewed round 1's
+fixes and found the pattern had held again — a withdrawn over-claim replaced by a
+new one (the paired-CI attribution above), a half-corrected baseline range, and a
+hardcoded list of past observations in the harness's own stdout that was stale on
+arrival, omitting the very run that produced it. It also **break-tested the
+deadlock fix harder than this entry had**: the original injection used thread 1,
+pair 0, which cannot distinguish "checks every thread and pair" from "checks the
+first"; round 2 injected on the *last* thread at the *last* pair and confirmed
+the panic names `thread 2 ... pair 1` and the process exits.
+Ledger: `REVIEW_PR13.md`.

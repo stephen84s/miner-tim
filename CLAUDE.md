@@ -38,17 +38,16 @@
 
     - **CI runs only where a PR exists** (the gating workflows, that is —
       `release.yml` is separate and fires on a `v*` tag). `ci.yml` and `jit.yml`
-      trigger on
-      `pull_request` and `workflow_dispatch` only — never on `push`. A push to a
-      branch that has an open PR runs the five checks against that PR's
-      `refs/pull/N/merge` — the merge of head into base, not the head commit
-      itself, though under `strict: true` the two coincide at merge time. A push
-      to a branch with **no** open PR runs nothing at all. This is
-      deliberate (CI-03): `main` requires branches to be up to date, so the PR's
-      head is the tree that lands and a post-merge pass would re-test an
-      identical tree. Two consequences to hold in mind: open the PR early if you
-      want the checks running, and never read "I pushed and nothing went red" as
-      evidence about a bare branch — run `make verify-jit` locally there.
+      trigger on `pull_request` and `workflow_dispatch` only — never on `push`.
+      A push to a branch that has an open PR runs the five checks against that
+      PR's `refs/pull/N/merge`, the merge of head into base rather than the head
+      commit itself. A push to a branch with **no** open PR runs nothing at all.
+      This is deliberate (CI-03): `main` requires branches to be up to date, so
+      that merge ref and the tree that lands are the same tree, and a post-merge
+      pass would only re-test an identical one. Two consequences to hold in
+      mind: open the PR early if you want the checks running, and never read
+      "I pushed and nothing went red" as evidence about a bare branch — run
+      `make verify-jit` locally there.
 
     - **Rebase on `main`, then merge on green.** A PR merges only when it is
       **rebased on the current `main`** and all five checks are green on that
@@ -108,11 +107,11 @@
     exists**, which is the single authority on the triggers; the short version
     is that **a branch with no open PR is checked by nothing at all.** That is
     the one window worth running `make verify-jit` in yourself, and it is
-    cheaper than a red PR, since the
-    `jit-macos` job takes **~14 minutes** end to end (mean 14.08 min over the 8
-    most recent successful runs, range 12.38–15.27; PR #8 measured 13.94 over
-    12). An earlier version of this sentence said "the macOS debug profile takes
-    ~8 minutes", which does not reproduce. `make verify-jit-linux`
+    cheaper than a red PR, since the `jit-macos` job takes **~14 minutes** end
+    to end (13.95 min mean over all 27 successful runs; earlier derivations at
+    n=8 and n=12 gave 14.08 and 13.94). An earlier version of this sentence said
+    "the macOS debug profile takes ~8 minutes", which does not reproduce.
+    `make verify-jit-linux`
     runs the same gate under native linux/arm64 and is worth running directly
     when `jit/memory.rs` or other platform-conditional code changes. Never cite
     the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.

@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 #
-# The aarch64 JIT gate — the tests CI structurally cannot run.
+# The aarch64 JIT gate — the tests the x86_64 jobs cannot run.
 #
-# GitLab's shared runners are x86_64 Linux, where `randomx::jit` is cfg'd out of
-# the build entirely (`src/randomx/mod.rs`). A fully green pipeline therefore
-# says *nothing* about emitted ARM64, which is the code that decides whether a
-# share is accepted. This script is that missing coverage, run by a human:
+# On x86_64 `randomx::jit` is cfg'd out of the build entirely
+# (`src/randomx/mod.rs`), so a green `lint`/`test`/`audit` run says *nothing*
+# about emitted ARM64, which is the code that decides whether a share is
+# accepted. This script is that missing coverage.
+#
+# It is no longer run only by a human. `.github/workflows/jit.yml` runs it on
+# every pull request — `jit-macos` (`macos-14`, the shipping platform) and
+# `jit-linux-arm` (`ubuntu-24.04-arm`) — and both are required checks on a
+# protected `main`, so a failure blocks the merge. The two make targets remain
+# as conveniences, and matter most on a branch with no open PR, which triggers
+# no workflow at all:
 #
 #   make verify-jit         — this script on the Apple Silicon host
 #   make verify-jit-linux   — this script inside a native linux/arm64 container
 #
-# Issue #2 tracks the gap; issue #9 tracks moving it into GitHub Actions, which
-# gives public repos free `macos-14` and `ubuntu-24.04-arm` runners.
+# GitHub #2 tracked the coverage gap and GitHub #6 the move to Actions that
+# closed it; both are now closed. (Those were GitLab #2 and #9 before the
+# migration renumbered them.)
 #
 # It is a HARD gate: any failing test, or a test count that does not match the
 # expectation below, exits non-zero.

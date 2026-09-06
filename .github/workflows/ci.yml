@@ -5,14 +5,16 @@
 # says *nothing* about emitted ARM64 — on x86_64 `randomx::jit` is cfg'd out of
 # the build entirely (`src/randomx/mod.rs`). The aarch64 JIT is gated by
 # `.github/workflows/jit.yml`, which is the reason this project moved to GitHub
-# at all (issue #9); it runs on separate runners so a slow full suite here does
+# at all (GitHub #6); it runs on separate runners so a slow full suite here does
 # not delay the JIT verdict, and vice versa.
 #
 # Ported from `.gitlab-ci.yml`'s `rust:lint`, `rust:audit` and `rust:test`.
-# NOT ported (deliberately, not an oversight): the `release` job that creates a
-# GitLab Release on a `v*` tag. The release flow — `RELEASING.md`, `make
-# release` and that job — is a separate checklist item in issue #9 and needs
-# decisions (and credentials) that are out of scope for the workflow migration.
+# NOT ported into *this* file (deliberately, not an oversight): the `release`
+# job that creates a GitLab Release on a `v*` tag. It now lives in
+# `.github/workflows/release.yml`, tag-triggered, and `RELEASING.md` describes
+# the `gh`-based flow around it. That was a separate checklist item in GitHub #6
+# and is done; what remains manual is building and attaching the macOS tarball,
+# which `release.yml`'s own header explains.
 
 name: CI
 

@@ -6,7 +6,8 @@
 # runner probe returned `no_matching_runner`; and the JIT is not merely aarch64
 # but aarch64 + Darwin — `MAP_JIT`, `pthread_jit_write_protect_np`,
 # `sys_icache_invalidate`). GitHub gives public repositories both runners for
-# free. Issues #2 and #9.
+# free. GitHub #2 and #6 (GitLab #2 and #9 before the migration renumbered
+# them); both now closed.
 #
 # Two jobs, both hard gates — no `continue-on-error`, no `|| true`, no summary
 # step that swallows a status. A gate that reports without blocking is the
@@ -24,7 +25,7 @@
 #
 # Kept separate from ci.yml on purpose: the two gates here are the slow pair
 # (13.94 and 11.65 min measured) and must not gate the interpreter verdict, nor
-# be gated by it (issue #9).
+# be gated by it (GitHub #6).
 
 name: JIT gate (aarch64)
 
@@ -216,7 +217,7 @@ jobs:
           restore-keys: |
             ${{ env.CACHE_EPOCH }}-target-jit-linux-arm-${{ env.RUST_VERSION }}-
 
-      # The script directly, NOT `make verify-jit-linux` (issue #9). That target
+      # The script directly, NOT `make verify-jit-linux` (GitHub #6). That target
       # wraps this same script in a pinned linux/arm64 container under colima and
       # spends most of its body proving the daemon is genuinely aarch64 rather
       # than qemu — which is exactly what this runner is, natively. The two

@@ -4815,9 +4815,10 @@ Two disclosures that make that stronger rather than weaker. First, the 0.29 pp i
 driven by `main` run 2 at +7.71 — the most thermally compromised run in the set,
 one this entry elsewhere declares thrown away unread; the spread among admissible
 `main` runs cannot be computed at all, since only one is admissible. Second, the
-confound has a direction, and it is worse than first written. `main` was the
-**hotter (slower) arm in all three rounds, on both the 1-thread and 11-thread
-legs** — not two of three, which was a figure inherited from the *retention*
+confound has a direction — **hotter runs produced *higher* paired diffs** — and
+it is worse than first written. `main` was the **hotter (slower) arm in all
+three rounds, on both the 1-thread and 11-thread legs**, so its apparent
+advantage is plausibly thermal rather than real — not two of three, which was a figure inherited from the *retention*
 split, a different quantity. And it is hot by construction rather than by
 chance: the schedule was branch, `main`, branch, `main`, branch, `main`, so
 **`main` always ran second**, after the branch had already warmed the machine.
@@ -4920,8 +4921,11 @@ body-JIT arm being an untouched control, which holds for any change confined to
 `emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
 shared emitter would move both arms and this method would not work.
 
-**Review:** four rounds, `jit-reviewer`, all mergeable, no blockers at any
-point — no code ships, so none was possible. Round 1 confirmed the
+**Review:** a sequence of cold `jit-reviewer` rounds, every one recorded in
+`REVIEW_PR15.md` — that ledger, not a count repeated here, is the authority on
+how many. (This sentence has now gone stale three times by naming a number.) All
+mergeable, no blockers at any point: no code ships, so none was possible. Round 1
+confirmed the
 revert is exact (`2a0afc3` +36/-6 in `compiler.rs`, `3e61471` +6/-36 — an inverse),
 that pre-registration holds by commit timestamps with author and committer dates
 matching so no rebase hid an earlier order, and that the load-bearing claim is

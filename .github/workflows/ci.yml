@@ -19,8 +19,8 @@
 # `release.yml` — it claims the CI job "only creates an empty entry ... if it
 # runs at all" and proposes a self-hosted `macos-arm64` runner. No `v*` tag has
 # been pushed since the migration, so `release.yml` has never actually run.
-# Those defects pre-date this comment and are tracked separately, deliberately
-# not fixed in the PR that found them.
+# Those defects pre-date this comment and are tracked in GitHub #11,
+# deliberately not fixed in the PR that found them.
 
 name: CI
 

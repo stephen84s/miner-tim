@@ -4334,7 +4334,7 @@ introduced or missed by round 1's corrections:
   "only creates an empty entry ... if it runs at all" and proposing a
   self-hosted `macos-arm64` runner. No `v*` tag has been pushed since the
   migration, so `release.yml` has never run. Those defects pre-date this PR and
-  are **not** fixed here; they are filed separately.
+  are **not** fixed here; filed as GitHub #11.
 - `DESIGN_JIT_NATIVE_LOOP.md` held the last live "CI can never run any of
   this ... a mandatory local gate". Marked a historical record with the false
   claim named, rather than rewritten — its value is the reasoning it captured.

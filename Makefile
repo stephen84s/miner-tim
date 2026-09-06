@@ -65,8 +65,8 @@ test:
 # No longer mandatory to run by hand: the same gate is a required status check on
 # every pull request, so a failure blocks the merge and CI evidence replaces the
 # pasted-in kind. It stays useful in one window CI does not cover — the workflows
-# trigger on pull requests only, so a branch with no open PR is checked by
-# nothing.
+# trigger on `pull_request` and `workflow_dispatch` only, so a branch with no
+# open PR is checked by nothing unless someone dispatches a run by hand.
 verify-jit:
 	@./scripts/verify-jit.sh
 

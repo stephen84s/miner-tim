@@ -4312,5 +4312,33 @@ rather than against the audit's account of it. Issue #6 closes with this PR —
 but only after review found box 4 unmet; on the first pass it would have been
 closed early.
 
-**Review:** one round, `ci-reviewer`, verdict mergeable with no blockers and no
-majors. Ledger: `REVIEW_PR10.md`.
+**Review:** two rounds, `ci-reviewer`, both mergeable with no blockers and no
+majors. Round 1's six findings are folded into the sections above. Round 2
+reviewed the *fixes* as new work and found six more, four of which are defects
+introduced or missed by round 1's corrections:
+
+- The stale-numbering class survived **inside the file the fix had just
+  rewritten** — `verify-jit.sh`'s two issue references were swapped against
+  GitHub numbering, and one would have resolved to the very issue this PR
+  closes. Six further `issue #7` references resolve to PR #7. The same fix
+  commit had also left three sibling task-board rows on the old numbering while
+  correcting their neighbour: two standards in one commit. A single convention
+  is now stated once at the top of the task board, because this class has been
+  found in three separate rounds.
+- **"~8 minutes" does not reproduce.** Re-measured rather than adopting the
+  reviewer's figure: `jit-macos` runs 14.08 min mean over the 8 most recent
+  successful runs (12.38–15.27), matching PR #8's 13.94 over 12.
+- **"The release checklist item is done" overstated it.** `release.yml` creates
+  the Release entry, but the macOS tarball is still attached by hand, and
+  `RELEASING.md` still contradicts `release.yml` outright — claiming the CI job
+  "only creates an empty entry ... if it runs at all" and proposing a
+  self-hosted `macos-arm64` runner. No `v*` tag has been pushed since the
+  migration, so `release.yml` has never run. Those defects pre-date this PR and
+  are **not** fixed here; they are filed separately.
+- `DESIGN_JIT_NATIVE_LOOP.md` held the last live "CI can never run any of
+  this ... a mandatory local gate". Marked a historical record with the false
+  claim named, rather than rewritten — its value is the reasoning it captured.
+
+Round 2 also re-ran the break test from scratch rather than inheriting it
+(`EXPECTED_PASSES` 92 → 91 → `GATE FAILED`, exit 1) and re-derived the issue
+mapping independently. Ledger: `REVIEW_PR10.md`.

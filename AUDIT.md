@@ -4587,3 +4587,157 @@ pair 0, which cannot distinguish "checks every thread and pair" from "checks the
 first"; round 2 injected on the *last* thread at the *last* pair and confirmed
 the panic names `thread 2 ... pair 1` and the process exits.
 Ledger: `REVIEW_PR13.md`.
+
+### REL-01 (2026-09-06): the release flow contradicted itself (GitHub #11)
+
+`RELEASING.md` and `.github/workflows/release.yml` both ran `gh release create`
+for the same tag. Following the documented steps produced a collision: step 4
+pushed the tag, which fired the workflow and created the Release; step 5 then
+told the operator to create the same release by hand. `RELEASING.md` also
+asserted the opposite of what the workflow does — "the CI `release` job does
+**not** create releases in practice (no macOS runner) ... if it runs at all,
+only creates an empty entry" — which is false on every clause: `release.yml`
+runs on `ubuntu-24.04`, fires on every `v[0-9]*` tag, and needs no macOS runner
+to *create* an entry, only to attach a macOS binary.
+
+**Why nobody hit it.** No `v*` tag has been pushed since the migration, and the
+three that exist (`v0.1.0`-`v0.1.2`) all predate `bcad873`, the commit that
+added `release.yml`. A tag-push run uses the workflow file as it exists at that
+ref, so there was nothing to fire. The defect was latent, waiting for the next
+release.
+
+**The fix is a decision, not a correction: who owns the Release entry.** Three
+options were considered.
+
+- *The human owns it* — drop creation from CI. Loses the automation and leaves
+  the workflow pointless.
+- *CI owns it, published* — the human then uploads assets. Removes the
+  collision, but opens a window in which a **published release with no assets**
+  is visible, which is worse than no release at all: someone can find it and
+  download nothing.
+- *CI owns it, as a draft* — chosen. The collision cannot arise, and a draft is
+  visible only to users with push access. Precisely what that hides: the **tag
+  is public the moment it is pushed**; the draft keeps only the empty release
+  out of view. An earlier draft of this entry called the gap "not a public
+  window", which overstates it.
+
+So `release.yml` now creates the release with `--draft`, and `RELEASING.md`'s
+steps became: wait for the draft, `gh release upload` the artifacts,
+`gh release edit --draft=false` to publish, then confirm the assets are actually
+listed. `upload`, not `create`, is the operative change.
+
+The workflow was also made **idempotent** — it checks `gh release view` first
+and exits 0 if the release already exists, so a re-run on the same tag reports
+success instead of failing on a duplicate. That matters because re-running the
+job is exactly what an operator reaches for when something went wrong
+mid-release. (Re-running from the Actions UI, not `workflow_dispatch` —
+`release.yml` has only the tag-push trigger. An earlier draft of this entry said
+otherwise.)
+
+**Two further errors in `RELEASING.md`, both from the migration.** Its opening
+paragraph carried a half-replaced GitLab-era sentence — "For now the shipping
+x86_64 Linux and cannot build (or cross-compile) the macOS arm64 binary" — which
+is not parseable. And the automation section asked for a **self-hosted** macOS
+runner tagged `macos-arm64` while naming `macos-14` in the same sentence; the
+self-hosted half is obsolete, since `macos-14` is free for public repositories.
+The section now says what actually blocks automation: a decision about
+reproducibility and about whether an unsigned CI-built binary should carry the
+project's name — a judgement call, not a missing runner.
+
+Step 2's verification list also gained `make verify-jit`, which it did not have.
+For a release that is the check that matters: it is the only one exercising
+emitted ARM64, and a JIT defect does not crash, it silently produces wrong
+hashes. Step 1 now says the version bump goes through a pull request, since
+`main` has been protected since PROC-01 and a direct push is rejected.
+
+**Files changed:** `RELEASING.md` (rewritten), `.github/workflows/release.yml`
+(draft + idempotence + header), `.github/workflows/ci.yml` and `Makefile`
+(comments that still described the pre-draft behaviour and pointed at the issue
+this entry closes), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
+
+**Verification, and its limit — stated plainly because it is the whole point of
+the issue.** The YAML parses and the workflow's shell is `set -euo pipefail`
+with an explicit existence check. **The flow has not been executed end to end.**
+Doing so requires pushing a `v*` tag to the public repository, which creates a
+tag and a draft release; that is an outward-facing action and was not taken
+without asking. Until it runs, this fix is verified by reading, not by
+observation — which is exactly the standard the original document failed, and
+saying so is the point. Nothing in CI covers the release procedure; it can only
+be checked by running it.
+
+The one claim GitHub #11 flagged as *inferred rather than tested* — that
+`gh release create` fails on an already-existing release — is now moot rather
+than resolved: the fixed flow never issues a second `create`, so the collision
+cannot occur whatever `gh` does. The inference was never relied upon.
+
+**Round 1 review** (`ci-reviewer`): mergeable, no blockers, no majors, thirteen
+minors and nits. It verified rather than accepted the design's load-bearing
+claim — GitHub's REST documentation states only users with push access receive
+listings for draft releases — and confirmed from `gh`'s own source
+(`pkg/cmd/release/shared/fetch.go`) that `view`, `upload` and `edit` all resolve
+a draft by tag, which is what steps 5-7 depend on. It also extracted the
+workflow's shell and ran it against a stub `gh`: exists -> 0, absent + create OK
+-> 0, absent + create fails -> **1**, so the job can still go red.
+
+Two of its findings were defects this change introduced:
+
+- **The version-bump step said "through a pull request" and never said to merge
+  it and return to `main`.** `make release` tags whatever `HEAD` is, and this
+  repo squash-merges, so following the steps literally from the PR branch would
+  tag a commit that never lands on `main`. The old wording implied a local
+  commit on `main`; requiring a PR opened the gap. Now explicit, with a
+  `git log -1` check, and the `Makefile` comment carries the same warning.
+- **`ci.yml`'s comment still described, in the present tense, the defects this
+  change deletes** — quoting the removed sentences and calling them "tracked in
+  GitHub #11, deliberately not fixed", in the very change that closes #11. The
+  `Makefile` likewise still said CI creates "the GitHub Release" rather than a
+  draft. This is the stale-cross-reference class the task board's convention
+  note was written for, found for the fourth consecutive review round.
+
+Four more were real operator hazards in the new steps: the fallback
+`gh release create` had no `--notes`, so on a TTY it enters `gh`'s interactive
+flow where `--draft` sets only the *default* of the Submit prompt — one wrong
+keystroke publishes an empty release, precisely what this design prevents; it
+also wanted `--verify-tag`; `gh release upload` wanted `--clobber` so a retry
+after a partial upload does not fail; and step 7 pointed at a `RELEASE_NOTES.md`
+that does not exist in this repository. All fixed. Ledger: `REVIEW_PR14.md`.
+
+**Round 2 review** (`ci-reviewer`, cold): mergeable, no blockers, no majors,
+seven findings — **five of them defects in round 1's fixes**, which is the
+pattern this repo keeps demonstrating and the reason a second round is run at
+all. It verified `gh`'s behaviour independently from `cli/cli` v2.83.2 source
+(`create.go`) rather than inheriting round 1's assertion: `--draft` does set only
+the Submit prompt's default, and `--notes` suppresses the prompt entirely, so the
+hazard round 1 described is real and the fix is the right one.
+
+- **"Not a public window" was wrong, and the round-1 fix corrected it in one
+  place of four.** The tag is public the instant it is pushed; only the empty
+  release is hidden. The correct statement now appears in `RELEASING.md`,
+  `release.yml`'s header and this entry, rather than in the step where it was
+  first noticed while the summary 80 lines above still contradicted it.
+- **Step 5 asserted a duration and denied having measured it, ten lines apart**
+  — "it takes well under a minute" against "how long this takes has not been
+  measured", both added in the same fix. The assertion is gone.
+- **Step 1's new check tested the wrong invariant.** `git log -1 --oneline` was
+  supposed to confirm the version bump had landed, but the repo squash-merges,
+  so the subject is the PR title, and any later merge displaces it. What matters
+  is the line `make release` actually reads: `grep '^version' Cargo.toml`.
+- **`ci.yml` still pointed at GitHub #6 in the present tense** — "that checklist
+  item is *mostly* done, not done" — when #6 closed earlier the same day and its
+  release-flow item is exactly what this change completes. The reason it gave
+  for "not done" (the tarball still being manual) belongs to a different scope
+  that #6 never asked for.
+- **An abandoned draft is now a silent failure mode**, and nothing said so. The
+  idempotence that makes a re-run safe also means a draft from a failed attempt
+  is never cleaned up and never complained about; a later re-run will not
+  replace it. `RELEASING.md` now has a section on deleting one, and
+  `release.yml`'s header names the trade.
+
+Also corrected: `--verify-tag`'s explanation, which gave typo protection as the
+reason when the likelier trigger is step 4 never having pushed the tag, and gave
+no recovery; and an ungrammatical splice this entry's own previous correction
+left behind ("because a manual re-running the job is exactly what...").
+
+Round 2 also confirmed the residual-risk statement still holds: `gh release
+list` and `gh run list --workflow=release.yml` are both empty, so the flow
+remains unrun and nothing new is claimed as tested. Ledger: `REVIEW_PR14.md`.

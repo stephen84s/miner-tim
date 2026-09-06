@@ -4388,16 +4388,24 @@ worktree rule's failure mode in a different costume. The user said "master"; thi
 repository's default branch is `main` and the rule is recorded with the real
 name.
 
-**(3) is recorded with its true unit corrected, not silently.** Every push to a
-PR head starts a full pass — five jobs, ~30 runner-minutes, ~15 minutes of
+**(3) is about the push, not the commits — clarified by the user after the
+first draft got it wrong.** The rule was first written as "squash or amend
+locally and push once", which reads as consolidating *commits*. The user's
+clarification: *"Just multiple logical commits but push only when work is
+done."* Separate logical commits are wanted — they keep the history reviewable
+and let one mistake be reverted alone; a single push carries any number of them,
+so squashing buys nothing. What is batched is the push.
+
+The cost is recorded with its true unit rather than silently. Every push to a PR
+head starts a full pass — five jobs, ~30 runner-minutes, ~15 minutes of
 wall-clock, `jit-macos` being the long pole (figures from CI-03, re-derived and
-confirmed in PR #8's round 3). But this repository is public, so
-`billable.total_ms` is **0**: there are no CI *minutes* to save in the billing
-sense. What is saved is queue time, runner capacity and a reviewer's time
-re-reading a head that keeps moving. The instruction is worth following for
-those reasons; the entry says so rather than repeating a cost that does not
-exist. One guard added: do not let commit-consolidation become a reason to skip
-a verification step in order to avoid a run.
+confirmed in PR #8's round 3) — and cancels any run still in flight
+(`concurrency: jit-${{ github.ref }}` with `cancel-in-progress` on
+`pull_request`, observed during PR #10's review). But this repository is public,
+so `billable.total_ms` is **0**: there are no CI *minutes* to save in the
+billing sense. What is saved is queue time, runner capacity and a reviewer's
+attention. One guard added: never let this become a reason to skip a
+verification step in order to avoid a run.
 
 **Files changed:** `CLAUDE.md` (three new bullets in step 0, task board),
 `AUDIT.md` (this entry).

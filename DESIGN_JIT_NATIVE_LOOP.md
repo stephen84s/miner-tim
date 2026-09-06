@@ -1,6 +1,12 @@
 # Design: move the RandomX iteration loop into the JIT
 
-**Status:** proposed — implementation staged behind this document
+**Status:** proposed — implementation staged behind this document.
+**Historical record, not current fact.** Kept as written for the reasoning it
+carries; several of its claims about CI have since been overtaken. In
+particular §"CI can never run any of this" was true of GitLab's x86_64 runners
+and is **false now**: `.github/workflows/jit.yml` runs the differential tests on
+`macos-14` and `ubuntu-24.04-arm` on every pull request, as required checks. See
+`CLAUDE.md`'s Platform coverage table for what CI actually proves today.
 **Branch:** `feat/jit-native-loop`
 **Motivation:** AUDIT.md 2026-08-29 (profiling findings)
 

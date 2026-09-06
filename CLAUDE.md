@@ -54,15 +54,20 @@
 4.  **Status Update:** Update the `Current Task` table at the top of this file (`CLAUDE.md`) to reflect the new state. Do not leave tasks "Active" if they are completed.
 5.  **Review:** Before replying "Done", verify `make check` and `make test` passed.
 6.  **JIT gate:** Any change touching `src/randomx/jit/`, or `vm.rs`'s
-    native-loop path, must pass **`make verify-jit`**. CI enforces this on every
-    **pull request** (`jit-macos` on `macos-14`, `jit-linux-arm` on
-    `ubuntu-24.04-arm`), and both are required checks on a protected `main`, so
-    a failure blocks the merge rather than merely reporting. Note what that does
-    *not* cover: since CI-03 the workflows trigger on `pull_request` and
-    `workflow_dispatch` only, so **a push to a branch with no open PR is checked
-    by nothing at all.** Run the gate locally while a change is still on a bare
-    branch — that is the window CI does not see. It is also cheaper than a red
-    PR: the macOS debug profile takes ~8 minutes in CI. `make verify-jit-linux`
+    native-loop path, must **pass the JIT gate** — but running it by hand is no
+    longer your duty, and pasting its output into a PR is no longer evidence
+    anyone needs. CI enforces it on every **pull request** (`jit-macos` on
+    `macos-14`, `jit-linux-arm` on `ubuntu-24.04-arm`), both required checks on
+    a protected `main`, so a failure blocks the merge rather than merely
+    reporting. CI evidence has replaced the self-reported kind, which is what
+    issue #6 asked for; the demotion is real and `make verify-jit` is a
+    convenience now, not a checklist item.
+
+    Note what CI does *not* cover: since CI-03 the workflows trigger on
+    `pull_request` and `workflow_dispatch` only, so **a push to a branch with no
+    open PR is checked by nothing at all.** That is the one window worth running
+    `make verify-jit` in yourself — and it is cheaper than a red PR, since the
+    macOS debug profile takes ~8 minutes in CI. `make verify-jit-linux`
     runs the same gate under native linux/arm64 and is worth running directly
     when `jit/memory.rs` or other platform-conditional code changes. Never cite
     the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.

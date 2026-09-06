@@ -379,3 +379,149 @@ and the workflow diff is provably comments-only. R2-F5 should be fixed before
 merge (it is one line in each place); R2-F1 and R2-F3 are the ones worth folding
 in rather than deferring, because both live inside the scope of issue #6 and
 close with it.
+
+## Round 3
+
+Fresh reviewer, spawned cold. Range reviewed as new work: `a8f9baa..HEAD`
+(`f48dbb5`, `608b73d`, `8c0e6d0`, `0b4236e`, `fdf66cd`), the five commits that
+answer round 2. Not a re-review of the PR.
+
+### Coverage ledger
+
+| # | Item | Result |
+|---|---|---|
+| 1 | Can the gate still go red? | **re-verified** — stub run, below |
+| 2 | Commands/targets exist and mean what is claimed | verified — `bash -n` clean; non-comment lines of `verify-jit.sh`/`Makefile` untouched in this range |
+| 3 | Required-check names match exactly | verified — the 5 live contexts are string-exact against the job names all three workflows parse to |
+| 4 | Path filters / conditional execution | verified — workflow diff vs merge-base `9102bf3` is comments-only in all three files |
+| 5 | Live config vs description | verified via `gh api`: `strict: true`, `enforce_admins: true`, 5 contexts |
+| 6 | Platform assumptions | n/a — no `.cargo/config.toml`, runner or toolchain change |
+| 7 | Resource limits | n/a — `RUST_TEST_THREADS=3` and the RSS figures untouched; only their issue label changed |
+| 8 | Coverage given up | none |
+
+### Break test (item 1, not inherited)
+
+`cargo`/`rustc` stubbed on `PATH` to emit `test result: ok. 91 passed`, script
+run unmodified from the branch tree:
+
+```
+verify-jit: FAIL — debug profile (debug_assert! live) ran '91' tests, expected 92.
+verify-jit: FAIL — release profile (shipping profile) ran '91' tests, expected 92.
+verify-jit: GATE FAILED on Darwin arm64
+EXIT=1
+```
+
+The count assertion still fires in both profiles and the script exits 1. Stubs
+lived outside the repo; working tree never touched.
+
+### Findings
+
+**R3-F1 (minor) — `f48dbb5` left two of the exact instances round 2 enumerated
+in R2-F2, and the new convention note promotes them from stale to
+authoritative.**
+
+- `CLAUDE.md:103` (PLAT-02): "so the native loop's `debug_assert!` guards finally
+  execute (issue #6)". That is GitLab #6 = GitHub **#4**. Under the note's rule a
+  bare `#6` is GitHub #6 — the migration issue *this PR closes*, which is the
+  same "resolves to the issue this PR closes" shape R2-F1 flagged in
+  `verify-jit.sh:129` and which was fixed there. The identical claim is numbered
+  `#4` at `CLAUDE.md:166`, so the file now contradicts itself in two places.
+- `CLAUDE.md:104` (MEM-01): `"already over #9's budget"` — GitHub #9 is a PR.
+  Its sibling in the same table cell was corrected to `Unblocks GitLab #9
+  (GitHub #6)`. Two standards inside one row: precisely what R2-F2 said the
+  previous commit did.
+
+**R3-F2 (minor) — the note claims a scope the commit does not have.** "A bare
+`#N` means the **GitHub** issue" reads as a repo-wide rule. Still bare and still
+GitLab-numbered: `CLAUDE.md:100` JIT-01 `"filed as issues #3-#8"` (on GitHub #7
+and #8 are PRs); `CLAUDE.md:101` VIS-01 `"(issues #4 + #3)"`, `"Closes #3 as a
+side effect"`, `"#3 and #4 closed"` — four references to exactly the GitLab #3
+and #4 the note names as never imported, now resolving to two *open* GitHub
+issues. Beyond the task board there are ~26 more bare `issue #3/#4/#7` in
+`src/miner.rs`, `src/randomx/vm.rs`, `src/bin/minertim.rs`,
+`src/randomx/tests.rs`, `src/randomx/jit/memory.rs` and one in
+`.claude/agents/jit-reviewer.md`. Renumbering source comments may not be worth
+the churn — but then the note should say which files the convention has been
+applied to rather than assert it globally.
+
+**R3-F3 (minor) — "Six further `issue #7` references" is five, and the commit
+message's own list names four.** Counted from the diff: `ci.yml` ×2, `jit.yml`
+×1, `verify-jit.sh` ×1, `CLAUDE.md` MEM-01 ×1 = **five** conversions; the sixth
+`GitLab #7` in the diff is newly *added* to CI-02, not a converted reference.
+`f48dbb5`'s message says "Six more" while parenthesising only "(verify-jit.sh,
+ci.yml x2, jit.yml)" = four. `0b4236e` carries "Six" into `AUDIT.md`. A miscount
+inside the entry whose subject is miscounted references.
+
+**R3-F4 (minor) — the design doc's most visible false line is left standing
+directly above the new note.** `DESIGN_JIT_NATIVE_LOOP.md:3` still reads
+"**Status:** proposed — implementation staged behind this document." The native
+loop was merged as MR !1 (`365d288`) and is the default. The note corrects a
+§6a bullet but not the Status line it is appended to. (Nit: the six new lines
+are spliced between `Status:` and `Branch:`, breaking a four-line metadata
+block.) Marking rather than rewriting was otherwise the right call, and the CI
+correction itself is accurate: `jit.yml` does run the differential tests on
+`macos-14` and `ubuntu-24.04-arm` on `pull_request`, and both job names are
+string-exact required contexts.
+
+**R3-F5 (minor) — DOC-02 and `AUDIT.md` now say "two rounds … both mergeable",
+which is stale the moment this section lands.** Same shape as R2-F5. Record
+round 3 in both before merging.
+
+**R3-F6 (nit) — `ci.yml`'s quotation of `RELEASING.md` reorders it.**
+`RELEASING.md` says "the CI job, if it runs at all, only creates an empty
+entry"; `ci.yml:16-18` renders it `"only creates an empty entry ... if it runs
+at all"`. An ellipsis marks omission, not reordering.
+
+**R3-F7 (nit) — "No `v*` tag has been pushed since the migration" is true as
+worded but load-bearing.** Three tags (`v0.1.0`–`v0.1.2`) *do* exist on
+`origin`, pushed by the migration itself, and did not trigger `release.yml`
+(`gh run list --workflow=release.yml` is empty, `gh release list` is empty).
+Both #11 and `ci.yml` rest "the next release is when this bites" on that;
+saying the tags pre-date `release.yml` reaching the default branch would make it
+airtight.
+
+### Confirmed correct
+
+- **`608b73d`'s measurement reproduces exactly.** Re-derived from
+  `actions/runs/<id>/jobs`. The 8 most recent successful `jit-macos` jobs as of
+  the commit's timestamp (2026-09-06T01:49Z): 12.38, 15.27, 13.33, 14.75, 14.35,
+  14.12, 14.90, 13.57 min → **mean 14.083**, range **12.38–15.27**. Sample is
+  honestly described (named cut, mean called a mean, range given). PR #8's
+  "13.94 over 12" is confirmed at `REVIEW_PR8.md:729`. The next run
+  (`34004966560`, 14.68 min) started two minutes after the commit; including it
+  gives 14.14, so the figure is not cut-sensitive. Substituting a whole-job
+  figure for the old debug-profile figure is stated plainly in the text.
+- **The GitLab→GitHub mapping in `f48dbb5` is right** where it was applied,
+  re-derived independently from `REVIEW_MR1.md`'s table against `gh issue list
+  --state all`: GitLab 1→1, 2→2, 5→3, 6→4, 8→5, 9→6; GitLab 3, 4 and 7 closed
+  before the migration and never imported. So the note's central claim — that
+  GitLab #3, #4 and #7 have no GitHub number — is **correct**. Every reference
+  the commit rewrote (`verify-jit.sh` 50/129/142, `ci.yml` 84/245, `jit.yml` 91,
+  PLAT-02, MEM-01 heading, CI-02) is now right.
+- **Issue #11 is accurate.** All four quotations are verbatim against
+  `RELEASING.md`; `release.yml` is `ubuntu-24.04`, `push: tags: v[0-9]*`, calls
+  `gh release create`; the step-4/step-5 collision is explicitly labelled an
+  inference not executed; no other claim is asserted without support.
+  `ci.yml`'s comment matches it (modulo R3-F6/R3-F7).
+- **`0b4236e`'s account of round 2** matches `REVIEW_PR10.md`'s Round 2
+  everywhere except R3-F3's count: "six more [findings], four of which are
+  defects introduced or missed by round 1's corrections" is right (R2-F1–F4 vs
+  F5/F6), and the break-test description matches what round 2 recorded.
+
+### What I could not verify
+
+- I did not run the real 92-test gate on this tree (~12 min ×2 profiles); the
+  gate's *logic* was exercised with a stub, and no executable line of
+  `verify-jit.sh` changed in this range. CI's `jit-macos`/`jit-linux-arm` are
+  green on the head.
+- Whether `gh release create` fails on a tag `release.yml` already released —
+  still inferred, as #11 itself says.
+
+### Verdict
+
+**MERGEABLE — no blockers, no majors.** Five minors and two nits, none touching
+a gate: the count assertion still fires, the five required contexts are
+string-exact, and the whole PR's workflow diff is provably comments-only.
+R3-F1 is the one worth fixing before merge — it is the third recurrence of the
+stale-numbering class, this time under a convention note that lends the wrong
+numbers authority. R3-F5 is one line in each of two files.

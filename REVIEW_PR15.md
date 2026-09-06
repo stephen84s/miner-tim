@@ -373,3 +373,169 @@ It lists `compiler.rs`, `PERF1_CRITERION.md`, `PERF1_RUNS.log`, `CLAUDE.md`,
 
 **Actionable this round: M2 (must), m5/m6/m7/n2 and the "under it" referent
 (should).**
+
+---
+
+# Round 3 (fresh reviewer) — scope: the corrections in `e5ddfaa` only
+
+`git diff 73b3853..HEAD` = `AUDIT.md` (+79/-26), `CLAUDE.md` (1 row), a
+provenance header on `PERF1_RUNS.log`. No source, no bench, no script.
+
+## Coverage
+
+| item | verdict |
+|---|---|
+| New two-column table true against log + criterion as written | **verified** — all six figures reproduce; see below |
+| Did the correction over-correct into "criterion 2 passed"? | **no** — trap avoided explicitly (C1) |
+| Revert justification follows from the criterion as written | **verified** (C2) |
+| Withdrawal's new self-contained footing (0.29 vs 0.31 pp) | **verified**, one disclosure gap — m10 |
+| BENCH-02 caveat accurate against BENCH-02's own entry | **verified** (C3) |
+| Round 2's four smaller findings landed | m5/m6/m7/n2 **all landed**; m7's fix carries a new error — m9 |
+| Round 2's major closed everywhere it was named | **NO — M3** |
+| `CLAUDE.md` row vs `AUDIT.md`, data, numbering convention | numbering **clean**; one inconsistency — m8 |
+| JIT semantics / bounds / native-loop preconditions / ABI / FPCR / diff tests | **vacuous** — `git diff main...HEAD --stat` is 5 files, 0 in `src/` |
+| `make verify-jit` | **not run, not required** — `src/`, `scripts/`, `benches/` byte-identical to `main` (confirmed); the gate can only reproduce `main`'s result. Round 1's note stands: "92/92 on the modified code" is permanently unverifiable, the code is gone and the output was not captured |
+
+Arithmetic re-derived independently from `PERF1_RUNS.log`: gate-retained set =
+branch r1, branch r2, `main` r1 (r2-main 4495.8, r3-branch 4714.8, r3-main
+4649.1 all < 4900). Row 1 all-six +0.25/-0.02/+0.07; row 2 min-branch 6.12 vs
+max-main 6.15 (all six) and 6.12 vs 6.05 (retained); row 3 branch 7.19-7.24 vs
+main 7.42-7.71 (all six) and 7.19/7.24 vs 7.42 (retained). Every figure checks.
+The known-good percentages also check: 4714.8/4495.8/4649.1 are 0.9/5.5/2.2%
+under 4756 and 3.8/8.2/5.1% under 4900, exactly as written.
+
+## C1 — the specific over-correction round 2 warned about did NOT happen
+
+Stated as a finding, not as absence of one. The entry writes "would read 6.12 >
+6.05 at n=2 vs n=1" and immediately: "**That is not a claim the change
+passed.** ... a 'pass' drawn from n=2 against n=1 is noise with a verdict
+attached." `CLAUDE.md` follows "would even read as passing" with "The revert
+stands regardless." Nowhere does either document drift toward implying the
+change might have worked; "bought nothing" survives in both. "Unevaluable" is
+the right word for criteria 1 and 2 on the admissible set: criterion 1's "at
+least **three** of each" is unmet at 2-vs-1, and criterion 2 reads the same
+phase-1 run set.
+
+## C2 — the revert justification is the text, not a post-hoc reading
+
+`PERF1_CRITERION.md`'s heading is literally "**Keep only if ALL of these
+hold**". "A change that cannot be shown to clear the bar is not kept" is that
+sentence restated. The outcome is also over-determined: criterion 3 = FAIL on
+the retained set triggers "**Revert if any fails**" directly, and criterion 3 =
+unevaluable falls back on "keep only if ALL". Both paths reach revert.
+
+## C3 — the withdrawal's new footing verified
+
+`main`'s three phase-2 per-thread means are 7.42/7.71/7.45 → span 0.29 pp;
+arm means 7.2167 vs 7.5267 → 0.31 pp separation. Both as written. The BENCH-02
+caveat is accurate against BENCH-02's own entry: +7.37/+7.50/+7.31/+7.11
+(`AUDIT.md:4523`), 0.39 pp; "the harness changing across them" is supported by
+"the paired interval is new in this change set, so runs 1-3 printed a bare
+point estimate" (`:4539`); "one was a reviewer's separate execution" by
+"one barriered run is the reviewer's, independently executed" (`:4517`).
+Demoting it from support to corroboration is the right call and closes m6.
+
+## M3 (major, ACTIONABLE) — round 2's major is closed in two of the three documents it named
+
+Round 2: "Present in **three** documents: `AUDIT.md` ..., `CLAUDE.md:162` ...,
+and the PR body (same two sentences). ... fix all three." Two were fixed.
+
+- **`AUDIT.md:4807`** — a bare, unqualified `All three fail.` survives five
+  lines below the paragraph that withdraws it, and directly contradicts the new
+  second column. In isolation this is an editing miss (it is refuted in situ).
+- **The PR body** — untouched, and it carries the entire superseded framing
+  *coherently and with no withdrawal anywhere*: the three-FAIL table, "0.39 pp
+  ... larger than the 0.25 pp 'signal'" (m5), "same harness, same statistic,
+  same config" (m6), "criterion 1's 'three of each' is **unmet for phase 2**"
+  and "Phase 1's six all passed (≥ 560 H/s) and are the **decisive evidence**"
+  (M2 verbatim). Its review section says "Round 1 review" only.
+
+For a PR whose sole deliverable is the record, the public artifact presenting
+every withdrawn claim as the verdict is the finding. Both loci, one push.
+
+## m8 (minor) — "unevaluable" is over-generalised in the prose, and `CLAUDE.md` inherits it
+
+`AUDIT.md:4844` says "Neither phase has enough admissible data to decide
+anything", and `CLAUDE.md` says "on the admissible three runs the criteria are
+**unevaluable**" (plural). Both contradict the table five lines up, which marks
+criterion 3 **FAIL** on the same set.
+
+The **table is the defensible one**. "At least three of each" sits textually
+inside criterion 1, a phase-1 rule; criterion 2 reads that same set; criterion
+3 is phase 2 and carries no count clause at all — only "the branch's range must
+not sit entirely below `main`'s", which {7.19, 7.24} vs {7.42} mechanically
+fails. So the fix is to narrow the two prose sentences ("criteria 1 and 2 are
+unevaluable; criterion 3 still fails"), not to touch the table. **The verdict is
+not at risk either way** (see C2) — this is a sentence, not a re-litigation.
+
+## m9 (minor) — the new provenance header states the host wrong
+
+`PERF1_RUNS.log`: "Apple M2 Max, macOS (Darwin arm64), **12 performance
+cores**." `sysctl` on this host: `hw.perflevel0.logicalcpu` = **8**,
+`hw.perflevel1.logicalcpu` = 4, `hw.logicalcpu` = 12. This repo's own words at
+`AUDIT.md:679`: "12 threads (~4,600) beat **8 P-cores** (~3,300)".
+
+Not cosmetic here: 11 threads on 8 P-cores means three threads run on E-cores,
+which bears directly on why phase 2 is the phase that cannot resolve the effect.
+`AUDIT.md:3265` carries the identical error pre-existing ("M2 Max (12 logical
+P-cores)"), so this is a phrasing habit rather than one typo.
+
+## m10 (minor) — the 0.29 pp noise figure comes from runs the same entry discards, undisclosed
+
+Not a double standard — `PERF1_CRITERION.md` itself measures spread across
+ungated runs ("~0.4 pp (5.89-6.30 across five runs)"), so the convention is
+established. The gap is disclosure: 0.29 pp is driven by `main` r2 at **7.71**,
+the most compromised run in the set (5.5% under known-good), and the entry never
+says its noise estimate is drawn from runs it elsewhere declares "thrown away
+without being read as a result". Restricted to admissible runs, `main` is n=1
+and no spread is measurable at all.
+
+Also omitted: the **direction** of the confound. Hotter runs produced higher
+paired diffs (`main`'s hottest run is its highest at 7.71), and `main` was the
+hot arm in 2 of 3 rounds — so the apparent `main` advantage is plausibly
+thermal. One sentence closes both, and it makes the withdrawal *stronger*.
+
+## m11 (minor) — "**Review:** one round" contradicts the same entry
+
+`AUDIT.md:4892` says "one round, `jit-reviewer`", while `:4836` in the same
+entry says "**Round 2** caught that". Introduced by this commit.
+
+## Checked and clean
+
+- Round 2's m5 closed: the withdrawal now quotes the derivable 0.31 pp mean
+  separation; no "0.25 pp" survives outside table row 1, where it is the correct
+  phase-1 figure.
+- Round 2's m1/"under it" referent closed and re-derived above.
+- n2 closed: "Files changed" now lists `REVIEW_PR15.md`; the list matches
+  `git diff main...HEAD --stat` exactly (5 files).
+- m7's substance closed, and the header does the hard part well: it discloses
+  that the `##### round N / arm #####` separators come from an **uncommitted**
+  driver script, that arm identity rests on that script's `cwd`, and cites the
+  retracted +9.01% claim as the reason to say so. That is the right handling for
+  an artifact that cannot be reproduced from itself, and it is the strongest
+  single improvement in this commit.
+- Commit refs verified: `2a0afc3`/`bb3a469` have identical `compiler.rs` (so the
+  header's "the modified `compiler.rs` of `2a0afc3`" is exact for the whole
+  measurement window), `3e61471`'s `compiler.rs` == `main`'s, and `main` is at
+  `c337229`. Author and committer dates 20:12 / 20:17 / 20:36 on 2026-09-06 —
+  the six runs fit that window at ~2 min/run.
+- Issue-numbering convention: `CLAUDE.md`'s bare `#1` = GitHub issue #1, correct
+  per the note at `CLAUDE.md:121` (GitLab 1→1).
+- No superseded claim survives in `PERF1_CRITERION.md` (unmodified, correctly —
+  it is the pre-registration) or `PERF1_RUNS.log`.
+
+## Not verified — stated, not implied
+
+- I did not re-run the benchmark; all six runs are taken as reported, checked
+  only for internal consistency.
+- The driver script is not committed, so the arm-to-worktree mapping cannot be
+  verified from the repo. The header says so, which is the correct disclosure.
+
+## Verdict
+
+**MERGEABLE.** One major (M3), four minors (m8-m11). **ACTIONABLE: yes** — the
+PR body must be updated and `AUDIT.md:4807` deleted before merge; m8 is a
+two-sentence narrowing. Nothing here changes the outcome: the revert is
+correctly justified, the arithmetic is right, and the entry did not over-correct
+into claiming the change might have worked. Apart from the PR body, the record
+is now substantially accurate.

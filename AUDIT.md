@@ -4320,7 +4320,7 @@ introduced or missed by round 1's corrections:
 - The stale-numbering class survived **inside the file the fix had just
   rewritten** — `verify-jit.sh`'s two issue references were swapped against
   GitHub numbering, and one would have resolved to the very issue this PR
-  closes. Six further `issue #7` references resolve to PR #7. The same fix
+  closes. Five further `issue #7` references resolve to PR #7. The same fix
   commit had also left three sibling task-board rows on the old numbering while
   correcting their neighbour: two standards in one commit. A single convention
   is now stated once at the top of the task board, because this class has been

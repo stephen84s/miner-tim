@@ -4236,16 +4236,42 @@ x86_64 row gained the same qualifier, which it had never carried.
 **The retirement.** Issue #6 required that once both `jit-*` jobs were green in
 CI, the "mandatory before merge" language and the paste-the-output-into-the-MR
 requirement be removed, with the make targets demoted from mandatory to useful
-rather than deleted. Three leftovers were still in place:
+rather than deleted. The first pass found three leftovers; **review found that
+count wrong, and the enumeration is corrected here rather than defended:**
 
 - `Makefile` help text — "mandatory before any MR touching src/randomx/jit/".
 - `Makefile` gate comment — the paste-into-MR sentence, plus "Issue #9 tracks
-  replacing this with GitHub Actions", which is stale twice over: it is old
-  GitLab numbering (GitHub #6), and the replacement has happened. Deleted rather
-  than renumbered.
+  replacing this with GitHub Actions", stale twice over: old GitLab numbering,
+  and the replacement has happened.
 - `scripts/verify-jit.sh` — a final `echo` instructing the operator to paste the
   PASS lines into the MR description, citing "issue #2 mitigation 3". The `GATE
   PASSED` line above it is retained; only the instruction is gone.
+- **`scripts/verify-jit.sh`'s header** (review F1) — missed on the first pass,
+  in the very file being edited. It still called itself "the tests CI
+  structurally cannot run ... run by a human" and carried the *identical* stale
+  sentence deleted from the `Makefile`. Rewritten to say what is true: the
+  x86_64 jobs cannot run these tests, `jit.yml` does, on every PR, as required
+  checks.
+- **Five more live `#9` references** (review F1) — `ci.yml` ×2, `jit.yml` ×3,
+  all old GitLab numbering. So the first pass's "deleted rather than
+  renumbered" was true of the `Makefile` and **false repo-wide**; that claim is
+  withdrawn. All six now point at GitHub #6, with the GitLab origin noted where
+  the sentence is historical. `ci.yml`'s further claim that the release flow "is
+  a separate checklist item in issue #9 and needs decisions" was stale in
+  substance too — `release.yml` exists and `RELEASING.md` is `gh`-based — and
+  now says what is genuinely still manual.
+- **`CLAUDE.md` step 6 itself** (review F2) — the first pass left it opening
+  "must pass **`make verify-jit`**" and, worse, *strengthened* the local-run
+  instruction, which is the opposite of the demotion issue #6 box 4 asks for.
+  The requirement is now that the change passes the gate, which CI proves on the
+  PR; running it by hand is a convenience. Without this, `Closes #6` would have
+  closed an issue with an unmet box.
+- **Three stale issue cross-references in `CLAUDE.md`** (review F3), verified
+  against the live issue list rather than inferred: the debug/release gap is
+  GitHub #4, not #6; the silent `MAP_JIT` fallback has no GitHub counterpart and
+  takes the `GitLab #N` convention; and MIGRATE-01's "Closes issues #2 and #4"
+  was wrong twice — the two issues are #2 and #6, and neither was closed when it
+  was written.
 
 Both make targets are kept, as the issue required. Their stated purpose is now
 the window CI genuinely does not cover, rather than a duty CI has taken over.
@@ -4255,9 +4281,11 @@ every change" and that "a failure blocks the change". Both became *more* accurat
 under CI-03, not less — it is the change, not the push, that is now gated.
 Rewriting it would have been churn.
 
-**Files changed:** `CLAUDE.md` (step 6, three platform-coverage rows, task
-board), `Makefile` (help text, gate comment), `scripts/verify-jit.sh` (one echo
-removed), `AUDIT.md` (this entry).
+**Files changed:** `CLAUDE.md` (step 6, three platform-coverage rows, three
+cross-references, task board), `Makefile` (help text, gate comment),
+`scripts/verify-jit.sh` (header rewritten, one echo removed),
+`.github/workflows/ci.yml` and `jit.yml` (comments only — verified no
+non-comment line changed, both still parse), `AUDIT.md` (this entry).
 
 **Verification.** `bash -n scripts/verify-jit.sh` clean; `make help` renders.
 Trigger keys read directly from all three workflows: `ci.yml` and `jit.yml` are
@@ -4267,10 +4295,22 @@ the gate has already passed, and the exit codes are unchanged, so the gate's
 verdict is bit-identical. The `jit-macos` and `jit-linux-arm` jobs on this PR
 re-run the full 92-test gate regardless.
 
-**Assumption stated rather than tested:** that no tooling parses
-`verify-jit.sh`'s final line. Nothing in the repo greps for it, and CI checks the
-exit code.
+**The one assumption is no longer an assumption.** The first version of this
+entry closed by stating, as an untested assumption, that no tooling parses
+`verify-jit.sh`'s final line. Review tested it: `jit.yml` runs the gate as plain
+`run:` steps with no `id:`, no output capture, no `grep`/`tee` and no step
+summary, and nothing in the repo greps `GATE PASSED`. It also mutated
+`EXPECTED_PASSES` 92 → 91 in a scratch copy and confirmed the gate still goes
+red (`GATE FAILED`, exit 1) — so the removal is inert *and* the gate's redness
+mechanism is intact. Recorded as tested, because leaving a stale "assumption"
+line standing after it has been checked is the exact shape of finding that
+PR #7 round 2 and PR #8 round 3 each caught.
 
 **Issue #2 was closed separately**, before this branch, since it needed no code
 change. Its acceptance criteria were re-verified against what actually landed
-rather than against the audit's account of it. Issue #6 closes with this PR.
+rather than against the audit's account of it. Issue #6 closes with this PR —
+but only after review found box 4 unmet; on the first pass it would have been
+closed early.
+
+**Review:** one round, `ci-reviewer`, verdict mergeable with no blockers and no
+majors. Ledger: `REVIEW_PR10.md`.

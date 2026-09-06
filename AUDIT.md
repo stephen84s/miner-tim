@@ -4616,8 +4616,10 @@ options were considered.
   is visible, which is worse than no release at all: someone can find it and
   download nothing.
 - *CI owns it, as a draft* — chosen. The collision cannot arise, and a draft is
-  visible only to users with push access, so the window between the tag landing
-  and the binary being attached is not a public one.
+  visible only to users with push access. Precisely what that hides: the **tag
+  is public the moment it is pushed**; the draft keeps only the empty release
+  out of view. An earlier draft of this entry called the gap "not a public
+  window", which overstates it.
 
 So `release.yml` now creates the release with `--draft`, and `RELEASING.md`'s
 steps became: wait for the draft, `gh release upload` the artifacts,
@@ -4626,9 +4628,9 @@ listed. `upload`, not `create`, is the operative change.
 
 The workflow was also made **idempotent** — it checks `gh release view` first
 and exits 0 if the release already exists, so a re-run on the same tag reports
-success instead of failing on a duplicate. That matters because a manual
-re-running the job is exactly what an operator reaches for when something went
-wrong mid-release. (Re-running from the Actions UI, not `workflow_dispatch` —
+success instead of failing on a duplicate. That matters because re-running the
+job is exactly what an operator reaches for when something went wrong
+mid-release. (Re-running from the Actions UI, not `workflow_dispatch` —
 `release.yml` has only the tag-push trigger. An earlier draft of this entry said
 otherwise.)
 
@@ -4699,3 +4701,43 @@ keystroke publishes an empty release, precisely what this design prevents; it
 also wanted `--verify-tag`; `gh release upload` wanted `--clobber` so a retry
 after a partial upload does not fail; and step 7 pointed at a `RELEASE_NOTES.md`
 that does not exist in this repository. All fixed. Ledger: `REVIEW_PR14.md`.
+
+**Round 2 review** (`ci-reviewer`, cold): mergeable, no blockers, no majors,
+seven findings — **five of them defects in round 1's fixes**, which is the
+pattern this repo keeps demonstrating and the reason a second round is run at
+all. It verified `gh`'s behaviour independently from `cli/cli` v2.83.2 source
+(`create.go`) rather than inheriting round 1's assertion: `--draft` does set only
+the Submit prompt's default, and `--notes` suppresses the prompt entirely, so the
+hazard round 1 described is real and the fix is the right one.
+
+- **"Not a public window" was wrong, and the round-1 fix corrected it in one
+  place of four.** The tag is public the instant it is pushed; only the empty
+  release is hidden. The correct statement now appears in `RELEASING.md`,
+  `release.yml`'s header and this entry, rather than in the step where it was
+  first noticed while the summary 80 lines above still contradicted it.
+- **Step 5 asserted a duration and denied having measured it, ten lines apart**
+  — "it takes well under a minute" against "how long this takes has not been
+  measured", both added in the same fix. The assertion is gone.
+- **Step 1's new check tested the wrong invariant.** `git log -1 --oneline` was
+  supposed to confirm the version bump had landed, but the repo squash-merges,
+  so the subject is the PR title, and any later merge displaces it. What matters
+  is the line `make release` actually reads: `grep '^version' Cargo.toml`.
+- **`ci.yml` still pointed at GitHub #6 in the present tense** — "that checklist
+  item is *mostly* done, not done" — when #6 closed earlier the same day and its
+  release-flow item is exactly what this change completes. The reason it gave
+  for "not done" (the tarball still being manual) belongs to a different scope
+  that #6 never asked for.
+- **An abandoned draft is now a silent failure mode**, and nothing said so. The
+  idempotence that makes a re-run safe also means a draft from a failed attempt
+  is never cleaned up and never complained about; a later re-run will not
+  replace it. `RELEASING.md` now has a section on deleting one, and
+  `release.yml`'s header names the trade.
+
+Also corrected: `--verify-tag`'s explanation, which gave typo protection as the
+reason when the likelier trigger is step 4 never having pushed the tag, and gave
+no recovery; and an ungrammatical splice this entry's own previous correction
+left behind ("because a manual re-running the job is exactly what...").
+
+Round 2 also confirmed the residual-risk statement still holds: `gh release
+list` and `gh run list --workflow=release.yml` are both empty, so the flow
+remains unrun and nothing new is claimed as tested. Ledger: `REVIEW_PR14.md`.

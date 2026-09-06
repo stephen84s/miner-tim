@@ -12,10 +12,12 @@
 # NOT ported into *this* file (deliberately, not an oversight): the `release`
 # job that creates a GitLab Release on a `v*` tag. It now lives in
 # `.github/workflows/release.yml`, tag-triggered, and `RELEASING.md` describes
-# the `gh`-based flow around it. That checklist item in GitHub #6 is *mostly*
-# done, not done: `release.yml` creates the Release entry — as a **draft** — but
-# building and attaching the macOS tarball is still manual, and the operator
-# publishes the draft (see `release.yml`'s own header and RELEASING.md).
+# the `gh`-based flow around it. GitHub #6's release-flow checklist item — the
+# one about `RELEASING.md`, `make release` and the job all assuming GitLab
+# Releases — is done, and #6 is closed. What remains manual is a different
+# thing it never asked for: `release.yml` creates the Release entry as a
+# **draft**, and the operator builds the macOS tarball, attaches it and
+# publishes (see `release.yml`'s own header and RELEASING.md).
 #
 # `release.yml` has still never actually run. v0.1.0-v0.1.2 exist on the remote
 # — they were pushed by the migration — but all three tagged commits *predate*

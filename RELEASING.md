@@ -9,10 +9,11 @@ then attach the artifacts and publish it. The split matters: before it, both CI
 and this document ran `gh release create` for the same tag, so following these
 steps produced a collision (GitHub #11).
 
-A draft is visible only to people with push access, so the window between the
-tag landing and the binary being attached is not a public one — which is the
-other reason for it. A published release with no assets is worse than no
-release.
+A draft is visible only to people with push access, which is the other reason
+for it: a published release with no assets is worse than no release, because
+someone can find it and download nothing. Be precise about what that hides,
+though — **the tag is public the moment you push it.** The draft keeps the
+*empty release* out of view, not the tag.
 
 **Why the build is local.** CI runners can build it — `macos-14` is Apple
 Silicon — but automating a release build needs a decision about reproducibility
@@ -42,8 +43,15 @@ gh auth status             # should show "Logged in to github.com as <you>"
 
    ```bash
    git checkout main && git pull --ff-only
-   git log -1 --oneline          # must be the version bump
+   grep '^version' Cargo.toml    # must be the version you are releasing
    ```
+
+   Check `Cargo.toml`, not the commit subject: the repo squash-merges, so the
+   subject is the PR title rather than "bump version", and any later merge
+   displaces it anyway. `make release` derives the tag from this exact line
+   (`Makefile`'s `VERSION :=`), so it is the invariant that matters — and note
+   `make release` tags whatever `HEAD` is, with nothing but that comment
+   stopping you tagging the wrong commit.
 
 2. **Verify** on your Mac:
 
@@ -74,9 +82,9 @@ gh auth status             # should show "Logged in to github.com as <you>"
    # (or: git tag -a vx.y.z -m "MinerTim vx.y.z" && git push origin vx.y.z)
    ```
 
-5. **Wait for CI to create the draft.** The tag push fires the Release workflow;
-   it takes well under a minute. Do not skip this — the next step fails if the
-   draft does not exist yet.
+5. **Wait for CI to create the draft.** The tag push fires the Release
+   workflow. Do not skip this — the next step fails if the draft does not exist
+   yet.
 
    ```bash
    gh run list --workflow=release.yml --limit 1   # find the run
@@ -85,11 +93,8 @@ gh auth status             # should show "Logged in to github.com as <you>"
    ```
 
    `gh release view` resolves draft releases by tag, so it is the reliable
-   check. How long this takes has not been measured — the job is a checkout and
-   one API call, so expect seconds, but poll rather than assume.
-
-   Note the **tag is public immediately** even though the release is not. The
-   draft hides the empty release, not the tag.
+   check. How long it takes has never been measured — the job is a checkout and
+   one API call, so seconds is the expectation, but poll rather than assume.
 
    If the workflow failed or was never triggered, create the draft yourself and
    carry on:
@@ -102,8 +107,11 @@ gh auth status             # should show "Logged in to github.com as <you>"
    `--notes` is not optional here. Without it `gh` drops into its interactive
    flow, where `--draft` only sets the *default* of the "Submit?" prompt — one
    wrong keystroke publishes an empty release, which is the outcome this whole
-   design exists to prevent. `--verify-tag` makes `gh` fail rather than invent a
-   tag if you mistype the version.
+   design exists to prevent. `--verify-tag` makes `gh` fail rather than create a
+   tag of its own if the one you name is not on the remote — a mistyped version
+   is one way to hit that, but the likelier one is step 4 not having pushed. If
+   it fails, check `git ls-remote --tags origin` and push the tag before
+   retrying, rather than letting `gh` invent it.
 
 6. **Attach the artifacts** to the draft — `upload`, not `create`:
 
@@ -133,6 +141,20 @@ gh auth status             # should show "Logged in to github.com as <you>"
    ```bash
    gh release view vx.y.z               # both files must appear under Assets
    ```
+
+## If you abandon a release part-way
+
+The workflow is idempotent: re-running it on an existing tag exits successfully
+and leaves the release alone. That is deliberate — a re-run is what you reach
+for when something went wrong — but it means **an abandoned draft is never
+cleaned up and never complained about.** A draft from a failed attempt sits
+there invisibly and a later re-run will not replace it. Delete it yourself:
+
+```bash
+gh release list --limit 20            # drafts appear here (you have push access)
+gh release delete vx.y.z --yes        # remove the draft
+git push --delete origin vx.y.z       # and the tag, if you are abandoning it
+```
 
 ## Verifying a download
 

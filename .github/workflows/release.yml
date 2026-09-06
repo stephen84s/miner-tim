@@ -8,9 +8,14 @@
 #
 # Draft, not published, for two reasons. A published-but-empty release is worse
 # than no release — someone can find it and download nothing. And a draft is
-# visible only to users with push access, so the window between the tag landing
-# and the binary being attached is not a public window. RELEASING.md's final
-# step attaches the tarball and flips the draft to published.
+# visible only to users with push access. Note what that does and does not
+# hide: the **tag is public immediately**; the draft keeps only the empty
+# release out of view. RELEASING.md's final step attaches the tarball and flips
+# the draft to published.
+#
+# The existence check below makes a re-run safe, at the cost of never noticing
+# an abandoned draft from a failed attempt — RELEASING.md says how to clean one
+# up, because nothing here will.
 #
 # It creates the release, it does NOT build the binary. On GitLab that was
 # forced: the shared runners were x86_64 Linux and physically could not produce

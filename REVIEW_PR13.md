@@ -15,7 +15,7 @@ instrument that produces this project's published numbers.
 | 1 | Barrier correctness (wait counts, timed regions, single-thread path) | done — correct |
 | 2 | Does the barrier deliver the concurrency claim | done — **partly**, F1 |
 | 3 | Tail-idle reasoning and `(max-min)/mean` | done — F2, F3 |
-| 4 | Arithmetic and CI computation; strength of claims | done — F4, **F5 (major)**, F7 |
+| 4 | Arithmetic and CI computation; strength of claims | done — F4, F5, F7 |
 | 5 | Per-thread paired-diff reporting | done — computation right, F6 |
 | 6 | Overstatement | done — F5, F6, F7, F8 |
 | — | Ran the harness (3 threads and 11 threads) | done |
@@ -111,16 +111,23 @@ df table that deliberately rounds to the *lowest* df in each bucket so intervals
 err wide. df=23 → 2.086 against the true 2.069 (conservative, as documented);
 df=10 → 2.228, which is the exact value. No defect.
 
-**F5 (MAJOR): the "+0.13 pp rise" is recorded in `AUDIT.md` as one of "three
-things that reproduce", and an independent run does not reproduce it.**
+**F5 (minor): the "+0.13 pp rise" is recorded in `AUDIT.md` as one of "three
+things that reproduce", and the quantity is too noisy between processes to
+support any claim at that scale.**
 
 My own barriered 11-thread run on the same host (12 pairs x 256 hashes, machine
-in the same state — single-thread body JIT 572.9 H/s against the PR's 568.1-572.7,
-11-thread body JIT 5020.7 H/s against the PR's 4982-5003) measured the aggregate
-diff at **+7.28%**. That is *inside* the unbarriered pair's range [+7.21, +7.33]
-and below both of the PR's barriered figures. Barriered observations are now
-+7.34, +7.46, **+7.28**; unbarriered are +7.21, +7.33. The separation the PR
-calls reproducible is gone with one more sample.
+in a comparable state — single-thread body JIT 572.9 H/s against the PR's
+568.1-572.7, 11-thread body JIT 5020.7 H/s against the PR's 4982-5003) measured
+the aggregate diff at **+7.28%** — *inside* the unbarriered pair's range
+[+7.21, +7.33] and below both barriered figures. Barriered observations are now
++7.34, +7.46, +7.28; unbarriered +7.21, +7.33.
+
+**I am deliberately not calling this a falsification.** My run is a separate
+process, hours later, in a different machine state, so it is exactly the kind of
+unpaired between-process comparison this finding objects to — it cannot refute
+the PR's figure any more than the PR's four runs can establish it. What the
+third sample *does* establish is that the between-process spread of this
+quantity is at least as wide as the 0.13 pp being attributed to the barrier.
 
 It is also confounded with run order. Barriered − unbarriered is +0.13 pp in run 1 and +0.13 pp in run 2;
 but run 2 − run 1 is +0.12 pp in the *unbarriered* arm and +0.12 pp in the
@@ -237,15 +244,22 @@ Three things this settles.
    30–40% (11 threads on 8P+4E is a plausible way to get there) the aggregate
    should have been dropped rather than kept.
 
-2. **But the sensitivity is not negligible.** For a roughly symmetric spread,
-   `mean − min ≈ R/2`, so the sum-of-rates overstatement factor is `≈ 1 + R/2`
-   and a **1 pp change in R moves the reported aggregate diff by about 0.5 pp**.
-   My −1.10 pp asymmetry maps to about −0.56 pp; the PR's own −0.40/+0.60
-   observations map to ∓0.20/0.30 pp. **That is larger than the +0.13 pp effect
-   the PR attributes to de-dilution.** So the tail-idle check, read
-   quantitatively rather than as a pass/fail, does not clear that attribution —
-   it shows the candidate bias is the same order as the claimed effect. This is
-   the strongest single argument for F5.
+2. **The tail-idle artifact is empirically bounded well under 0.1 pp on this
+   host.** In the *same* run, the aggregate (sum-of-rates, the estimator F1
+   objects to) gave **+7.28%** and the per-thread paired estimator (no
+   aggregation artifact at all — each thread compared against itself) gave
+   **+7.31%**: a 0.03 pp gap, in the presence of a −1.10 pp spread asymmetry.
+   Two estimators with quite different exposure to the tail bound the artifact
+   at a few hundredths of a percentage point.
+
+   For the record, the algebraic upper bound does *not* hold. `mean − min ≈ R/2`
+   makes the sum-of-rates overstatement `≈ 1 + R/2` against true window
+   throughput, and `F_nat/F_body − 1` for my R values is −0.56 pp — which would
+   put the "true" figure near +7.84% and disagree with the per-thread estimator
+   by half a point. It does not, because the overstatement is very nearly
+   *common to both arms* and cancels in the ratio; what survives is second-order
+   in the spread difference, not first-order as that model assumes. Trust the
+   0.03 pp empirical gap, not the 0.56 pp derivation.
 
 3. **The asymmetry is noisier than n=2 suggested.** Three observations are now
    −0.40, +0.60, **−1.10** — a 1.7 pp range around a mean of −0.30. The PR's two
@@ -266,9 +280,14 @@ least applied to a plausibly exchangeable sample. That is the one part of the
 * I did not measure a **barriered vs unbarriered pair inside one process**,
   which is the experiment that would actually settle the +0.13 pp question. The
   harness cannot currently do it.
-* The sensitivity coefficient in "Measurements I made" (2) is a first-order
-  approximation from a symmetric-spread assumption, not a derivation from the
-  raw per-thread times, which the harness does not retain.
+* The `1 + R/2` sensitivity model in "Measurements I made" (2) is a
+  symmetric-spread approximation that the data contradicts; it is recorded as a
+  rejected upper bound, not as a finding. The harness does not retain the raw
+  per-thread round times, which is what a proper derivation would need.
+* Phase 1 (single thread) measured +5.86% in my run, below JIT-01's band — but
+  neither the PR nor AUDIT quotes a single-thread *diff*, only single-thread
+  baseline H/s (which matched), so this is out of scope for PR #13 and I did not
+  pursue it.
 
 ---
 
@@ -281,12 +300,12 @@ source. Nothing in `src/` changed, so there is no wrong-hash exposure. The PR is
 also unusually honest about its own limits — it names the trap in its own fix,
 implements both of the issue's options, and labels its n.
 
-One **major** and eight **minors**, none of which block:
+**Nine minors. No blockers, no majors.**
 
 | ID | Sev | Summary |
 |---|---|---|
-| F5 | **major** | "+0.13 pp point-estimate rise reproduces" — my independent barriered run lands at +7.28%, inside the unbarriered range; also confounded with undocumented run order |
-| F1 | minor | Barrier enforces a common start, not a common duration; the "*enforced*" comment overstates, and sum-of-rates still assumes equal windows |
+| F5 | minor | "+0.13 pp point-estimate rise reproduces" over-claims: unpaired between-process comparison at n=2, order undocumented, and a third barriered sample (+7.28%) lands inside the unbarriered range |
+| F1 | minor | Barrier enforces a common start, not a common duration; the "*enforced*" comment overstates. Arithmetically real, empirically ≤0.03 pp here — a wording fix, not a bias claim |
 | F2 | minor | `(max-min)/mean` is a low-power proxy, `arm_cv` is misnamed, and the per-round distribution is discarded when a within-run paired CI is free |
 | F3 | minor | A sign flip at n=2 cannot support "no systematic tail-idle bias"; my third sample is outside both |
 | F4 | minor | The *level* of the spread is never reported — only the difference — so the risk cannot be assessed from the write-up |

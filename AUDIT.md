@@ -4627,8 +4627,10 @@ listed. `upload`, not `create`, is the operative change.
 The workflow was also made **idempotent** — it checks `gh release view` first
 and exits 0 if the release already exists, so a re-run on the same tag reports
 success instead of failing on a duplicate. That matters because a manual
-`workflow_dispatch` or a re-run is exactly what an operator reaches for when
-something went wrong mid-release.
+re-running the job is exactly what an operator reaches for when something went
+wrong mid-release. (Re-running from the Actions UI, not `workflow_dispatch` —
+`release.yml` has only the tag-push trigger. An earlier draft of this entry said
+otherwise.)
 
 **Two further errors in `RELEASING.md`, both from the migration.** Its opening
 paragraph carried a half-replaced GitLab-era sentence — "For now the shipping
@@ -4647,7 +4649,9 @@ hashes. Step 1 now says the version bump goes through a pull request, since
 `main` has been protected since PROC-01 and a direct push is rejected.
 
 **Files changed:** `RELEASING.md` (rewritten), `.github/workflows/release.yml`
-(draft + idempotence + header), `AUDIT.md` (this entry).
+(draft + idempotence + header), `.github/workflows/ci.yml` and `Makefile`
+(comments that still described the pre-draft behaviour and pointed at the issue
+this entry closes), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
 
 **Verification, and its limit — stated plainly because it is the whole point of
 the issue.** The YAML parses and the workflow's shell is `set -euo pipefail`
@@ -4663,3 +4667,35 @@ The one claim GitHub #11 flagged as *inferred rather than tested* — that
 `gh release create` fails on an already-existing release — is now moot rather
 than resolved: the fixed flow never issues a second `create`, so the collision
 cannot occur whatever `gh` does. The inference was never relied upon.
+
+**Round 1 review** (`ci-reviewer`): mergeable, no blockers, no majors, thirteen
+minors and nits. It verified rather than accepted the design's load-bearing
+claim — GitHub's REST documentation states only users with push access receive
+listings for draft releases — and confirmed from `gh`'s own source
+(`pkg/cmd/release/shared/fetch.go`) that `view`, `upload` and `edit` all resolve
+a draft by tag, which is what steps 5-7 depend on. It also extracted the
+workflow's shell and ran it against a stub `gh`: exists -> 0, absent + create OK
+-> 0, absent + create fails -> **1**, so the job can still go red.
+
+Two of its findings were defects this change introduced:
+
+- **The version-bump step said "through a pull request" and never said to merge
+  it and return to `main`.** `make release` tags whatever `HEAD` is, and this
+  repo squash-merges, so following the steps literally from the PR branch would
+  tag a commit that never lands on `main`. The old wording implied a local
+  commit on `main`; requiring a PR opened the gap. Now explicit, with a
+  `git log -1` check, and the `Makefile` comment carries the same warning.
+- **`ci.yml`'s comment still described, in the present tense, the defects this
+  change deletes** — quoting the removed sentences and calling them "tracked in
+  GitHub #11, deliberately not fixed", in the very change that closes #11. The
+  `Makefile` likewise still said CI creates "the GitHub Release" rather than a
+  draft. This is the stale-cross-reference class the task board's convention
+  note was written for, found for the fourth consecutive review round.
+
+Four more were real operator hazards in the new steps: the fallback
+`gh release create` had no `--notes`, so on a TTY it enters `gh`'s interactive
+flow where `--draft` sets only the *default* of the Submit prompt — one wrong
+keystroke publishes an empty release, precisely what this design prevents; it
+also wanted `--verify-tag`; `gh release upload` wanted `--clobber` so a retry
+after a partial upload does not fail; and step 7 pointed at a `RELEASE_NOTES.md`
+that does not exist in this repository. All fixed. Ledger: `REVIEW_PR14.md`.

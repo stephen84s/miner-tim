@@ -31,7 +31,8 @@ help:
 	@echo "  make check            Quick type-check"
 	@echo "  make audit            Scan dependencies for known vulnerabilities"
 	@echo "  make dist             Build a portable release tarball + SHA256SUMS"
-	@echo "  make release          Tag v$(VERSION) and push (triggers the CI release)"
+	@echo "  make release          Tag v$(VERSION) and push (CI then opens a draft"
+	@echo "                        release; RELEASING.md says how to fill it)"
 	@echo "  make clean            Remove build artifacts"
 	@echo ""
 	@echo "  make run POOL=host:port WALLET=addr THREADS=8"
@@ -130,7 +131,12 @@ dist:
 	@cat dist/SHA256SUMS
 
 # Tag the current commit and push it; the CI 'release' job then creates the
-# GitHub Release. Attach the dist tarball per RELEASING.md.
+# GitHub Release as a DRAFT. The operator attaches the dist tarball with
+# `gh release upload` and publishes it with `gh release edit --draft=false`
+# — see RELEASING.md.
+#
+# NOTE: this tags whatever HEAD is. Release from `main`, after the version-bump
+# PR has merged, or you will tag a commit that never landed.
 release:
 	@test -z "$$(git status --porcelain)" || (echo "Working tree not clean; commit first." && exit 1)
 	git tag -a v$(VERSION) -m "MinerTim v$(VERSION)"

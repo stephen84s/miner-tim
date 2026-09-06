@@ -36,6 +36,15 @@ gh auth status             # should show "Logged in to github.com as <you>"
    Commit the bump **through a pull request** — `main` is protected and rejects
    direct pushes.
 
+   **Then merge it and come back to `main`.** `make release` tags whatever
+   `HEAD` is, and this repo squash-merges, so tagging from the PR branch would
+   tag a commit that never lands on `main`:
+
+   ```bash
+   git checkout main && git pull --ff-only
+   git log -1 --oneline          # must be the version bump
+   ```
+
 2. **Verify** on your Mac:
 
    ```bash
@@ -70,31 +79,54 @@ gh auth status             # should show "Logged in to github.com as <you>"
    draft does not exist yet.
 
    ```bash
-   gh run watch                         # or just poll:
-   gh release view vx.y.z               # succeeds once the draft exists
+   gh run list --workflow=release.yml --limit 1   # find the run
+   gh run watch <run-id>                          # optional: follow it
+   gh release view vx.y.z                         # succeeds once the draft exists
    ```
+
+   `gh release view` resolves draft releases by tag, so it is the reliable
+   check. How long this takes has not been measured — the job is a checkout and
+   one API call, so expect seconds, but poll rather than assume.
+
+   Note the **tag is public immediately** even though the release is not. The
+   draft hides the empty release, not the tag.
 
    If the workflow failed or was never triggered, create the draft yourself and
    carry on:
 
    ```bash
-   gh release create vx.y.z --draft --title "MinerTim vx.y.z"
+   gh release create vx.y.z --draft --verify-tag \
+     --title "MinerTim vx.y.z" --notes 'Draft — artifacts pending.'
    ```
+
+   `--notes` is not optional here. Without it `gh` drops into its interactive
+   flow, where `--draft` only sets the *default* of the "Submit?" prompt — one
+   wrong keystroke publishes an empty release, which is the outcome this whole
+   design exists to prevent. `--verify-tag` makes `gh` fail rather than invent a
+   tag if you mistype the version.
 
 6. **Attach the artifacts** to the draft — `upload`, not `create`:
 
    ```bash
-   gh release upload vx.y.z \
+   gh release upload vx.y.z --clobber \
      dist/minertim-x.y.z-macos-arm64.tar.gz \
      dist/SHA256SUMS
    ```
 
+   `--clobber` so a retry after a partial or interrupted upload replaces the
+   asset instead of failing on a duplicate name.
+
 7. **Publish**, with your release notes:
 
    ```bash
-   gh release edit vx.y.z --draft=false --notes-file RELEASE_NOTES.md
-   # or: gh release edit vx.y.z --draft=false --notes "..."
+   gh release edit vx.y.z --draft=false --notes "Release notes here."
+   # or from a file you have written:
+   #   gh release edit vx.y.z --draft=false --notes-file /path/to/notes.md
    ```
+
+   There is no `RELEASE_NOTES.md` in this repository; an earlier version of this
+   document pointed at one. Write the notes inline or keep them wherever you
+   like.
 
 8. **Confirm** the assets are actually there:
 

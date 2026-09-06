@@ -100,6 +100,11 @@ fn median(xs: &[f64]) -> f64 {
     }
 }
 
+/// Per-pair `(ca, cb, cc, cd)` checksums: the A, B, B, A rounds in order.
+type Checks = Vec<(u64, u64, u64, u64)>;
+/// What one thread's A/B phase yields: baseline rates, native rates, checksums.
+type PhaseOut = (Vec<f64>, Vec<f64>, Checks);
+
 /// Run `pairs` A-B-B-A blocks on one thread and return the per-round hashrate
 /// of each arm, as (baseline, native).
 fn ab_phase(
@@ -108,7 +113,7 @@ fn ab_phase(
     pairs: usize,
     hashes: usize,
     barrier: Option<&Barrier>,
-) -> (Vec<f64>, Vec<f64>) {
+) -> PhaseOut {
     // Wait before a round, never during one: `round()` takes its own
     // `Instant::now()` as its first statement, so a barrier here is outside
     // every timed region.
@@ -147,6 +152,7 @@ fn ab_phase(
 
     let mut base_rates = Vec::with_capacity(pairs * 2);
     let mut nat_rates = Vec::with_capacity(pairs * 2);
+    let mut checks: Checks = Vec::with_capacity(pairs);
 
     for _ in 0..pairs {
         // A-B-B-A: a drift linear in time contributes equally to both arms.
@@ -159,12 +165,13 @@ fn ab_phase(
         sync();
         let (td, cd) = round(&mut base_vm, &mut base_blob, &mut base_nonce, hashes);
 
-        assert_eq!(
-            (ca, cc),
-            (cb, cd),
-            "native loop and body JIT produced different hashes — \
-             this is a correctness failure, not a benchmark result"
-        );
+        // Deliberately NOT asserted here. A panic between two `sync()` calls
+        // leaves every sibling blocked on `Barrier::wait()` forever — no
+        // timeout, no poisoning — so the process hangs with the panic message
+        // already printed and has to be killed. Checksums are collected and
+        // checked after the join instead, where a failure is loud and the
+        // harness still exits.
+        checks.push((ca, cb, cc, cd));
 
         let h = hashes as f64;
         base_rates.push(h / ta);
@@ -173,7 +180,20 @@ fn ab_phase(
         base_rates.push(h / td);
     }
 
-    (base_rates, nat_rates)
+    (base_rates, nat_rates, checks)
+}
+
+/// Panic if any pair's two arms disagreed. Called only after every thread has
+/// joined, so it can never strand a sibling inside `Barrier::wait()`.
+fn assert_arms_agree(label: &str, checks: &Checks) {
+    for (i, (ca, cb, cc, cd)) in checks.iter().enumerate() {
+        assert_eq!(
+            (ca, cc),
+            (cb, cd),
+            "{label}: native loop and body JIT produced different hashes in pair \
+             {i} — this is a correctness failure, not a benchmark result"
+        );
+    }
 }
 
 /// Across-thread spread within a round, per arm.
@@ -182,43 +202,72 @@ fn ab_phase(
 /// barrier a round's wall time is max-over-threads, so threads that finish early
 /// idle in the tail and the memory pressure late in a round is lower than early.
 /// That is harmless only while the two arms idle by *similar* amounts. If one
-/// arm's threads are consistently more spread out than the other's, the tail
-/// idle is asymmetric — a function of the very difference being measured, which
-/// is the original defect one level down. Then the barrier is the wrong fix and
-/// the aggregate CI should be dropped in favour of per-thread paired diffs.
+/// arm's threads are consistently more spread out, the tail idle is asymmetric —
+/// a function of the very difference being measured, which is the original
+/// defect one level down. Then the barrier is the wrong fix and the aggregate
+/// should be dropped in favour of the per-thread paired diffs.
+///
+/// Reported three ways, because each answers a different question:
+///   * the **level** per arm — a 5% spread and a 40% spread have very different
+///     implications for how much tail idle there is to be asymmetric about;
+///   * the **paired difference across rounds, with a CI** — the two arms are
+///     measured in the same round sequence, so this is a real within-run test
+///     rather than the difference of two point estimates;
+///   * mean *and* median, so one straggling round cannot carry the verdict.
 fn spread_report(results: &[(Vec<f64>, Vec<f64>)]) {
-    // (max-min)/mean across threads, per round, averaged over rounds.
-    fn arm_cv(per_thread: &[&Vec<f64>]) -> (f64, f64) {
+    // Range over mean, per round, across threads. Deliberately NOT called a
+    // coefficient of variation: range/mean is not sd/mean. It is used because
+    // the quantity of interest is how far the slowest thread lags the fastest —
+    // that lag is the tail idle — not the dispersion of the whole set.
+    fn range_over_mean(per_thread: &[&Vec<f64>]) -> Vec<f64> {
         let rounds = per_thread[0].len();
-        let mut cvs = Vec::with_capacity(rounds);
+        let mut out = Vec::with_capacity(rounds);
         for i in 0..rounds {
             let vals: Vec<f64> = per_thread.iter().map(|t| t[i]).collect();
             let mean = vals.iter().sum::<f64>() / vals.len() as f64;
             let lo = vals.iter().cloned().fold(f64::INFINITY, f64::min);
             let hi = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             if mean > 0.0 {
-                cvs.push((hi - lo) / mean * 100.0);
+                out.push((hi - lo) / mean * 100.0);
             }
         }
-        let mean_cv = cvs.iter().sum::<f64>() / cvs.len() as f64;
-        (mean_cv, median(&cvs))
+        out
     }
 
     let base: Vec<&Vec<f64>> = results.iter().map(|r| &r.0).collect();
     let nat: Vec<&Vec<f64>> = results.iter().map(|r| &r.1).collect();
-    let (b_mean, b_med) = arm_cv(&base);
-    let (n_mean, n_med) = arm_cv(&nat);
+    let b = range_over_mean(&base);
+    let n = range_over_mean(&nat);
+    let b_mean = b.iter().sum::<f64>() / b.len() as f64;
+    let n_mean = n.iter().sum::<f64>() / n.len() as f64;
+
+    // Paired across rounds: round i of both arms sat in the same run, under the
+    // same thermal and scheduling conditions.
+    let paired: Vec<f64> = n.iter().zip(b.iter()).map(|(x, y)| x - y).collect();
+    let (d_mean, d_ci) = mean_ci95(&paired);
 
     println!("\n=== across-thread spread within a round (barrier tail-idle check) ===");
-    println!("  body JIT     : (max-min)/mean  mean {b_mean:5.2}%   median {b_med:5.2}%");
-    println!("  native loop  : (max-min)/mean  mean {n_mean:5.2}%   median {n_med:5.2}%");
-    println!("  asymmetry    : {:+.2} pp (native - body)", n_mean - b_mean);
+    println!("  body JIT     : range/mean  mean {b_mean:5.2}%   median {:5.2}%", median(&b));
+    println!("  native loop  : range/mean  mean {n_mean:5.2}%   median {:5.2}%", median(&n));
     println!(
-        "  read as      : a small, similar spread on both arms means the barrier's\n\
-         \x20                idle tail is symmetric and the aggregate CI is sound. A\n\
-         \x20                materially larger spread on one arm, reproducibly and in\n\
-         \x20                the same direction, means it is not — drop the aggregate\n\
-         \x20                and report per-thread paired diffs only."
+        "  asymmetry    : {d_mean:+.2} pp  (95% CI {:+.2} .. {:+.2} pp, paired over n={} rounds)",
+        d_mean - d_ci,
+        d_mean + d_ci,
+        paired.len()
+    );
+    let verdict = if (d_mean - d_ci) > 0.0 || (d_mean + d_ci) < 0.0 {
+        "ASYMMETRIC within this run — see note"
+    } else {
+        "no asymmetry detectable within this run (CI includes 0)"
+    };
+    println!("  verdict      : {verdict}");
+    println!(
+        "  note         : this is a within-run test. A single run's verdict does\n\
+         \x20                not establish the absence of a systematic effect — the\n\
+         \x20                asymmetry has been observed at -1.10, -0.40 and +0.60 pp\n\
+         \x20                across separate runs, i.e. it moves between runs by more\n\
+         \x20                than any one run's interval. Treat a consistent sign over\n\
+         \x20                several runs, not one CI, as the evidence that matters."
     );
 }
 
@@ -283,7 +332,8 @@ fn main() {
     // Phase 1: single thread. Most sensitive — no memory-bandwidth contention
     // between threads to swamp a per-iteration change.
     eprintln!("phase 1: 1 thread, {pairs} A-B-B-A pairs x {hashes} hashes/round");
-    let (b1, n1) = ab_phase(&dataset, 0, pairs, hashes, None);
+    let (b1, n1, c1) = ab_phase(&dataset, 0, pairs, hashes, None);
+    assert_arms_agree("1 thread", &c1);
     report("1 thread", &b1, &n1);
 
     if threads > 1 {
@@ -296,7 +346,7 @@ fn main() {
         // configuration the miner actually runs in, where the dataset reads may
         // dominate anything the loop does.
         let barrier = Barrier::new(threads);
-        let results: Vec<(Vec<f64>, Vec<f64>)> = std::thread::scope(|s| {
+        let joined: Vec<PhaseOut> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..threads)
                 .map(|tid| {
                     let ds = dataset.clone();
@@ -307,14 +357,32 @@ fn main() {
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
 
-        // Sum per-round rates across threads. Round i of thread 0 is concurrent
-        // with round i of every other thread — *enforced* by the barrier above,
+        // Every thread has joined, so asserting here cannot strand a sibling
+        // inside `Barrier::wait()`.
+        for (tid, (_, _, checks)) in joined.iter().enumerate() {
+            assert_arms_agree(&format!("thread {tid}"), checks);
+        }
+        let results: Vec<(Vec<f64>, Vec<f64>)> =
+            joined.into_iter().map(|(b, n, _)| (b, n)).collect();
+
+        // Sum per-round rates across threads. Round i *starts* at the same
+        // moment on every thread — that much the barrier above does enforce,
         // where it used to be an assumption that held only while both arms ran
         // at equal speed (GitHub #5). Without it the threads drifted out of
         // phase once the arms differed, so each arm's rounds partly overlapped
-        // the other arm's rounds on sibling threads: the arms blended, which
-        // dilutes a real effect and makes the aggregate CI narrower than the
-        // independence assumption warrants.
+        // the other arm's rounds on sibling threads and the arms blended.
+        //
+        // Two things it does NOT give, both understated in the first version of
+        // this comment:
+        //   * a common *duration*. Threads still finish at different times, so
+        //     summing rates (Sum h/T_t = n*h/HM(T)) still assumes equal windows.
+        //     Measured at <=0.03 pp here, but it is an approximation, not an
+        //     identity.
+        //   * independence. The 24 rounds share one machine, and the barrier
+        //     *increases* cross-thread coupling by tying every thread's window
+        //     to the slowest. So this aggregate's n=24 overstates independence.
+        //     The per-thread paired diffs below are the conservative reading and
+        //     are the authoritative number; this one is reported for comparison.
         let rounds = results[0].0.len();
         let mut base_agg = vec![0.0; rounds];
         let mut nat_agg = vec![0.0; rounds];
@@ -327,11 +395,16 @@ fn main() {
         spread_report(&results);
         report(&format!("{threads} threads (aggregate)"), &base_agg, &nat_agg);
 
-        // Per-thread paired differences, independent of the aggregation. Each
+        // Per-thread paired differences — **the authoritative number**. Each
         // thread's own A-B-B-A pairing is valid whatever the other threads are
-        // doing, so this is the fallback the issue proposes if the aggregate
-        // ever stops being trustworthy — reported always, so the two can be
-        // compared rather than one replacing the other on faith.
+        // doing, which the aggregate's round-level pairing is not.
+        //
+        // Not "independent", though: the barrier ties every thread's round
+        // window to the slowest, so if anything this change *increases* the
+        // coupling between these units. The honest claim is exchangeability —
+        // the threads are interchangeable draws from one machine — not
+        // independence, and the CI should be read with that in mind. It is
+        // still the conservative of the two, and it is the one to quote.
         let per_thread: Vec<f64> = results
             .iter()
             .map(|(b, n)| {
@@ -344,7 +417,7 @@ fn main() {
             })
             .collect();
         let (pt_mean, pt_ci) = mean_ci95(&per_thread);
-        println!("\n=== {threads} threads (per-thread paired diffs) ===");
+        println!("\n=== {threads} threads (per-thread paired diffs — AUTHORITATIVE) ===");
         println!(
             "  mean of per-thread means: {pt_mean:+.2}%  (95% CI {:+.2}% .. {:+.2}%, n={})",
             pt_mean - pt_ci,

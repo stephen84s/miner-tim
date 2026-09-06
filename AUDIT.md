@@ -4491,8 +4491,9 @@ and this entry was rewritten around them rather than defended.
   divergence would print its message and then hang the process. Fixed:
   checksums are collected per pair and asserted in `assert_arms_agree` after
   every thread has joined. **Break-tested**: injecting a one-bit divergence on
-  thread 1 now panics naming the thread and the pair, and the process exits
-  instead of hanging.
+  the *last* thread at the *last* pair — which is what distinguishes "checks
+  every thread and pair" from "checks the first" — panics naming both and the
+  process exits instead of hanging.
 - **The spread statistic reported only the difference, never the level.**
   -0.40 pp is unassessable without knowing what it is a difference of. Levels
   are now printed: measured at **body 5.64–8.03%, native 4.54–7.08%**. That
@@ -4522,16 +4523,26 @@ first version left unstated while quoting the aggregate as the headline.
 | per-thread paired (authoritative) | — | +7.37%, +7.50%, +7.31%, +7.11% |
 | tail-idle asymmetry | — | -0.40, +0.60, -1.10, -0.94 pp |
 
-**What survives:** the barrier makes the concurrency claim true, and every
-barriered CI half-width (0.19–0.41) is below every unbarriered one (0.43, 0.64),
-so the narrowing reproduces across four observations — phase drift was itself a
-variance source. **What does not:** any claim of a point-estimate shift.
+**What survives:** the barrier makes the concurrency claim true, and the
+aggregate CI narrows. Stated precisely, because the margin is not uniform: three
+of the four barriered half-widths (0.19, 0.24, 0.29) sit clearly below both
+unbarriered ones (0.43, 0.64), while the fourth (0.41) is inside the noise of
+the comparison — a half-width at n=24 carries roughly 15% of its own sampling
+error, about ±0.06, so 0.41 against 0.43 is not a resolvable ordering. The
+narrowing is real and reproduced; "every one below every one" was too strong. It
+also rests on the same unpaired between-process design this entry invokes to
+withdraw the +0.13 pp figure, which argues for treating it as directional rather
+than measured. **What does not survive:** any claim of a point-estimate shift.
 
 **The tail-idle check, stated at the strength the data supports.** Four
-observations: -0.40, +0.60, -1.10, -0.94 pp. The sign is mixed, every run's own
-paired CI includes zero, and the spread across runs (1.7 pp) exceeds any single
-run's interval. That is consistent with no systematic asymmetry and is *not*
-proof of its absence. What would settle it is a barriered and an unbarriered arm
+observations: -0.40, +0.60, -1.10, -0.94 pp. The sign is mixed and the spread
+across runs is 1.7 pp. **Only the fourth run has a CI at all** — the paired
+interval is new in this change set, so runs 1-3 printed a bare point estimate.
+That run gave -0.94 pp with a 95% CI of [-2.58, +0.70], which includes zero. An
+earlier draft said "every run's own paired CI includes zero", attributing an
+interval to three runs that never computed one — the same defect class as the
++0.13 pp claim it was written to replace. The evidence is consistent with no
+systematic asymmetry and is *not* proof of its absence. What would settle it is a barriered and an unbarriered arm
 measured **inside one process**, which the harness cannot currently do; the
 between-process comparison used here is exactly the design weakness that
 produced the withdrawn +0.13 pp claim. Recorded as an open limitation.
@@ -4548,9 +4559,12 @@ An earlier draft of this entry said the results were "still inside" it, which is
 false for two of them.
 
 **Baseline sanity**, per the standing rule that a tight CI is not evidence of a
-quiet machine: single-thread body JIT 568.1-572.7 H/s against the known-good
-~570; 11-thread body JIT 4982-5007 H/s against a recorded ~4756. No run
-discarded, none near a throttled figure.
+quiet machine: single-thread body JIT **568.1-572.9** H/s against the known-good
+~570; 11-thread body JIT **4982-5020.7** H/s against a recorded ~4756. No run
+discarded, none near a throttled figure. (Both ranges were first written as
+568.1-572.7 and 4982-5007, which excluded the reviewer's run at 572.9 / 5020.7
+while counting it among the four — a half-correction, widened for the newest run
+and never folded back over the one before it.)
 
 **Files changed:** `benches/nativeloop_ab.rs` only. No `src/` change, so the
 miner's behaviour is untouched — this changes how it is measured, not what it
@@ -4561,6 +4575,15 @@ drafts tripped `type_complexity`; the second is why `Checks`/`PhaseOut` exist).
 The divergence path is break-tested as described above, which is the only test
 here that proves anything about the assert.
 
-**Review:** one round, `jit-reviewer`, mergeable with no blockers and no majors.
-It also corrected itself mid-review, withdrawing an over-severe rating and an
-algebraic bias model its own run contradicted. Ledger: `REVIEW_PR13.md`.
+**Review:** two rounds, `jit-reviewer`, both mergeable with no blockers and no
+majors. Round 1 corrected itself mid-review, withdrawing an over-severe rating
+and an algebraic bias model its own run contradicted. Round 2 reviewed round 1's
+fixes and found the pattern had held again — a withdrawn over-claim replaced by a
+new one (the paired-CI attribution above), a half-corrected baseline range, and a
+hardcoded list of past observations in the harness's own stdout that was stale on
+arrival, omitting the very run that produced it. It also **break-tested the
+deadlock fix harder than this entry had**: the original injection used thread 1,
+pair 0, which cannot distinguish "checks every thread and pair" from "checks the
+first"; round 2 injected on the *last* thread at the *last* pair and confirmed
+the panic names `thread 2 ... pair 1` and the process exits.
+Ledger: `REVIEW_PR13.md`.

@@ -31,7 +31,9 @@
 //!
 //! Both arms are fed the identical blob sequence from an identical starting
 //! scratchpad, so every hash they produce must be bit-identical. The harness
-//! asserts this on every round. That is a far broader correctness check than the
+//! checksums every round and asserts on all of them once the threads have
+//! joined — not inside the loop, because a panic between two barrier waits
+//! strands every sibling in `Barrier::wait()` and hangs the process. That is a far broader correctness check than the
 //! unit tests give: the known-answer tests pin exactly one program stream, while
 //! this exercises thousands of real nonces and therefore thousands of distinct
 //! RandomX programs, entropy values and `dataset_offset`s.
@@ -171,6 +173,11 @@ fn ab_phase(
         // already printed and has to be killed. Checksums are collected and
         // checked after the join instead, where a failure is loud and the
         // harness still exits.
+        //
+        // This removes the *expected* panic from the barriered region, not every
+        // possible one: an index panic, an unwrap or an arithmetic overflow in
+        // here would still strand the siblings. Nothing in this loop currently
+        // does any of those, but keep it that way.
         checks.push((ca, cb, cc, cd));
 
         let h = hashes as f64;
@@ -262,12 +269,14 @@ fn spread_report(results: &[(Vec<f64>, Vec<f64>)]) {
     };
     println!("  verdict      : {verdict}");
     println!(
-        "  note         : this is a within-run test. A single run's verdict does\n\
-         \x20                not establish the absence of a systematic effect — the\n\
-         \x20                asymmetry has been observed at -1.10, -0.40 and +0.60 pp\n\
-         \x20                across separate runs, i.e. it moves between runs by more\n\
-         \x20                than any one run's interval. Treat a consistent sign over\n\
-         \x20                several runs, not one CI, as the evidence that matters."
+        "  note         : a within-run test. One run's verdict does not establish\n\
+         \x20                the absence of a systematic effect: this figure has been\n\
+         \x20                seen with either sign across runs, moving by more between\n\
+         \x20                runs than a single run's interval spans. Treat a\n\
+         \x20                consistent sign over several runs, not one CI, as the\n\
+         \x20                evidence. AUDIT.md's BENCH-02 entry carries the running\n\
+         \x20                record; do not hardcode observations here, where they go\n\
+         \x20                stale the moment the next run finishes."
     );
 }
 

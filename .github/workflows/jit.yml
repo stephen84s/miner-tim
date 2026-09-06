@@ -88,7 +88,7 @@ jobs:
       # THE MEMORY CONSTRAINT. This runner has 7 GB. Peak RSS of the gate scales
       # with libtest's --test-threads, because each concurrent test may hold its
       # own 256 MiB Argon2d cache on top of the one 2 GiB dataset. Measured in
-      # issue #7 / MR !4: 6.23 GB at 12 threads, 4.07 GB at 3, in both profiles.
+      # GitLab #7 / MR !4: 6.23 GB at 12 threads, 4.07 GB at 3, in both profiles.
       #
       # Set explicitly rather than left to default to the runner's core count,
       # so that a future runner image with more cores cannot quietly raise the

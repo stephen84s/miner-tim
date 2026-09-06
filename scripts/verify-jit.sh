@@ -47,7 +47,7 @@ set -uo pipefail
 # LOAD-BEARING, do not trim: `full_mode_v1_vm_reports_the_native_loop_effective`
 # (inside full_hash_tests::) is the only test that hard-requires a *successful*
 # JIT allocation. Every known-answer vector still passes when allocation fails,
-# because the interpreter fallback returns the same hash — that is issue #4's
+# because the interpreter fallback returns the same hash — that is GitLab #4's
 # shape. Without this one test the gate can be green on an inert JIT.
 JIT_FILTERS=(
   randomx::jit::
@@ -126,7 +126,8 @@ run_group() {
 # native loop — the imm12/imm7 encoding ranges in `jit/aarch64.rs`, the CBRANCH
 # forward-target rule, the CBZ zero-iteration patch range and the back-branch
 # imm19 range in `jit/compiler.rs` — had therefore never executed in the
-# profile that gets cited as evidence. Issue #6 / issue #2 mitigation 2.
+# profile that gets cited as evidence. GitLab #6 (now GitHub #4) / GitHub #2
+# mitigation 2.
 #
 # The whole set runs here, not a subset: it was measured at ~308 s on an idle
 # M2 Max against 177 s for the JIT-unit-plus-differential subset, and the
@@ -138,7 +139,7 @@ run_group "debug profile (debug_assert! live)" ""
 # ---------------------------------------------------------------------------
 # 2. Release profile — what the miner ships, and what every number refers to.
 # ---------------------------------------------------------------------------
-# Memory: the binary builds ONE 2 GiB dataset (issue #7 removed the second).
+# Memory: the binary builds ONE 2 GiB dataset (GitLab #7 removed the second).
 # Max RSS on an M2 Max for this filtered set, DEBUG profile, at this host's
 # 12-thread default: 6.27 GB before that change, 5.43 GB after — a 0.84 GB
 # saving. (An earlier revision of this comment claimed 6.77 -> 4.50 GB; neither

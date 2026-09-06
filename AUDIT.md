@@ -4779,24 +4779,47 @@ issue's arithmetic to the word.
 **The timing result: three runs per arm, alternating, 11 threads x 12 pairs x
 256 hashes.**
 
-| criterion | outcome |
-|---|---|
-| 1. phase-1 effect positive in every paired comparison | **FAIL** — +0.25, **-0.02**, +0.07 pp |
-| 2. min(branch) phase-1 diff exceeds max(main) | **FAIL** — 6.12 vs 6.15, ranges overlap |
-| 3. phase-2 per-thread: branch not entirely below main | **FAIL** — branch 7.19-7.24, main 7.42-7.71 |
+Evaluated two ways, because the baseline gate changes which runs are admissible
+and the first write-up quietly used both sets at once.
+
+| criterion | on all six runs | on the gate-retained set |
+|---|---|---|
+| 1. phase-1 effect positive in every paired comparison | FAIL — +0.25, **-0.02**, +0.07 pp | **unevaluable** — 1 pair, the rule needs 3 |
+| 2. min(branch) phase-1 diff exceeds max(main) | FAIL — 6.12 vs 6.15 | **unevaluable** — would read 6.12 > 6.05 at n=2 vs n=1 |
+| 3. phase-2 per-thread: branch not entirely below main | FAIL — 7.19-7.24 vs 7.42-7.71 | FAIL — 7.19/7.24 vs 7.42 |
+
+**The first version of this entry said "all three fail" while endorsing a gate
+that discards the runs producing two of those failures.** The -0.02 in row 1
+comes from `main` run 2, the worst run in the set, 5.5% below known-good; the
+6.15 in row 2 is `main` run 3, also discarded. Applied literally — "a run below
+**either** figure is thrown away without being read as a result" — the retained
+set is branch runs 1 and 2 and `main` run 1, and on it criterion 2 would read as
+*passing*.
+
+**That is not a claim the change passed.** One branch-vs-main pair cannot
+evaluate a rule written for three, and a "pass" drawn from n=2 against n=1 is
+noise with a verdict attached. The correct statement is that on admissible data
+the criteria are **unevaluable**, and the rule is "keep only if all hold" — so a
+change that cannot be shown to clear the bar is not kept. The revert is
+unchanged. The reasoning printed beside it was wrong twice over, and both
+versions are recorded here rather than the second quietly replacing the first.
 
 All three fail.
 
 **Criterion 3 was first written up as "a weak signal of a small regression under
 contention". Review refuted that from this repository's own data, and the claim
-is withdrawn.** BENCH-02 records four barriered runs of **unmodified `main`** —
-same harness, same statistic, same configuration — at **+7.37, +7.50, +7.31,
-+7.11**. That is 0.39 pp of spread on identical code, *larger* than the 0.25 pp
-"signal", and +7.11 sits **below the branch's entire 7.19-7.24 range**. The
-branch's numbers are not merely consistent with noise; they fall inside the
-range this harness produces when nothing has changed at all. The
-register-pressure mechanism offered alongside was unsupported speculation and is
-dropped with it.
+is withdrawn.** The argument is self-contained in this session's own data: **`main`'s three
+runs span +7.42 to +7.71, 0.29 pp of spread on code that did not change**, which
+is comparable to the 0.31 pp mean separation between the arms. A gap the size of
+one arm's own noise is not a signal.
+
+BENCH-02 corroborates rather than carries it — four barriered runs of unmodified
+`main` at +7.37, +7.50, +7.31, +7.11, so 0.39 pp of spread, with +7.11 sitting
+**below the branch's entire 7.19-7.24 range**. Stated as corroboration because
+those four were not one uniform set: BENCH-02's own entry records the harness
+changing across them, and one was a reviewer's separate execution. The
+register-pressure mechanism offered alongside the original claim was unsupported
+speculation and is dropped with it.
 
 What criterion 3 actually shows is that the effect, in either direction, is
 **below what this harness can resolve at 11 threads**.
@@ -4806,20 +4829,26 @@ JIT >= 4900 H/s): branch run 3 at 4714.8, main runs 2 and 3 at 4495.8 and
 4649.1. The machine was warm from a day of CI and benchmark work. They are
 discarded rather than interpreted, which is what the gate is for.
 
-**Two honesty corrections review found in how that was applied.** The criterion
-discards a *run*; the write-up silently discarded a *phase*, keeping phase 1 of
-runs whose phase 2 failed the gate. And criterion 3's ranges above were computed
-from all six runs while the same paragraph claimed three were discarded. Applied
-literally, phase 2 retains two branch runs and one `main` run — which does not
-change the direction, but does mean criterion 1's "at least three of each" is
-**unmet for phase 2**. Phase 1's six runs all passed their gate (>= 560 H/s) and
-are the decisive evidence; phase 2 never had enough valid data to decide
-anything, which is a better description than "directional at best".
+**How that was applied, corrected twice.** The criterion discards a *run*; the
+first write-up silently discarded a *phase*, keeping phase 1 of runs whose phase
+2 failed the gate. The correction said so — and then **did it again in the next
+sentence**, asserting "phase 1's six runs all passed their gate and are the
+decisive evidence" and pinning criterion 1's unmet sample size on phase 2, when
+criterion 1 is explicitly a *phase-1* rule and is exactly where the shortfall
+bites. Round 2 caught that; it is stated properly here.
+
+The gate as written throws away a **run**, both phases with it. So the
+admissible set is three runs — branch 1, branch 2, `main` 1 — for *every*
+criterion, phase 1 included. Two branch runs against one `main` run cannot
+evaluate a rule that asks for three of each. Neither phase has enough
+admissible data to decide anything; phase 1 is not "decisive" and phase 2 is not
+merely "directional".
 
 Review also noted the gate itself was **stricter than issue #1's own known-good
 figure** — the issue says ~4756 H/s and "discard runs well below that", while
-the gate was set at 4900. Branch run 3 at 4714.8 is 0.9% under it; `main`'s two
-were 5.5% and 2.2% under. Retention split 2-of-3 against 1-of-3, which is an
+the gate was set at 4900. Measured against that ~4756 figure rather than against the gate: branch run 3
+at 4714.8 is 0.9% under, `main`'s two are 5.5% and 2.2% under. (Against the 4900
+gate itself they are 3.8%, 8.2% and 5.1% under.) Retention split 2-of-3 against 1-of-3, which is an
 asymmetry a pre-registered gate does not excuse, only documents.
 
 **Not re-run.** The criterion says to record the measurement rather than retry
@@ -4853,7 +4882,7 @@ change was correct — it simply bought nothing.
 byte-identical to `main`), `PERF1_CRITERION.md` (new: the pre-registered
 threshold), `PERF1_RUNS.log` (new: raw output of all six runs, committed because
 the deliverable of this work *is* the record), `CLAUDE.md` (task board),
-`AUDIT.md` (this entry).
+`AUDIT.md` (this entry), `REVIEW_PR15.md` (the review ledger).
 
 **Assumption worth flagging for the next person.** The design rests on the
 body-JIT arm being an untouched control, which holds for any change confined to

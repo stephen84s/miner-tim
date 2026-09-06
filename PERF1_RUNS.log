@@ -1,3 +1,20 @@
+# PERF-02 / GitHub #1 — raw A/B output, all six runs
+#
+# Date:     2026-09-06 (session 1e07e554)
+# Host:     Apple M2 Max, macOS (Darwin arm64), 12 performance cores
+# Command:  cargo bench --bench nativeloop_ab -- 11 12 256
+#           run alternately: branch, main, branch, main, branch, main
+# branch:   perf/jit-fmov, the modified compiler.rs of commit 2a0afc3
+#           (since reverted in 3e61471; this log is the only surviving record
+#            of the modified code's behaviour)
+# main:     unmodified, at c337229
+# Ledger:   AUDIT.md, entry PERF-02
+#
+# The "##### round N / arm #####" separators are echoed by the driver script,
+# not by the harness, so they are not self-identifying. Arm identity rests on
+# the driver having cd'd into the right worktree. Noted because an arm-identity
+# failure is precisely what produced this project's retracted +9.01% claim.
+#
 ##### round 1 / branch #####
 === 1 thread ===
   body JIT     : mean    570.1 H/s   median    571.2

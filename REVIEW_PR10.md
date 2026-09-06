@@ -241,3 +241,141 @@ or (b) fold F1 and the `CLAUDE.md` half of box 4 into this branch and then close
 it. Merging as-is is not unsafe; it is a documented loss of follow-up.
 
 F3, F4 and F5 are minors/nits that can land separately.
+
+---
+
+## Round 2
+
+Fresh reviewer, spawned cold. Base `main` @ `9102bf3`, head `879ef08`. Scope: the
+whole PR, with the four fix commits (`3b196a2`, `3ff2105`, `52617e4`, `879ef08`)
+reviewed as new work rather than as accepted answers to round 1.
+
+### Coverage ledger
+
+| # | Item | Result |
+|---|---|---|
+| 1 | Can the gate still go red? | **re-verified independently** — mutation run, below |
+| 2 | Commands/targets exist and mean what is claimed | verified (`make help` renders the new text; `bash -n` clean; 92/92 both profiles on this tree) |
+| 3 | Required-check names match exactly | verified — 5 live contexts string-exact against this PR's own check runs |
+| 4 | Path filters / conditional execution | verified — no `paths:`/`types:`/`if:`/`continue-on-error:` in any workflow; non-comment lines byte-identical to `main` |
+| 5 | Live config vs description | verified via `gh api`: `strict: true`, `enforce_admins: true`, 5 contexts |
+| 6 | Platform assumptions | n/a — no `.cargo/config.toml`, runner or toolchain change |
+| 7 | Resource limits | n/a — no parallelism/dataset/`RUST_TEST_THREADS` change |
+| 8 | Coverage given up | none by this PR |
+
+### Break test (item 1, not inherited from round 1)
+
+`scripts/verify-jit.sh` copied to the scratchpad with `EXPECTED_PASSES` 92 → 91,
+run against this branch's tree with `CARGO_TARGET_DIR` redirected out of the
+worktree:
+
+```
+verify-jit: FAIL — debug profile (debug_assert! live) ran '92' tests, expected 91.
+verify-jit: FAIL — release profile (shipping profile) ran '92' tests, expected 91.
+verify-jit: GATE FAILED on Darwin arm64
+EXIT=1
+```
+
+Both profiles ran 92 passed / 0 failed, so the gate is red *for the mutated
+reason only*. Working tree never touched (`git status --short` empty). The
+stronger structural argument holds independently: the removed `echo` was the
+file's last statement, below the `exit 1` branch, and the two workflows'
+non-comment lines are byte-identical to `main`.
+
+### Confirmed correct (the four fix commits)
+
+- **F2 / issue #6 box 4 is genuinely met.** "must **pass the JIT gate** — but
+  running it by hand is no longer your duty, and pasting its output into a PR is
+  no longer evidence anyone needs" removes the human mandate and the paste
+  requirement; the remaining obligation is CI's. The bare-branch warning — the
+  reason the PR exists — survives intact and is now the load-bearing sentence.
+  `Closes #6` is defensible.
+- **F3's final mapping is right**, re-derived from `REVIEW_MR1.md`'s GitLab table
+  against `gh issue list --state all`: GitLab 1→1, 2→2, 5→3, 6→4, 8→5, 9→6;
+  GitLab 3, 4 and 7 were closed before the migration and never imported. So the
+  debug/release gap is GitHub **#4**, the `MAP_JIT` fallback has no GitHub
+  counterpart, and MIGRATE-01's issues are **#2 and #6**. (`#2 closed
+  2026-09-06` is correct in local time: `2026-09-05T23:06:30Z` = 09:06 +10:00.)
+- **F1's remapping is complete for `#9`** — zero live `#9` references remain
+  outside `AUDIT.md`/`REVIEW_*`; the six identified now read GitHub #6.
+- **Workflow edits are comments-only** and all three workflows parse.
+- **DOC-02 vs the diff**: files-changed list matches, the "deleted rather than
+  renumbered" claim is properly withdrawn, and the mutation-test claim now
+  reproduces on my own run.
+- **Sweep**: no live "every push" and no "run by a human" survives in `CLAUDE.md`,
+  `README.md`, `RELEASING.md`, `Makefile`, `scripts/` or `.github/`. I re-examined
+  `README.md` independently and agree it is more accurate under CI-03, not less.
+
+### Findings
+
+**R2-F1 (minor) — the stale-numbering class survives in the file `3ff2105`
+rewrote, and one instance is now actively misleading.**
+The new header declares GitHub numbering ("GitHub #2 … GitHub #6 … those were
+GitLab #2 and #9"). Below it, still GitLab-numbered:
+
+| Ref | Means | Resolves to on GitHub |
+|---|---|---|
+| `verify-jit.sh:50` `issue #4's shape` | GitLab #4, silent `MAP_JIT` fallback | #4 = the debug/release gap |
+| `verify-jit.sh:129` `Issue #6 / issue #2 mitigation 2` | GitLab #6, debug/release gap | #6 = the migration issue **this PR closes** |
+| `verify-jit.sh:141`, `ci.yml:78`, `ci.yml:239`, `jit.yml:91` `issue #7` | GitLab #7, test-suite RSS | PR #7 (branch protection) |
+
+Line 129 is the identical defect `52617e4` fixed at `CLAUDE.md:157`, missed in
+the file `3ff2105` was rewriting; and lines 50/129 are *swapped* relative to the
+convention the header sets, so a reader gets both backwards. Correct fix is the
+`GitLab #N` convention `CLAUDE.md:164` already uses — **not** a renumber: GitLab
+#4 and #7 were never migrated and have no GitHub issue.
+
+**R2-F2 (minor) — the same commit applied two standards inside one table.**
+`52617e4` corrected MIGRATE-01's issue numbers but left `PLAT-02` ("debug_assert
+guards … (issue #6)" = GitHub #4; "issue #9 is the GitHub-Actions plan"),
+`MEM-01` ("#9's budget", "Unblocks #9", "issue #7") and `CI-02` ("issue #9,
+workflows only") in the live task board an agent reads at session start.
+
+**R2-F3 (minor) — `ci.yml`'s new "and is done" overstates the release
+checklist item, which is inside the issue this PR closes.**
+`release.yml` exists and is tag-triggered, and `RELEASING.md` is `gh`-based — so
+far accurate. But `RELEASING.md` still says the CI release job *"does **not**
+create releases in practice (no macOS runner, and it can't attach a binary it
+can't build) … only creates an empty entry"*, which is false against
+`release.yml` (it runs on `ubuntu-24.04` and calls `gh release create`); its tail
+still proposes registering a self-hosted `macos-arm64` runner; and its opening
+paragraph is a mangled GitLab-era leftover ("For now the shipping x86_64 Linux
+and cannot build …"). The two halves also collide: step 4 `make release` pushes
+the tag, `release.yml` creates the entry, then step 5 tells the operator to
+`gh release create` the same tag — which I expect to fail as already-existing,
+though I did not execute it. No `v*` tag has been pushed since the migration and
+`gh release list` is empty, so `release.yml` has never run. `RELEASING.md`'s
+defects pre-date this PR; asserting the item "is done" is new here.
+
+**R2-F4 (minor) — "the macOS debug profile takes ~8 minutes in CI" does not
+reproduce.** Measured from the `jit-macos` logs of the six most recent successful
+runs: debug test phase 564–637 s (mean ≈ 600 s), i.e. **9.4–10.6 min** including
+the build step. The figure is pre-existing on `main`, but `3b196a2` re-asserted
+it inside rewritten text presenting it as a CI fact.
+
+**R2-F5 (minor) — DOC-02 and the PR body record only round 1.** The entry ends
+"**Review:** one round, `ci-reviewer`, verdict mergeable…"; the PR body's Review
+section says the same. Both go stale the moment this section lands — the exact
+shape PR #7 round 2 and PR #8 round 3 caught. Update both to name round 2 before
+merging.
+
+**R2-F6 (nit) — round 1's F4 is still open.** `DESIGN_JIT_NATIVE_LOOP.md:397-400`
+("CI can never run any of this … a **mandatory local gate**, not a CI backstop")
+remains the last live copy of the framing this PR retires. Dated design record,
+so deferring is reasonable; recorded so it is not lost when #6 closes.
+
+### What I could not verify
+
+- That `gh release create` fails on a tag `release.yml` has already released
+  (R2-F3) — inferred from `gh` semantics, not executed.
+- Nothing about the aarch64 emitted code changed, so no JIT-correctness question
+  arises in this diff.
+
+### Verdict
+
+**MERGEABLE — no blockers, no majors.** Six minors/nits, none of which weakens a
+gate: the count assertion still fires, the required contexts are string-exact,
+and the workflow diff is provably comments-only. R2-F5 should be fixed before
+merge (it is one line in each place); R2-F1 and R2-F3 are the ones worth folding
+in rather than deferring, because both live inside the scope of issue #6 and
+close with it.

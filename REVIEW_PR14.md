@@ -349,3 +349,8 @@ previous JIT run (**34024581858**, on `5c5886d`) was **cancelled** by this push,
 so there is no green JIT result for the branch yet. The verdict above is
 conditional on 34025152711 going green; nothing in this commit touches `src/`,
 so a red result there would be an infrastructure surprise, not a code one.
+
+**Final CI state (checked after the ledger was first written):** all five checks
+green on `f5a5155` — `lint` 15s, `audit` 17s, `test` 4m06s (run 34025152736),
+`jit-linux-arm` 11m38s, `jit-macos` 13m36s (run 34025152711). The verdict's
+condition is met: **MERGEABLE**, minors only.

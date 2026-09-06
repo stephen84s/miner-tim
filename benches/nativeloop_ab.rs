@@ -36,7 +36,7 @@
 //! this exercises thousands of real nonces and therefore thousands of distinct
 //! RandomX programs, entropy values and `dataset_offset`s.
 
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use minertim::randomx::dataset::RandomXDataset;
@@ -107,7 +107,16 @@ fn ab_phase(
     tid: usize,
     pairs: usize,
     hashes: usize,
+    barrier: Option<&Barrier>,
 ) -> (Vec<f64>, Vec<f64>) {
+    // Wait before a round, never during one: `round()` takes its own
+    // `Instant::now()` as its first statement, so a barrier here is outside
+    // every timed region.
+    let sync = || {
+        if let Some(b) = barrier {
+            b.wait();
+        }
+    };
     let mut base_vm = RandomXVm::new_full(KEY, dataset.clone());
     // BOTH arms set the flag explicitly. Relying on the constructor default for
     // the baseline is what broke this harness once already: it was written when
@@ -131,7 +140,9 @@ fn ab_phase(
 
     // Warm-up round on each arm, discarded: first-touch page faults on the
     // scratchpad and the initial JIT compile land here rather than in the data.
+    sync();
     round(&mut base_vm, &mut base_blob, &mut base_nonce, hashes.min(32));
+    sync();
     round(&mut nat_vm, &mut nat_blob, &mut nat_nonce, hashes.min(32));
 
     let mut base_rates = Vec::with_capacity(pairs * 2);
@@ -139,9 +150,13 @@ fn ab_phase(
 
     for _ in 0..pairs {
         // A-B-B-A: a drift linear in time contributes equally to both arms.
+        sync();
         let (ta, ca) = round(&mut base_vm, &mut base_blob, &mut base_nonce, hashes);
+        sync();
         let (tb, cb) = round(&mut nat_vm, &mut nat_blob, &mut nat_nonce, hashes);
+        sync();
         let (tc, cc) = round(&mut nat_vm, &mut nat_blob, &mut nat_nonce, hashes);
+        sync();
         let (td, cd) = round(&mut base_vm, &mut base_blob, &mut base_nonce, hashes);
 
         assert_eq!(
@@ -159,6 +174,52 @@ fn ab_phase(
     }
 
     (base_rates, nat_rates)
+}
+
+/// Across-thread spread within a round, per arm.
+///
+/// This exists to check the barrier did not trade one bias for another. Under a
+/// barrier a round's wall time is max-over-threads, so threads that finish early
+/// idle in the tail and the memory pressure late in a round is lower than early.
+/// That is harmless only while the two arms idle by *similar* amounts. If one
+/// arm's threads are consistently more spread out than the other's, the tail
+/// idle is asymmetric — a function of the very difference being measured, which
+/// is the original defect one level down. Then the barrier is the wrong fix and
+/// the aggregate CI should be dropped in favour of per-thread paired diffs.
+fn spread_report(results: &[(Vec<f64>, Vec<f64>)]) {
+    // (max-min)/mean across threads, per round, averaged over rounds.
+    fn arm_cv(per_thread: &[&Vec<f64>]) -> (f64, f64) {
+        let rounds = per_thread[0].len();
+        let mut cvs = Vec::with_capacity(rounds);
+        for i in 0..rounds {
+            let vals: Vec<f64> = per_thread.iter().map(|t| t[i]).collect();
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let lo = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if mean > 0.0 {
+                cvs.push((hi - lo) / mean * 100.0);
+            }
+        }
+        let mean_cv = cvs.iter().sum::<f64>() / cvs.len() as f64;
+        (mean_cv, median(&cvs))
+    }
+
+    let base: Vec<&Vec<f64>> = results.iter().map(|r| &r.0).collect();
+    let nat: Vec<&Vec<f64>> = results.iter().map(|r| &r.1).collect();
+    let (b_mean, b_med) = arm_cv(&base);
+    let (n_mean, n_med) = arm_cv(&nat);
+
+    println!("\n=== across-thread spread within a round (barrier tail-idle check) ===");
+    println!("  body JIT     : (max-min)/mean  mean {b_mean:5.2}%   median {b_med:5.2}%");
+    println!("  native loop  : (max-min)/mean  mean {n_mean:5.2}%   median {n_med:5.2}%");
+    println!("  asymmetry    : {:+.2} pp (native - body)", n_mean - b_mean);
+    println!(
+        "  read as      : a small, similar spread on both arms means the barrier's\n\
+         \x20                idle tail is symmetric and the aggregate CI is sound. A\n\
+         \x20                materially larger spread on one arm, reproducibly and in\n\
+         \x20                the same direction, means it is not — drop the aggregate\n\
+         \x20                and report per-thread paired diffs only."
+    );
 }
 
 fn report(label: &str, base: &[f64], nat: &[f64]) {
@@ -222,7 +283,7 @@ fn main() {
     // Phase 1: single thread. Most sensitive — no memory-bandwidth contention
     // between threads to swamp a per-iteration change.
     eprintln!("phase 1: 1 thread, {pairs} A-B-B-A pairs x {hashes} hashes/round");
-    let (b1, n1) = ab_phase(&dataset, 0, pairs, hashes);
+    let (b1, n1) = ab_phase(&dataset, 0, pairs, hashes, None);
     report("1 thread", &b1, &n1);
 
     if threads > 1 {
@@ -234,19 +295,26 @@ fn main() {
         // both arms see the same memory-bandwidth pressure. This is the
         // configuration the miner actually runs in, where the dataset reads may
         // dominate anything the loop does.
+        let barrier = Barrier::new(threads);
         let results: Vec<(Vec<f64>, Vec<f64>)> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..threads)
                 .map(|tid| {
                     let ds = dataset.clone();
-                    s.spawn(move || ab_phase(&ds, tid, pairs, hashes))
+                    let bar = &barrier;
+                    s.spawn(move || ab_phase(&ds, tid, pairs, hashes, Some(bar)))
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
 
-        // Sum per-round rates across threads: round i of thread 0 is
-        // concurrent with round i of every other thread, so the sum is the
-        // aggregate hashrate for that round.
+        // Sum per-round rates across threads. Round i of thread 0 is concurrent
+        // with round i of every other thread — *enforced* by the barrier above,
+        // where it used to be an assumption that held only while both arms ran
+        // at equal speed (GitHub #5). Without it the threads drifted out of
+        // phase once the arms differed, so each arm's rounds partly overlapped
+        // the other arm's rounds on sibling threads: the arms blended, which
+        // dilutes a real effect and makes the aggregate CI narrower than the
+        // independence assumption warrants.
         let rounds = results[0].0.len();
         let mut base_agg = vec![0.0; rounds];
         let mut nat_agg = vec![0.0; rounds];
@@ -256,6 +324,37 @@ fn main() {
                 nat_agg[i] += n[i];
             }
         }
+        spread_report(&results);
         report(&format!("{threads} threads (aggregate)"), &base_agg, &nat_agg);
+
+        // Per-thread paired differences, independent of the aggregation. Each
+        // thread's own A-B-B-A pairing is valid whatever the other threads are
+        // doing, so this is the fallback the issue proposes if the aggregate
+        // ever stops being trustworthy — reported always, so the two can be
+        // compared rather than one replacing the other on faith.
+        let per_thread: Vec<f64> = results
+            .iter()
+            .map(|(b, n)| {
+                let d: Vec<f64> = b
+                    .iter()
+                    .zip(n.iter())
+                    .map(|(x, y)| (y - x) / x * 100.0)
+                    .collect();
+                d.iter().sum::<f64>() / d.len() as f64
+            })
+            .collect();
+        let (pt_mean, pt_ci) = mean_ci95(&per_thread);
+        println!("\n=== {threads} threads (per-thread paired diffs) ===");
+        println!(
+            "  mean of per-thread means: {pt_mean:+.2}%  (95% CI {:+.2}% .. {:+.2}%, n={})",
+            pt_mean - pt_ci,
+            pt_mean + pt_ci,
+            per_thread.len()
+        );
+        print!("  per-thread   :");
+        for d in &per_thread {
+            print!(" {d:+.1}%");
+        }
+        println!();
     }
 }

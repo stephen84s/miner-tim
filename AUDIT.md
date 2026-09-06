@@ -4442,3 +4442,78 @@ two merge commits — and confirmed the cancel-in-flight claim from real run dat
 `concurrency:` block alone. Its two minors are fixed: both rationales assumed
 the branch's commits survive into `main`, which squash-merging discards, and the
 trigger mechanism was stated in two places. Ledger: `REVIEW_PR12.md`.
+
+### BENCH-02 (2026-09-06): barrier the multi-thread A/B phase (GitHub #5)
+
+`benches/nativeloop_ab.rs`'s multi-thread phase let each thread run its own
+A-B-B-A schedule with nothing synchronising them. The aggregation comment
+asserted that "round i of thread 0 is concurrent with round i of every other
+thread", which holds only while both arms take equal wall time — an assumption
+of exactly the thing the harness exists to measure. Once the arms differ the
+threads drift out of phase, so each arm's rounds partly overlap the *other*
+arm's rounds on sibling threads and both arms see a blend of both arms' memory
+pressure.
+
+Done first, ahead of GitHub #1, deliberately: #1 is a sub-1% JIT optimisation
+whose verdict comes from this harness, and judging it with an instrument that
+has a known defect would make the result unfalsifiable. Fix the instrument,
+land it under review, then measure with it.
+
+**The fix, and the trap in it.** A barrier before every round makes the comment
+true. But it introduces a second-order risk that is the original defect one
+level down: under a barrier a round's wall time is max-over-threads, so threads
+that finish early idle in the tail, and late-round memory pressure is lower than
+early-round. That is harmless only while both arms idle by *similar* amounts —
+if one arm's threads are consistently more spread out, the tail idle becomes a
+function of the very difference being measured.
+
+So the harness now measures that too, rather than assuming it away.
+`spread_report` prints each arm's across-thread `(max-min)/mean` within a round.
+**The check passes: the asymmetry is small and its sign flips between runs**
+(-0.40 pp, then +0.60 pp), so there is no systematic tail-idle bias and the
+barrier is the right fix rather than the issue's fallback.
+
+**Measured, two paired runs, 11 threads x 12 pairs x 256 hashes, back to back
+on the same host.**
+
+| | run 1 | run 2 |
+|---|---|---|
+| aggregate, **unbarriered** (`main`) | +7.21% (CI +6.78..+7.64, ±0.43) | +7.33% (CI +6.69..+7.97, ±0.64) |
+| aggregate, **barriered** | +7.34% (CI +7.10..+7.58, ±0.24) | +7.46% (CI +7.17..+7.75, ±0.29) |
+| per-thread paired, barriered | +7.37% (CI +6.86..+7.89, n=11) | +7.50% (CI +7.11..+7.90, n=11) |
+| tail-idle asymmetry | -0.40 pp | +0.60 pp |
+
+Three things that reproduce across both runs: the barrier **halves** the
+aggregate CI (±0.43/±0.64 → ±0.24/±0.29), because phase drift was itself a
+variance source; the point estimate rises slightly (+7.27% mean → +7.40%),
+the direction predicted by the issue, since blending dilutes rather than
+manufactures; and the direction and magnitude of the headline result are
+unchanged, still inside JIT-01's recorded +6.8%–7.4%.
+
+**n=2. That is stated rather than glossed** — two paired runs establish that the
+narrowing reproduces, not its exact size.
+
+**The barrier does not answer the whole issue, and the entry says so.** It makes
+the *concurrency* claim true. It does not make 24 rounds independent: threads
+share one machine, so the aggregate's n=24 still overstates independence, and
+its CI is still narrower than a strict reading warrants. That is why the issue's
+*second* option was implemented as well rather than instead — per-thread paired
+differences (n=11, the genuinely independent unit) are now printed on every run
+alongside the aggregate. Their CI is duly wider (±0.52/±0.40 against ±0.24/±0.29).
+Both are reported so they can be compared, rather than one replacing the other
+on faith.
+
+**Baseline sanity, per the standing rule that a tight CI is not evidence of a
+quiet machine.** Single-thread body JIT measured 568.1–572.7 H/s against the
+known-good ~570; 11-thread body JIT 4982–5003 H/s against a recorded ~4756. No
+run was discarded; none was near a throttled figure.
+
+**Files changed:** `benches/nativeloop_ab.rs` only. No `src/` change, so the
+miner's behaviour is untouched — this changes how it is measured, not what it
+does.
+
+**Verification.** `cargo clippy --benches --release -- -D warnings` clean (the
+first draft of `spread_report` tripped `type_complexity` and was restructured).
+Four harness runs completed with **no divergence assert** — the harness compares
+both arms' hashes bit-for-bit every round, so a barrier that corrupted the
+schedule would fail loudly rather than quietly skewing a number.

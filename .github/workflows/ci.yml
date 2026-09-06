@@ -12,9 +12,15 @@
 # NOT ported into *this* file (deliberately, not an oversight): the `release`
 # job that creates a GitLab Release on a `v*` tag. It now lives in
 # `.github/workflows/release.yml`, tag-triggered, and `RELEASING.md` describes
-# the `gh`-based flow around it. That was a separate checklist item in GitHub #6
-# and is done; what remains manual is building and attaching the macOS tarball,
-# which `release.yml`'s own header explains.
+# the `gh`-based flow around it. That checklist item in GitHub #6 is *mostly*
+# done, not done: `release.yml` creates the Release entry, but building and
+# attaching the macOS tarball is still manual (see `release.yml`'s own header),
+# and `RELEASING.md` still carries GitLab-era text that contradicts
+# `release.yml` — it claims the CI job "only creates an empty entry ... if it
+# runs at all" and proposes a self-hosted `macos-arm64` runner. No `v*` tag has
+# been pushed since the migration, so `release.yml` has never actually run.
+# Those defects pre-date this comment and are tracked separately, deliberately
+# not fixed in the PR that found them.
 
 name: CI
 

@@ -67,7 +67,10 @@
     `pull_request` and `workflow_dispatch` only, so **a push to a branch with no
     open PR is checked by nothing at all.** That is the one window worth running
     `make verify-jit` in yourself — and it is cheaper than a red PR, since the
-    macOS debug profile takes ~8 minutes in CI. `make verify-jit-linux`
+    `jit-macos` job takes **~14 minutes** end to end (mean 14.08 min over the 8
+    most recent successful runs, range 12.38–15.27; PR #8 measured 13.94 over
+    12). An earlier version of this sentence said "the macOS debug profile takes
+    ~8 minutes", which does not reproduce. `make verify-jit-linux`
     runs the same gate under native linux/arm64 and is worth running directly
     when `jit/memory.rs` or other platform-conditional code changes. Never cite
     the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.

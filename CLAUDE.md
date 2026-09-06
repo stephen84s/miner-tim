@@ -36,6 +36,46 @@
       in place — it is not yet part of the record. Never claim to append while
       editing in place.
 
+    - **CI runs only where a PR exists** (the gating workflows, that is —
+      `release.yml` is separate and fires on a `v*` tag). `ci.yml` and `jit.yml`
+      trigger on `pull_request` and `workflow_dispatch` only — never on `push`.
+      A push to a branch that has an open PR runs the five checks against that
+      PR's `refs/pull/N/merge`, the merge of head into base rather than the head
+      commit itself. A push to a branch with **no** open PR runs nothing at all.
+      This is deliberate (CI-03): `main` requires branches to be up to date, so
+      that merge ref and the tree that lands are the same tree, and a post-merge
+      pass would only re-test an identical one. Two consequences to hold in
+      mind: open the PR early if you want the checks running, and never read
+      "I pushed and nothing went red" as evidence about a bare branch — run
+      `make verify-jit` locally there.
+
+    - **Rebase on `main`, then merge on green.** A PR merges only when it is
+      **rebased on the current `main`** and all five checks are green on that
+      rebased head. Branch protection enforces up-to-date-ness (`strict: true`)
+      but accepts a merge commit as satisfying it; prefer
+      `git rebase origin/main` so the branch keeps a linear history for review
+      and the tested tree is exactly the tree that lands. (`main` itself stays
+      linear either way, since PRs are squashed — what a rebase buys is a
+      reviewable branch and no merge-commit noise in the diff.) Rebasing rewrites the branch,
+      so do it *before* asking for review, not after — and never while a
+      reviewer agent is running against that worktree.
+
+    - **Batch the push, not the commits.** Keep making separate, logical
+      commits — one per coherent change, so the history stays reviewable **while
+      the PR is open** and a single mistake can be reverted on its own *during
+      review*. Be honest about the horizon: every PR in this repo has landed as
+      one squashed commit, so these commits are a reviewing and bisecting aid
+      inside the PR's window, not history that survives into `main`. What to hold back is the
+      **push**: every push to a PR's head branch starts a full pass (five jobs,
+      ~30 runner-minutes, ~15 minutes of wall-clock, `jit-macos` the long pole)
+      and cancels any run still in flight, so a series of small pushes burns
+      runs and restarts the reviewer's clock. Finish the work, then push once.
+      Do not squash logical commits together merely to reduce the push count —
+      that trades away history for nothing, since one push carries any number
+      of commits. The repository is public, so GitHub bills **zero** minutes;
+      what is saved is queue time, runner capacity and a reviewer's attention.
+      Worth saving — but never by skipping a verification step to avoid a run.
+
     - **Branch and PR, always.** `main` is protected: direct pushes are
       rejected, a pull request is required, and all five CI checks must pass —
       including for admins. Work on a branch, open a PR, and have an
@@ -63,14 +103,15 @@
     issue #6 asked for; the demotion is real and `make verify-jit` is a
     convenience now, not a checklist item.
 
-    Note what CI does *not* cover: since CI-03 the workflows trigger on
-    `pull_request` and `workflow_dispatch` only, so **a push to a branch with no
-    open PR is checked by nothing at all.** That is the one window worth running
-    `make verify-jit` in yourself — and it is cheaper than a red PR, since the
-    `jit-macos` job takes **~14 minutes** end to end (mean 14.08 min over the 8
-    most recent successful runs, range 12.38–15.27; PR #8 measured 13.94 over
-    12). An earlier version of this sentence said "the macOS debug profile takes
-    ~8 minutes", which does not reproduce. `make verify-jit-linux`
+    Note what CI does *not* cover — see step 0's **CI runs only where a PR
+    exists**, which is the single authority on the triggers; the short version
+    is that **a branch with no open PR is checked by nothing at all.** That is
+    the one window worth running `make verify-jit` in yourself, and it is
+    cheaper than a red PR, since the `jit-macos` job takes **~14 minutes** end
+    to end (13.95 min mean over all 27 successful runs; earlier derivations at
+    n=8 and n=12 gave 14.08 and 13.94). An earlier version of this sentence said
+    "the macOS debug profile takes ~8 minutes", which does not reproduce.
+    `make verify-jit-linux`
     runs the same gate under native linux/arm64 and is worth running directly
     when `jit/memory.rs` or other platform-conditional code changes. Never cite
     the x86_64 jobs as evidence about the JIT. See **Platform coverage** below.
@@ -115,6 +156,7 @@
 | **Completed** | **PROC-01** | **`main` protected after six unreviewed commits reached it.** PR required, all five checks required, strict up-to-date, `enforce_admins: true`, force-push and deletion blocked, 0 approvals (a solo maintainer cannot approve their own PR). Verified by a refused direct push (`GH006`) *and* by reading the live API — the push test alone covers only 2 of the 7 settings. Enforces branch/PR/checks, **not** that a reviewer looked. Three review rounds: round 1 found the entry's "CI is green on them" claim false (`6414ba1`'s JIT gate cancelled with zero jobs); round 2 found the same sentence still claiming the six commits are "all documentation" when two changed CI workflows, and that the PR body had never been updated; round 3 found no blockers and confirmed the mechanism independently (live protection matches the table, the five contexts are string-exact against the real check-run names, and pushing to the PR flipped it `clean`→`blocked`), but found the entry had been corrected by accretion into three self-contradictions — rewritten in place rather than appended to again. Ledger: `REVIEW_PR7.md`. |
 | **Completed** | **CI-03** | **CI runs on pull requests only.** Dropped `push: branches: [main]` from `ci.yml`/`jit.yml`; `release.yml` untouched. Safe because `main` requires branches up to date before merging, so a PR's head is the tree that lands and the post-merge pass re-tested an identical tree. Measured cost of that duplicate pass: **30.4 runner-minutes** (mean per job over 12–14 completed runs) or **~15 min wall-clock** (n=17, median 14.52), the jobs being concurrent. Public repo, so `billable.total_ms` is 0 — this buys back wait time and runner capacity, not money. Three review rounds: round 1 caught the figures as invented and `cancel-in-progress: true` as unsafe (`workflow_dispatch` shares `refs/heads/main`, so a second manual run kills the first); round 2 caught the *corrections* — figures mislabelled as means, an un-updated PR body, and an unsupported "~19 min on GitLab" claim; round 3 re-derived every number from the run data (all reproduced exactly), confirmed the five required check contexts still match the job names a `pull_request` run produces, and found the entry's own Verification summary still citing the two methods the entry had already disavowed. Ledger: `REVIEW_PR8.md`. |
 | **Completed** | **DOC-02** | **Manual JIT gate retired in prose; a false safety claim corrected.** CI-03 left three places saying the gate runs "every push" when the workflows now trigger on `pull_request` + `workflow_dispatch` only — including Operational Protocol step 6, which told a future session CI had taken the duty over. It had not: **a push to a branch with no open PR is checked by nothing.** Step 6 now states that window and inverts the advice (run it locally *more*, not less). Issue #6's retirement items done: "mandatory" dropped from the `Makefile` help text, the paste-into-MR requirement removed from the `Makefile` comment and from `verify-jit.sh`'s final `echo`, and the stale "Issue #9 tracks replacing this" deleted rather than renumbered. Both make targets kept, demoted to useful. `README.md` deliberately unchanged — "on every change ... blocks the change" got *more* accurate under CI-03. Closes #6 — but only after review found box 4 unmet (step 6 still read "must pass `make verify-jit`" and had been *strengthened*, not demoted) and five more live GitLab `#9` references, including one in `verify-jit.sh`'s own header. #2 closed separately, and one carve-out is recorded rather than hidden: `RELEASING.md` still contradicts `release.yml`, filed as #11. Three review rounds, each reviewing the previous round's *fixes*: round 2 found the same stale-numbering defect surviving inside the file the fix had rewritten, plus a "~8 minutes" figure that does not reproduce (`jit-macos` is 14.08 min, n=8); round 3 found the numbering fix had broken the very table its convention note documented — GitHub swallowed the whole task board into the blockquote, confirmed against the markdown API. Ledger: `REVIEW_PR10.md`. |
+| **Completed** | **PROC-05** | **Three CI-hygiene rules recorded in the agent protocol.** User instruction, now bullets in Operational Protocol step 0: (1) Actions run only on branches that have a PR — already the implemented behaviour since CI-03, recorded for its *consequence*, that a push to a branch with no open PR is checked by nothing; (2) rebase on `main` before merging and merge only on green — **stricter than the enforced `strict: true`**, which a merge commit also satisfies, so the rule asks for a rebase to keep the tested tree identical to the landed one; (3) batch the **push**, not the commits — keep separate logical commits, but push once the work is done, since each push to a PR head costs a full ~30 runner-minute / ~15 wall-clock-minute pass and cancels any run in flight (30.33 and 14.82 over all 58 successful runs; three independent derivations at three sample sizes agree). (First drafted as "squash and push once"; corrected after the user clarified they want the logical commits kept.) Recorded with the unit corrected: the repo is public, `billable.total_ms` is 0, so what is saved is queue time and reviewer attention, not money. No workflow or code change. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

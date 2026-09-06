@@ -4355,3 +4355,90 @@ Round 3 reproduced the 14.08-minute measurement exactly (12.38/15.27/13.33/
 load-bearing — including the next run gives 14.14. Each round re-ran the break
 test from scratch rather than inheriting it, and rounds 2 and 3 each re-derived
 the GitLab→GitHub mapping independently. Ledger: `REVIEW_PR10.md`.
+
+### PROC-05 (2026-09-06): three CI-hygiene rules recorded in the agent protocol
+
+User gave three standing instructions and asked for them to be recorded in
+`CLAUDE.md` so they survive this session:
+
+1. GitHub Actions should only run on pushes to branches which have pull requests.
+2. Pull requests need to be rebased on `main` before merging and have a green build.
+3. Consolidate multiple commits before pushing, to save CI minutes.
+
+All three are now bullets in Operational Protocol step 0, alongside the reviewer,
+worktree, audit-correction and branch-and-PR rules.
+
+**(1) is already the implemented behaviour, not a change request.** CI-03 left
+`ci.yml` and `jit.yml` on `pull_request` + `workflow_dispatch` only. What the
+rule adds is the consequence an agent must hold in mind, which DOC-02 found
+stated wrongly in step 6: a push to a branch *with* an open PR runs the five
+checks against that PR's head, and a push to a branch with **no** open PR runs
+nothing at all. So "I pushed and nothing went red" is not evidence about a bare
+branch. No workflow change was needed and none was made.
+
+**(2) is stricter than the enforced setting, deliberately.** Branch protection
+sets `strict: true`, which requires the branch to be up to date but is satisfied
+by a *merge* commit from `main` — which is how PR #8 was brought up to date
+earlier today. The instruction asks for a **rebase**, so the branch keeps a
+linear history and the tested tree is exactly the tree that lands. Recorded with
+the caveat that rebasing rewrites the branch: do it before requesting review, and
+never while a reviewer agent is running against that worktree, which is the
+worktree rule's failure mode in a different costume. The user said "master"; this
+repository's default branch is `main` and the rule is recorded with the real
+name.
+
+**(3) is about the push, not the commits — clarified by the user after the
+first draft got it wrong.** The rule was first written as "squash or amend
+locally and push once", which reads as consolidating *commits*. The user's
+clarification: *"Just multiple logical commits but push only when work is
+done."* Separate logical commits are wanted — they keep the history reviewable
+and let one mistake be reverted alone; a single push carries any number of them,
+so squashing buys nothing. What is batched is the push.
+
+The cost is recorded with its true unit rather than silently. Every push to a PR
+head starts a full pass — five jobs, ~30 runner-minutes, ~15 minutes of
+wall-clock, `jit-macos` being the long pole — and cancels any run still in
+flight
+(`concurrency: jit-${{ github.ref }}` with `cancel-in-progress` on
+`pull_request`, observed during PR #10's review). But this repository is public,
+so `billable.total_ms` is **0**: there are no CI *minutes* to save in the
+billing sense. What is saved is queue time, runner capacity and a reviewer's
+attention. One guard added: never let this become a reason to skip a
+verification step in order to avoid a run.
+
+Those figures started as CI-03's, were re-derived in PR #8's round 3, and this
+PR's review re-derived them again over **every** successful run rather than the
+12–14 the entry first cited: 58 runs give a per-job mean sum of **30.33**
+runner-minutes, `jit-macos` **13.95** mean / 14.12 median (n=27, still the long
+pole), JIT-workflow wall-clock **14.82** mean / 14.60 median, and
+`billable.total_ms` **0 on 58 of 58**. Three independent derivations at three
+sample sizes agree, which is more than can be said for the first three figures
+this project published.
+
+**Files changed:** `CLAUDE.md` (three new bullets in step 0, task board),
+`AUDIT.md` (this entry).
+
+**Verification.** Documentation only — no code, no workflow, no build behaviour
+touched. The trigger claim in bullet 1 was checked against the live workflow keys
+rather than restated from an earlier entry: `ci.yml` and `jit.yml` are
+`pull_request` + `workflow_dispatch`; `release.yml` keeps `push:` on `v[0-9]*`
+tags.
+
+**Sequencing note.** Written on a branch off `main` while PR #10 was under
+review, deliberately not added to that PR: a reviewer agent was mid-flight
+against its worktree, and changing the tree under a running reviewer is what
+PROC-03 exists to prevent. Both branches append to the end of `AUDIT.md`, so this
+one was rebased onto `main` after #10 landed (`a0473c0`), the two `AUDIT.md`
+entries and the two task-board rows resolved additively, and the branch left
+linear with no merge commit — rule (2) applied to its own commit. The rebase
+also had to take the *later* wording of the PROC-05 task-board row, since the
+second commit on this branch rewrites the row the first one added.
+
+**Review:** one round, `ci-reviewer`, mergeable with no blockers and no majors.
+It confirmed the load-bearing claim behind rule (2) two ways — live protection
+has `required_linear_history: false`, and PR #8 really was brought up to date by
+two merge commits — and confirmed the cancel-in-flight claim from real run data
+(JIT run `33997841524` cancelled by `33998408078`) rather than from the
+`concurrency:` block alone. Its two minors are fixed: both rationales assumed
+the branch's commits survive into `main`, which squash-merging discards, and the
+trigger mechanism was stated in two places. Ledger: `REVIEW_PR12.md`.

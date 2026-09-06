@@ -36,10 +36,14 @@
       in place — it is not yet part of the record. Never claim to append while
       editing in place.
 
-    - **CI runs only where a PR exists.** `ci.yml` and `jit.yml` trigger on
+    - **CI runs only where a PR exists** (the gating workflows, that is —
+      `release.yml` is separate and fires on a `v*` tag). `ci.yml` and `jit.yml`
+      trigger on
       `pull_request` and `workflow_dispatch` only — never on `push`. A push to a
-      branch that has an open PR runs the five checks against that PR's head; a
-      push to a branch with **no** open PR runs nothing at all. This is
+      branch that has an open PR runs the five checks against that PR's
+      `refs/pull/N/merge` — the merge of head into base, not the head commit
+      itself, though under `strict: true` the two coincide at merge time. A push
+      to a branch with **no** open PR runs nothing at all. This is
       deliberate (CI-03): `main` requires branches to be up to date, so the PR's
       head is the tree that lands and a post-merge pass would re-test an
       identical tree. Two consequences to hold in mind: open the PR early if you
@@ -50,14 +54,19 @@
       **rebased on the current `main`** and all five checks are green on that
       rebased head. Branch protection enforces up-to-date-ness (`strict: true`)
       but accepts a merge commit as satisfying it; prefer
-      `git rebase origin/main` so the branch keeps a linear history and the
-      tested tree is exactly the tree that lands. Rebasing rewrites the branch,
+      `git rebase origin/main` so the branch keeps a linear history for review
+      and the tested tree is exactly the tree that lands. (`main` itself stays
+      linear either way, since PRs are squashed — what a rebase buys is a
+      reviewable branch and no merge-commit noise in the diff.) Rebasing rewrites the branch,
       so do it *before* asking for review, not after — and never while a
       reviewer agent is running against that worktree.
 
     - **Batch the push, not the commits.** Keep making separate, logical
-      commits — one per coherent change, so the history stays reviewable and a
-      single mistake can be reverted on its own. What to hold back is the
+      commits — one per coherent change, so the history stays reviewable **while
+      the PR is open** and a single mistake can be reverted on its own *during
+      review*. Be honest about the horizon: every PR in this repo has landed as
+      one squashed commit, so these commits are a reviewing and bisecting aid
+      inside the PR's window, not history that survives into `main`. What to hold back is the
       **push**: every push to a PR's head branch starts a full pass (five jobs,
       ~30 runner-minutes, ~15 minutes of wall-clock, `jit-macos` the long pole)
       and cancels any run still in flight, so a series of small pushes burns
@@ -95,10 +104,11 @@
     issue #6 asked for; the demotion is real and `make verify-jit` is a
     convenience now, not a checklist item.
 
-    Note what CI does *not* cover: since CI-03 the workflows trigger on
-    `pull_request` and `workflow_dispatch` only, so **a push to a branch with no
-    open PR is checked by nothing at all.** That is the one window worth running
-    `make verify-jit` in yourself — and it is cheaper than a red PR, since the
+    Note what CI does *not* cover — see step 0's **CI runs only where a PR
+    exists**, which is the single authority on the triggers; the short version
+    is that **a branch with no open PR is checked by nothing at all.** That is
+    the one window worth running `make verify-jit` in yourself, and it is
+    cheaper than a red PR, since the
     `jit-macos` job takes **~14 minutes** end to end (mean 14.08 min over the 8
     most recent successful runs, range 12.38–15.27; PR #8 measured 13.94 over
     12). An earlier version of this sentence said "the macOS debug profile takes

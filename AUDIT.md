@@ -4587,3 +4587,79 @@ pair 0, which cannot distinguish "checks every thread and pair" from "checks the
 first"; round 2 injected on the *last* thread at the *last* pair and confirmed
 the panic names `thread 2 ... pair 1` and the process exits.
 Ledger: `REVIEW_PR13.md`.
+
+### REL-01 (2026-09-06): the release flow contradicted itself (GitHub #11)
+
+`RELEASING.md` and `.github/workflows/release.yml` both ran `gh release create`
+for the same tag. Following the documented steps produced a collision: step 4
+pushed the tag, which fired the workflow and created the Release; step 5 then
+told the operator to create the same release by hand. `RELEASING.md` also
+asserted the opposite of what the workflow does — "the CI `release` job does
+**not** create releases in practice (no macOS runner) ... if it runs at all,
+only creates an empty entry" — which is false on every clause: `release.yml`
+runs on `ubuntu-24.04`, fires on every `v[0-9]*` tag, and needs no macOS runner
+to *create* an entry, only to attach a macOS binary.
+
+**Why nobody hit it.** No `v*` tag has been pushed since the migration, and the
+three that exist (`v0.1.0`-`v0.1.2`) all predate `bcad873`, the commit that
+added `release.yml`. A tag-push run uses the workflow file as it exists at that
+ref, so there was nothing to fire. The defect was latent, waiting for the next
+release.
+
+**The fix is a decision, not a correction: who owns the Release entry.** Three
+options were considered.
+
+- *The human owns it* — drop creation from CI. Loses the automation and leaves
+  the workflow pointless.
+- *CI owns it, published* — the human then uploads assets. Removes the
+  collision, but opens a window in which a **published release with no assets**
+  is visible, which is worse than no release at all: someone can find it and
+  download nothing.
+- *CI owns it, as a draft* — chosen. The collision cannot arise, and a draft is
+  visible only to users with push access, so the window between the tag landing
+  and the binary being attached is not a public one.
+
+So `release.yml` now creates the release with `--draft`, and `RELEASING.md`'s
+steps became: wait for the draft, `gh release upload` the artifacts,
+`gh release edit --draft=false` to publish, then confirm the assets are actually
+listed. `upload`, not `create`, is the operative change.
+
+The workflow was also made **idempotent** — it checks `gh release view` first
+and exits 0 if the release already exists, so a re-run on the same tag reports
+success instead of failing on a duplicate. That matters because a manual
+`workflow_dispatch` or a re-run is exactly what an operator reaches for when
+something went wrong mid-release.
+
+**Two further errors in `RELEASING.md`, both from the migration.** Its opening
+paragraph carried a half-replaced GitLab-era sentence — "For now the shipping
+x86_64 Linux and cannot build (or cross-compile) the macOS arm64 binary" — which
+is not parseable. And the automation section asked for a **self-hosted** macOS
+runner tagged `macos-arm64` while naming `macos-14` in the same sentence; the
+self-hosted half is obsolete, since `macos-14` is free for public repositories.
+The section now says what actually blocks automation: a decision about
+reproducibility and about whether an unsigned CI-built binary should carry the
+project's name — a judgement call, not a missing runner.
+
+Step 2's verification list also gained `make verify-jit`, which it did not have.
+For a release that is the check that matters: it is the only one exercising
+emitted ARM64, and a JIT defect does not crash, it silently produces wrong
+hashes. Step 1 now says the version bump goes through a pull request, since
+`main` has been protected since PROC-01 and a direct push is rejected.
+
+**Files changed:** `RELEASING.md` (rewritten), `.github/workflows/release.yml`
+(draft + idempotence + header), `AUDIT.md` (this entry).
+
+**Verification, and its limit — stated plainly because it is the whole point of
+the issue.** The YAML parses and the workflow's shell is `set -euo pipefail`
+with an explicit existence check. **The flow has not been executed end to end.**
+Doing so requires pushing a `v*` tag to the public repository, which creates a
+tag and a draft release; that is an outward-facing action and was not taken
+without asking. Until it runs, this fix is verified by reading, not by
+observation — which is exactly the standard the original document failed, and
+saying so is the point. Nothing in CI covers the release procedure; it can only
+be checked by running it.
+
+The one claim GitHub #11 flagged as *inferred rather than tested* — that
+`gh release create` fails on an already-existing release — is now moot rather
+than resolved: the fixed flow never issues a second `create`, so the collision
+cannot occur whatever `gh` does. The inference was never relied upon.

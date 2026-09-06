@@ -1,7 +1,11 @@
 # PERF-02 / GitHub #1 — raw A/B output, all six runs
 #
 # Date:     2026-09-06 (session 1e07e554)
-# Host:     Apple M2 Max, macOS (Darwin arm64), 12 performance cores
+# Host:     Apple M2 Max, macOS (Darwin arm64)
+#           8 performance + 4 efficiency cores (hw.perflevel0/1.logicalcpu).
+#           NOTE: 11 threads therefore places three workers on E-cores. That
+#           is part of why phase 2 resolves less than phase 1, and an earlier
+#           version of this header wrongly said "12 performance cores".
 # Command:  cargo bench --bench nativeloop_ab -- 11 12 256
 #           run alternately: branch, main, branch, main, branch, main
 # branch:   perf/jit-fmov, the modified compiler.rs of commit 2a0afc3

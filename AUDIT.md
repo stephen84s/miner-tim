@@ -4804,14 +4804,21 @@ change that cannot be shown to clear the bar is not kept. The revert is
 unchanged. The reasoning printed beside it was wrong twice over, and both
 versions are recorded here rather than the second quietly replacing the first.
 
-All three fail.
-
 **Criterion 3 was first written up as "a weak signal of a small regression under
 contention". Review refuted that from this repository's own data, and the claim
 is withdrawn.** The argument is self-contained in this session's own data: **`main`'s three
-runs span +7.42 to +7.71, 0.29 pp of spread on code that did not change**, which
-is comparable to the 0.31 pp mean separation between the arms. A gap the size of
-one arm's own noise is not a signal.
+runs span +7.42 to +7.71, 0.29 pp of spread on code that did not change**,
+comparable to the 0.31 pp mean separation between the arms. A gap the size of one
+arm's own noise is not a signal.
+
+Two disclosures that make that stronger rather than weaker. First, the 0.29 pp is
+driven by `main` run 2 at +7.71 — the most thermally compromised run in the set,
+one this entry elsewhere declares thrown away unread; the spread among admissible
+`main` runs cannot be computed at all, since only one is admissible. Second, the
+confound has a direction: hotter runs produced *higher* paired diffs, and `main`
+was the hot arm in two of the three rounds, so its apparent advantage is
+plausibly thermal rather than real. Both cut against reading anything into the
+gap, which is the conclusion drawn.
 
 BENCH-02 corroborates rather than carries it — four barriered runs of unmodified
 `main` at +7.37, +7.50, +7.31, +7.11, so 0.39 pp of spread, with +7.11 sitting
@@ -4840,9 +4847,18 @@ bites. Round 2 caught that; it is stated properly here.
 The gate as written throws away a **run**, both phases with it. So the
 admissible set is three runs — branch 1, branch 2, `main` 1 — for *every*
 criterion, phase 1 included. Two branch runs against one `main` run cannot
-evaluate a rule that asks for three of each. Neither phase has enough
-admissible data to decide anything; phase 1 is not "decisive" and phase 2 is not
-merely "directional".
+evaluate a rule that asks for three of each — which is criterion 1's clause, and
+criterion 2 reads the same set, so both are unevaluable. **Criterion 3 is
+different and the table is right that it fails:** it carries no count clause, so
+{7.19, 7.24} against {7.42} fails it mechanically even at 2-vs-1. Phase 1 is not
+"decisive"; phase 2 is not merely "directional"; and the two phases are not in
+the same position, which an earlier phrasing here blurred by calling all three
+criteria unevaluable.
+
+The verdict is over-determined either way. A failure triggers "revert if any
+fails"; an unevaluable criterion falls back on the rule's own heading, **"Keep
+only if ALL of these hold"**. That is the criterion's literal text, not a reading
+invented afterwards to fit the outcome.
 
 Review also noted the gate itself was **stricter than issue #1's own known-good
 figure** — the issue says ~4756 H/s and "discard runs well below that", while
@@ -4889,7 +4905,8 @@ body-JIT arm being an untouched control, which holds for any change confined to
 `emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
 shared emitter would move both arms and this method would not work.
 
-**Review:** one round, `jit-reviewer`, mergeable, no blockers. It confirmed the
+**Review:** three rounds, `jit-reviewer`, all mergeable, no blockers at any
+point — no code ships, so none was possible. Round 1: It confirmed the
 revert is exact (`2a0afc3` +36/-6 in `compiler.rs`, `3e61471` +6/-36 — an inverse),
 that pre-registration holds by commit timestamps with author and committer dates
 matching so no rebase hid an earlier order, and that the load-bearing claim is
@@ -4909,3 +4926,18 @@ JIT every round, and six runs completed without a panic. That is corroboration,
 not confirmation. `make verify-jit` was not re-run after the revert either, since
 `src/`, `scripts/` and `benches/` are byte-identical to `main` and the outcome is
 therefore `main`'s — a reason, not a check.
+
+Round 2 found the verdict itself wrong — "all three fail" asserted while
+endorsing a gate that discards the runs producing two of those failures — and
+warned that the fix must be "unevaluable", not "criterion 2 passed". Round 3
+confirmed the correction did not over-correct, and found that it had been applied
+to two of the three documents round 2 named: a bare "All three fail" survived
+five lines below its own withdrawal, and **the PR body was never updated at all**,
+still carrying the superseded framing in full. It also caught that the prose
+over-generalised the table (criterion 3 fails mechanically; only 1 and 2 are
+unevaluable), that this host has **8 performance and 4 efficiency cores** rather
+than 12 performance cores — so 11 threads puts three on E-cores, which is part of
+why phase 2 cannot resolve the effect — and that the 0.29 pp noise figure leans
+on the most compromised run in the set.
+
+Ledger: `REVIEW_PR15.md`.

@@ -112,6 +112,16 @@ are 5.5% and 2.2% below and are more defensibly warm. The retention split is
 therefore asymmetric: branch 2/3, main 1/3, and criterion 3 compares arms
 measured under different machine conditions.
 
+**Direction of the confound.** Main's retained 7.42–7.71 range is dominated by
+its two *warm* runs. If a warm machine raises the native-vs-body diff — plausible,
+since the body-JIT arm pays a per-iteration register reload and so degrades more
+under thermal pressure — then gating on absolute baseline preferentially removed
+main's *low*-diff observations and kept its high ones, which manufactures exactly
+the "branch entirely below main" pattern criterion 3 reported, with no code effect
+at all. I cannot confirm the direction: it needs the per-run pairing of baseline
+to diff, which the branch does not record (m4). It is stated here as the specific
+confound that would explain the observed sign, and as unresolvable from the record.
+
 Mitigating and material: the gate was **pre-registered**, so no threshold was
 picked after seeing which runs it would cut. This is a calibration question, not
 evidence of gaming. It belongs in the record because it is the mechanism behind

@@ -4741,3 +4741,84 @@ left behind ("because a manual re-running the job is exactly what...").
 Round 2 also confirmed the residual-risk statement still holds: `gh release
 list` and `gh run list --workflow=release.yml` are both empty, so the flow
 remains unrun and nothing new is claimed as tested. Ledger: `REVIEW_PR14.md`.
+
+### PERF-02 (2026-09-06): GitHub #1 measured and reverted — null result
+
+The f-register load in `emit_iteration_pre` paid two `FMOV Dd, Dn` per lane
+because `emit_cvt_packed_int` hardcoded its outputs as `d25`/`d26`. Giving it
+explicit destinations lets the f path convert straight into `f_regs(i)`. **The
+instruction saving is real and exact. The time saving is not measurable, and the
+change is reverted.**
+
+**The acceptance criterion was written and committed before the first benchmark
+run** (`PERF1_CRITERION.md`, commits `2a0afc3` and `bb3a469`), specifically so
+the threshold could not be chosen after seeing the data. That mattered: the
+result is a near-miss, and a threshold picked afterwards could have been argued
+either way.
+
+**Correction made to the criterion before measuring, not after.** Its first
+version asked for the phase-1 paired diff's CI to exclude zero, positive — which
+is trivially satisfied and measures nothing, because the harness compares native
+loop against body JIT, a gap already ~+6% before the change. The right quantity
+is the *change* in that diff between branch and `main`. This works because
+`emit_iteration_pre` is called **only** from `compile_native_loop` (both call
+sites checked; the body JIT never touches it), so the body-JIT arm is an
+untouched control within each run.
+
+**The deterministic result, which needs no benchmark and stands regardless.**
+`native_loop_emitted_instruction_accounting`:
+
+| | `main` | branch |
+|---|---|---|
+| `iter_pre` | 111 | **103** |
+| words added per hash | 2,752,512 | **2,621,440** |
+
+Exactly 8 instructions per iteration and **131,072 per hash**, matching the
+issue's arithmetic to the word.
+
+**The timing result: three runs per arm, alternating, 11 threads x 12 pairs x
+256 hashes.**
+
+| criterion | outcome |
+|---|---|
+| 1. phase-1 effect positive in every paired comparison | **FAIL** — +0.25, **-0.02**, +0.07 pp |
+| 2. min(branch) phase-1 diff exceeds max(main) | **FAIL** — 6.12 vs 6.15, ranges overlap |
+| 3. phase-2 per-thread: branch not entirely below main | **FAIL** — branch 7.19-7.24, main 7.42-7.71 |
+
+All three fail. Criterion 3 is the uncomfortable one: at 11 threads the branch
+sat **consistently below** `main` by ~0.25 pp, in all three runs, across widely
+varying absolute baselines. That is a weak signal of a small *regression* under
+contention, not merely an absent gain — plausible if removing the FMOVs shifted
+register pressure or scheduling, and equally plausible as noise. It is recorded
+because it points the wrong way, which is exactly when a result is most tempting
+to leave out.
+
+**Three of six runs failed the pre-registered baseline gate** (11-thread body
+JIT >= 4900 H/s): branch run 3 at 4714.8, main runs 2 and 3 at 4495.8 and
+4649.1. The machine was warm from a day of CI and benchmark work. They are
+discarded rather than interpreted, which is what the gate is for — and it leaves
+phase 2 with only one valid `main` run, so criterion 3's signal is *directional
+at best*. Phase 1's six runs all passed their gate (>= 560 H/s), and phase 1
+alone is decisive.
+
+**Not re-run.** The criterion says to record the measurement rather than retry
+until a run cooperates, and nothing here suggests a positive effect that more
+data would reveal.
+
+**Precedent, and why this outcome was expected.** `AUDIT.md` 2026-08-15 records
+`emit_mem_addr`: 0.35% fewer emitted instructions, measured *slower*, then null,
+reverted. The issue itself predicted the same, and gave the reason — this loop
+is latency- and memory-bound, not instruction-count-bound. 131,072 register-to-
+register `FMOV`s per hash are among the cheapest instructions on Apple Silicon
+and evidently disappear into the shadow of the dataset reads.
+
+**Reverted:** `src/randomx/jit/compiler.rs` is byte-identical to `main`. What
+remains on this branch is the record: the pre-registered criterion, the
+instruction counts, the six runs, and this entry. `make verify-jit` passed 92/92
+in debug and release **on the modified code** before it was reverted, so the
+change was correct — it simply bought nothing.
+
+**Assumption worth flagging for the next person.** The design rests on the
+body-JIT arm being an untouched control, which holds for any change confined to
+`emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
+shared emitter would move both arms and this method would not work.

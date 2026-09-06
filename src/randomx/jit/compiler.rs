@@ -721,45 +721,18 @@ fn emit_istore(e: &mut Emitter, ibc: &BytecodeInstruction) {
 // Output: d25 = f64(lo_i32), d26 = f64(hi_i32)
 // ============================================================================
 
-/// Load a packed pair of i32 from the scratchpad and convert both to f64,
-/// writing them into `dst_lo` and `dst_hi`.
-///
-/// **Clobbers `x0` and `x1`**, and takes the scratchpad offset in `x0`.
-///
-/// **`dst_lo` is written before the second `LDRSW` reloads `x0`.** Both
-/// destinations are D-register fields (`scvtf_dx` encodes bits [4:0] of the FP
-/// register file), so an integer register cannot be passed by mistake — but a
-/// caller must not name a D register whose value it still needs afterwards, and
-/// must not pass the same register twice, since the second write would destroy
-/// the first.
-///
-/// Callers that consume the result as an *operand* rather than a destination —
-/// `emit_fadd_m`, `emit_fsub_m`, `emit_fdiv_m` — keep using the `d25`/`d26`
-/// scratch pair via [`emit_cvt_packed_int`], because they need the loaded value
-/// somewhere neutral before combining it with the destination register.
-fn emit_cvt_packed_int_to(e: &mut Emitter, dst_lo: u32, dst_hi: u32) {
-    debug_assert!(
-        dst_lo != dst_hi,
-        "emit_cvt_packed_int_to: dst_lo and dst_hi must differ ({dst_lo} == {dst_hi}); \
-         the second SCVTF would overwrite the first"
-    );
-    debug_assert!(dst_lo < 32 && dst_hi < 32, "D-register index out of range");
+fn emit_cvt_packed_int(e: &mut Emitter) {
     // x1 = x16 + x0 (absolute address in scratchpad)
     e.add_reg(reg::X1, reg::X16, reg::X0);
     // Load low 32-bit signed int, sign-extend to 64-bit
     // LDRSW x0, [x1, #0]
     e.emit(0xB9800000 | (reg::X1 << 5) | reg::X0); // LDRSW x0, [x1]
     // Convert to f64
-    e.scvtf_dx(dst_lo, reg::X0);
+    e.scvtf_dx(25, reg::X0);
     // Load high 32-bit signed int
     // LDRSW x0, [x1, #4]
     e.emit(0xB9800400 | (reg::X1 << 5) | reg::X0); // LDRSW x0, [x1, #4]
-    e.scvtf_dx(dst_hi, reg::X0);
-}
-
-/// The scratch-pair form: results land in `d25`/`d26`.
-fn emit_cvt_packed_int(e: &mut Emitter) {
-    emit_cvt_packed_int_to(e, 25, 26);
+    e.scvtf_dx(26, reg::X0);
 }
 
 // ============================================================================
@@ -943,15 +916,12 @@ fn emit_iteration_pre(e: &mut Emitter, config: &ProgramConfiguration) {
     }
 
     // f[i] = cvt_packed_i32(scratchpad[sp_addr1 + 8i])   (ASSIGN, stride 8)
-    //
-    // Converts straight into the f-register rather than via d25/d26. This is an
-    // ASSIGN, so unlike the e path below there is nothing to mask and nothing to
-    // combine — the destination is simply where the value belongs. The old form
-    // paid 2 FMOVs per lane, 8 per iteration, 131,072 per hash (GitHub #1).
     for i in 0..4usize {
         e.add_imm(reg::X0, reg::X27, (i as u32) * 8);
+        emit_cvt_packed_int(e); // -> d25 (lo), d26 (hi)
         let (flo, fhi) = f_regs(i);
-        emit_cvt_packed_int_to(e, flo, fhi);
+        e.fmov_dd(flo, reg::D25);
+        e.fmov_dd(fhi, reg::D26);
     }
 
     // e[i] = mask(cvt_packed_i32(scratchpad[sp_addr1 + 32 + 8i]))

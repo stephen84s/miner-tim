@@ -4211,7 +4211,6 @@ complexity for a saving that only applies to documentation commits. Not worth it
 today; revisit if docs-only PRs become frequent.
 
 
-
 ### DOC-02 (2026-09-06): retire the manual JIT gate in prose; correct a false safety claim CI-03 created
 
 Two things, one of which is a regression the previous merge introduced.
@@ -4398,14 +4397,23 @@ so squashing buys nothing. What is batched is the push.
 
 The cost is recorded with its true unit rather than silently. Every push to a PR
 head starts a full pass — five jobs, ~30 runner-minutes, ~15 minutes of
-wall-clock, `jit-macos` being the long pole (figures from CI-03, re-derived and
-confirmed in PR #8's round 3) — and cancels any run still in flight
+wall-clock, `jit-macos` being the long pole — and cancels any run still in
+flight
 (`concurrency: jit-${{ github.ref }}` with `cancel-in-progress` on
 `pull_request`, observed during PR #10's review). But this repository is public,
 so `billable.total_ms` is **0**: there are no CI *minutes* to save in the
 billing sense. What is saved is queue time, runner capacity and a reviewer's
 attention. One guard added: never let this become a reason to skip a
 verification step in order to avoid a run.
+
+Those figures started as CI-03's, were re-derived in PR #8's round 3, and this
+PR's review re-derived them again over **every** successful run rather than the
+12–14 the entry first cited: 58 runs give a per-job mean sum of **30.33**
+runner-minutes, `jit-macos` **13.95** mean / 14.12 median (n=27, still the long
+pole), JIT-workflow wall-clock **14.82** mean / 14.60 median, and
+`billable.total_ms` **0 on 58 of 58**. Three independent derivations at three
+sample sizes agree, which is more than can be said for the first three figures
+this project published.
 
 **Files changed:** `CLAUDE.md` (three new bullets in step 0, task board),
 `AUDIT.md` (this entry).
@@ -4426,3 +4434,11 @@ linear with no merge commit — rule (2) applied to its own commit. The rebase
 also had to take the *later* wording of the PROC-05 task-board row, since the
 second commit on this branch rewrites the row the first one added.
 
+**Review:** one round, `ci-reviewer`, mergeable with no blockers and no majors.
+It confirmed the load-bearing claim behind rule (2) two ways — live protection
+has `required_linear_history: false`, and PR #8 really was brought up to date by
+two merge commits — and confirmed the cancel-in-flight claim from real run data
+(JIT run `33997841524` cancelled by `33998408078`) rather than from the
+`concurrency:` block alone. Its two minors are fixed: both rationales assumed
+the branch's commits survive into `main`, which squash-merging discards, and the
+trigger mechanism was stated in two places. Ledger: `REVIEW_PR12.md`.

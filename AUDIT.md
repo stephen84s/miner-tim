@@ -4815,10 +4815,25 @@ Two disclosures that make that stronger rather than weaker. First, the 0.29 pp i
 driven by `main` run 2 at +7.71 — the most thermally compromised run in the set,
 one this entry elsewhere declares thrown away unread; the spread among admissible
 `main` runs cannot be computed at all, since only one is admissible. Second, the
-confound has a direction: hotter runs produced *higher* paired diffs, and `main`
-was the hot arm in two of the three rounds, so its apparent advantage is
-plausibly thermal rather than real. Both cut against reading anything into the
-gap, which is the conclusion drawn.
+confound has a direction, and it is worse than first written. `main` was the
+**hotter (slower) arm in all three rounds, on both the 1-thread and 11-thread
+legs** — not two of three, which was a figure inherited from the *retention*
+split, a different quantity. And it is hot by construction rather than by
+chance: the schedule was branch, `main`, branch, `main`, branch, `main`, so
+**`main` always ran second**, after the branch had already warmed the machine.
+Arm identity is perfectly confounded with run order.
+
+That is a design flaw in the between-run schedule, and it is recorded as one.
+The harness's A-B-B-A pattern cancels drift *within* a run; nothing cancelled it
+*between* runs, and alternating strictly rather than counterbalancing
+(b,m,m,b,b,m or similar) guaranteed the confound. A future comparison of this
+shape should counterbalance the order.
+
+One limit on the confound itself: "hotter gives a higher diff" is monotone within
+`main` but not within the branch — branch run 3 is the hottest branch run and
+sits at 7.22, below run 2's 7.24 — so thermal effect and arm effect cannot be
+separated from this data. The "plausibly thermal" hedge survives; a stronger
+claim would not.
 
 BENCH-02 corroborates rather than carries it — four barriered runs of unmodified
 `main` at +7.37, +7.50, +7.31, +7.11, so 0.39 pp of spread, with +7.11 sitting
@@ -4905,8 +4920,8 @@ body-JIT arm being an untouched control, which holds for any change confined to
 `emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
 shared emitter would move both arms and this method would not work.
 
-**Review:** three rounds, `jit-reviewer`, all mergeable, no blockers at any
-point — no code ships, so none was possible. Round 1: It confirmed the
+**Review:** four rounds, `jit-reviewer`, all mergeable, no blockers at any
+point — no code ships, so none was possible. Round 1 confirmed the
 revert is exact (`2a0afc3` +36/-6 in `compiler.rs`, `3e61471` +6/-36 — an inverse),
 that pre-registration holds by commit timestamps with author and committer dates
 matching so no rebase hid an earlier order, and that the load-bearing claim is
@@ -4916,7 +4931,7 @@ body-JIT callers emitted **byte-identical words**, so the control arm was
 untouched at the emitted-code level rather than merely the source level.
 
 Its major finding is recorded above: the regression reading was refuted by this
-repo's own prior data and withdrawn. Ledger: `REVIEW_PR15.md`.
+repo's own prior data and withdrawn.
 
 **What review could not verify, stated because the record is the deliverable.**
 The "92/92 on the modified code" claim cannot be checked from what is committed —
@@ -4939,5 +4954,18 @@ unevaluable), that this host has **8 performance and 4 efficiency cores** rather
 than 12 performance cores — so 11 threads puts three on E-cores, which is part of
 why phase 2 cannot resolve the effect — and that the 0.29 pp noise figure leans
 on the most compromised run in the set.
+
+Round 4 re-derived every figure from `PERF1_RUNS.log`, confirmed the four
+documents now agree and that CI was 5/5 green, and found the "hot arm in two of
+three rounds" figure wrong in the *conservative* direction — it is all three, and
+confounded by construction, as recorded above. Its remaining findings were copy:
+a paragraph duplicated in the PR body, a stale round count, and two nits. It
+judged the substantive record accurate and recommended the round sequence stop.
+
+**What no round could verify**, stated because the code is gone and this entry is
+what survives: the benchmark was never independently re-run, so the six results
+are checked for internal consistency only; "11 threads places three workers on
+E-cores" is a sound inference but the harness prints only the mean of per-thread
+means; and the "92/92 on the modified code" claim is permanently uncheckable.
 
 Ledger: `REVIEW_PR15.md`.

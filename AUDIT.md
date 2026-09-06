@@ -4312,7 +4312,7 @@ rather than against the audit's account of it. Issue #6 closes with this PR —
 but only after review found box 4 unmet; on the first pass it would have been
 closed early.
 
-**Review:** two rounds, `ci-reviewer`, both mergeable with no blockers and no
+**Review:** three rounds, `ci-reviewer`, all mergeable with no blockers and no
 majors. Round 1's six findings are folded into the sections above. Round 2
 reviewed the *fixes* as new work and found six more, four of which are defects
 introduced or missed by round 1's corrections:
@@ -4339,6 +4339,19 @@ introduced or missed by round 1's corrections:
   this ... a mandatory local gate". Marked a historical record with the false
   claim named, rather than rewritten — its value is the reasoning it captured.
 
-Round 2 also re-ran the break test from scratch rather than inheriting it
-(`EXPECTED_PASSES` 92 → 91 → `GATE FAILED`, exit 1) and re-derived the issue
-mapping independently. Ledger: `REVIEW_PR10.md`.
+Round 3 then reviewed round 2's fixes, scoped to those commits, and found the
+numbering fix had done it a **third** time — and worse. The convention note it
+added ran flush into the task board's header row, so GitHub's renderer swallowed
+the **entire table** into the blockquote: `<table>` count 3 on `main`, 2 on the
+branch, confirmed against the markdown API rather than by eye. It had also left
+behind exactly the two instances round 2 enumerated, one of them numbering a
+claim `#6` — the issue this PR closes — while the same claim is numbered `#4`
+elsewhere in the same file. And the note asserted a repo-wide rule it had not
+been applied repo-wide; it now carries an explicit scope. A stated count was
+wrong too: "six further `issue #7` references" was five.
+
+Round 3 reproduced the 14.08-minute measurement exactly (12.38/15.27/13.33/
+14.75/14.35/14.12/14.90/13.57, mean 14.083) and confirmed the cut-off is not
+load-bearing — including the next run gives 14.14. Each round re-ran the break
+test from scratch rather than inheriting it, and rounds 2 and 3 each re-derived
+the GitLab→GitHub mapping independently. Ledger: `REVIEW_PR10.md`.

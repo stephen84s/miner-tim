@@ -16,9 +16,11 @@
 # done, not done: `release.yml` creates the Release entry, but building and
 # attaching the macOS tarball is still manual (see `release.yml`'s own header),
 # and `RELEASING.md` still carries GitLab-era text that contradicts
-# `release.yml` — it claims the CI job "only creates an empty entry ... if it
-# runs at all" and proposes a self-hosted `macos-arm64` runner. No `v*` tag has
-# been pushed since the migration, so `release.yml` has never actually run.
+# `release.yml` — it claims "the CI job, if it runs at all, only creates an
+# empty entry" and proposes a self-hosted `macos-arm64` runner. `release.yml`
+# has never actually run: v0.1.0-v0.1.2 exist on the remote but arrived with
+# the migration's history rewrite rather than as pushes, and no `v*` tag has
+# been pushed since.
 # Those defects pre-date this comment and are tracked in GitHub #11,
 # deliberately not fixed in the PR that found them.
 

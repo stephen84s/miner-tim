@@ -1,6 +1,7 @@
 # Design: move the RandomX iteration loop into the JIT
 
-**Status:** proposed — implementation staged behind this document.
+**Status:** superseded — implemented and merged as JIT-01; the native loop is
+the default for rx/0 + full mode + aarch64.
 **Historical record, not current fact.** Kept as written for the reasoning it
 carries; several of its claims about CI have since been overtaken. In
 particular §"CI can never run any of this" was true of GitLab's x86_64 runners

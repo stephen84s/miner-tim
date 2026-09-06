@@ -4741,3 +4741,235 @@ left behind ("because a manual re-running the job is exactly what...").
 Round 2 also confirmed the residual-risk statement still holds: `gh release
 list` and `gh run list --workflow=release.yml` are both empty, so the flow
 remains unrun and nothing new is claimed as tested. Ledger: `REVIEW_PR14.md`.
+
+### PERF-02 (2026-09-06): GitHub #1 measured and reverted — null result
+
+The f-register load in `emit_iteration_pre` paid two `FMOV Dd, Dn` per lane
+because `emit_cvt_packed_int` hardcoded its outputs as `d25`/`d26`. Giving it
+explicit destinations lets the f path convert straight into `f_regs(i)`. **The
+instruction saving is real and exact. The time saving is not measurable, and the
+change is reverted.**
+
+**The acceptance criterion was written and committed before the first benchmark
+run** (`PERF1_CRITERION.md`, commits `2a0afc3` and `bb3a469`), specifically so
+the threshold could not be chosen after seeing the data. That mattered: the
+result is a near-miss, and a threshold picked afterwards could have been argued
+either way.
+
+**Correction made to the criterion before measuring, not after.** Its first
+version asked for the phase-1 paired diff's CI to exclude zero, positive — which
+is trivially satisfied and measures nothing, because the harness compares native
+loop against body JIT, a gap already ~+6% before the change. The right quantity
+is the *change* in that diff between branch and `main`. This works because
+`emit_iteration_pre` is called **only** from `compile_native_loop` (both call
+sites checked; the body JIT never touches it), so the body-JIT arm is an
+untouched control within each run.
+
+**The deterministic result, which needs no benchmark and stands regardless.**
+`native_loop_emitted_instruction_accounting`:
+
+| | `main` | branch |
+|---|---|---|
+| `iter_pre` | 111 | **103** |
+| words added per hash | 2,752,512 | **2,621,440** |
+
+Exactly 8 instructions per iteration and **131,072 per hash**, matching the
+issue's arithmetic to the word.
+
+**The timing result: three runs per arm, alternating, 11 threads x 12 pairs x
+256 hashes.**
+
+Evaluated two ways, because the baseline gate changes which runs are admissible
+and the first write-up quietly used both sets at once.
+
+| criterion | on all six runs | on the gate-retained set |
+|---|---|---|
+| 1. phase-1 effect positive in every paired comparison | FAIL — +0.25, **-0.02**, +0.07 pp | **unevaluable** — 1 pair, the rule needs 3 |
+| 2. min(branch) phase-1 diff exceeds max(main) | FAIL — 6.12 vs 6.15 | **unevaluable** — would read 6.12 > 6.05 at n=2 vs n=1 |
+| 3. phase-2 per-thread: branch not entirely below main | FAIL — 7.19-7.24 vs 7.42-7.71 | FAIL — 7.19/7.24 vs 7.42 |
+
+**The first version of this entry said "all three fail" while endorsing a gate
+that discards the runs producing two of those failures.** The -0.02 in row 1
+comes from `main` run 2, the worst run in the set, 5.5% below known-good; the
+6.15 in row 2 is `main` run 3, also discarded. Applied literally — "a run below
+**either** figure is thrown away without being read as a result" — the retained
+set is branch runs 1 and 2 and `main` run 1, and on it criterion 2 would read as
+*passing*.
+
+**That is not a claim the change passed.** One branch-vs-main pair cannot
+evaluate a rule written for three, and a "pass" drawn from n=2 against n=1 is
+noise with a verdict attached. The correct statement is that on admissible data
+the criteria are **unevaluable**, and the rule is "keep only if all hold" — so a
+change that cannot be shown to clear the bar is not kept. The revert is
+unchanged. The reasoning printed beside it was wrong twice over, and both
+versions are recorded here rather than the second quietly replacing the first.
+
+**Criterion 3 was first written up as "a weak signal of a small regression under
+contention". Review refuted that from this repository's own data, and the claim
+is withdrawn.** The argument is self-contained in this session's own data: **`main`'s three
+runs span +7.42 to +7.71, 0.29 pp of spread on code that did not change**,
+comparable to the 0.31 pp mean separation between the arms. A gap the size of one
+arm's own noise is not a signal.
+
+Two disclosures that make that stronger rather than weaker. First, the 0.29 pp is
+driven by `main` run 2 at +7.71 — the most thermally compromised run in the set,
+one this entry elsewhere declares thrown away unread; the spread among admissible
+`main` runs cannot be computed at all, since only one is admissible. Second, the
+confound has a direction — **hotter runs produced *higher* paired diffs** — and
+it is worse than first written. `main` was the **hotter (slower) arm in all
+three rounds, on both the 1-thread and 11-thread legs**, so its apparent
+advantage is plausibly thermal rather than real — not two of three, which was a figure inherited from the *retention*
+split, a different quantity. And it is hot by construction rather than by
+chance: the schedule was branch, `main`, branch, `main`, branch, `main`, so
+**`main` always ran second**, after the branch had already warmed the machine.
+Arm identity is perfectly confounded with run order.
+
+That is a design flaw in the between-run schedule, and it is recorded as one.
+The harness's A-B-B-A pattern cancels drift *within* a run; nothing cancelled it
+*between* runs, and alternating strictly rather than counterbalancing
+(b,m,m,b,b,m or similar) guaranteed the confound. A future comparison of this
+shape should counterbalance the order.
+
+One limit on the confound itself: "hotter gives a higher diff" is monotone within
+`main` but not within the branch — branch run 3 is the hottest branch run and
+sits at 7.22, below run 2's 7.24 — so thermal effect and arm effect cannot be
+separated from this data. The "plausibly thermal" hedge survives; a stronger
+claim would not.
+
+BENCH-02 corroborates rather than carries it — four barriered runs of unmodified
+`main` at +7.37, +7.50, +7.31, +7.11, so 0.39 pp of spread, with +7.11 sitting
+**below the branch's entire 7.19-7.24 range**. Stated as corroboration because
+those four were not one uniform set: BENCH-02's own entry records the harness
+changing across them, and one was a reviewer's separate execution. The
+register-pressure mechanism offered alongside the original claim was unsupported
+speculation and is dropped with it.
+
+What criterion 3 actually shows is that the effect, in either direction, is
+**below what this harness can resolve at 11 threads**.
+
+**Three of six runs failed the pre-registered baseline gate** (11-thread body
+JIT >= 4900 H/s): branch run 3 at 4714.8, main runs 2 and 3 at 4495.8 and
+4649.1. The machine was warm from a day of CI and benchmark work. They are
+discarded rather than interpreted, which is what the gate is for.
+
+**How that was applied, corrected twice.** The criterion discards a *run*; the
+first write-up silently discarded a *phase*, keeping phase 1 of runs whose phase
+2 failed the gate. The correction said so — and then **did it again in the next
+sentence**, asserting "phase 1's six runs all passed their gate and are the
+decisive evidence" and pinning criterion 1's unmet sample size on phase 2, when
+criterion 1 is explicitly a *phase-1* rule and is exactly where the shortfall
+bites. Round 2 caught that; it is stated properly here.
+
+The gate as written throws away a **run**, both phases with it. So the
+admissible set is three runs — branch 1, branch 2, `main` 1 — for *every*
+criterion, phase 1 included. Two branch runs against one `main` run cannot
+evaluate a rule that asks for three of each — which is criterion 1's clause, and
+criterion 2 reads the same set, so both are unevaluable. **Criterion 3 is
+different and the table is right that it fails:** it carries no count clause, so
+{7.19, 7.24} against {7.42} fails it mechanically even at 2-vs-1. Phase 1 is not
+"decisive"; phase 2 is not merely "directional"; and the two phases are not in
+the same position, which an earlier phrasing here blurred by calling all three
+criteria unevaluable.
+
+The verdict is over-determined either way. A failure triggers "revert if any
+fails"; an unevaluable criterion falls back on the rule's own heading, **"Keep
+only if ALL of these hold"**. That is the criterion's literal text, not a reading
+invented afterwards to fit the outcome.
+
+Review also noted the gate itself was **stricter than issue #1's own known-good
+figure** — the issue says ~4756 H/s and "discard runs well below that", while
+the gate was set at 4900. Measured against that ~4756 figure rather than against the gate: branch run 3
+at 4714.8 is 0.9% under, `main`'s two are 5.5% and 2.2% under. (Against the 4900
+gate itself they are 3.8%, 8.2% and 5.1% under.) Retention split 2-of-3 against 1-of-3, which is an
+asymmetry a pre-registered gate does not excuse, only documents.
+
+**Not re-run.** The criterion says to record the measurement rather than retry
+until a run cooperates, and nothing here suggests a positive effect that more
+data would reveal.
+
+**The criterion was, in hindsight, unpassable — and that is worth recording.**
+Criterion 2 demanded the branch's minimum exceed `main`'s maximum, against a
+run-to-run spread the same document put at ~0.4 pp; criterion 3 demanded as much
+of phase 2, where BENCH-02 had already measured 0.39 pp of spread on unchanged
+code. No sub-1% effect could have cleared either. The honest verdict is
+therefore not "the change failed three criteria" but **"the effect is smaller
+than this harness can resolve, and the criterion was set at a resolution the
+harness does not have."** The revert stands; the reasoning behind it is now
+stated correctly.
+
+**Precedent, and why this outcome was expected.** `AUDIT.md` 2026-08-15 records
+`emit_mem_addr`: 0.35% fewer emitted instructions, measured *slower*, then null,
+reverted. The issue itself predicted the same, and gave the reason — this loop
+is latency- and memory-bound, not instruction-count-bound. 131,072 register-to-
+register `FMOV`s per hash are among the cheapest instructions on Apple Silicon
+and evidently disappear into the shadow of the dataset reads.
+
+**Reverted:** `src/randomx/jit/compiler.rs` is byte-identical to `main`. What
+remains on this branch is the record: the pre-registered criterion, the
+instruction counts, the six runs, and this entry. `make verify-jit` passed 92/92
+in debug and release **on the modified code** before it was reverted, so the
+change was correct — it simply bought nothing.
+
+**Files changed:** `src/randomx/jit/compiler.rs` (added, then reverted — now
+byte-identical to `main`), `PERF1_CRITERION.md` (new: the pre-registered
+threshold), `PERF1_RUNS.log` (new: raw output of all six runs, committed because
+the deliverable of this work *is* the record), `CLAUDE.md` (task board),
+`AUDIT.md` (this entry), `REVIEW_PR15.md` (the review ledger).
+
+**Assumption worth flagging for the next person.** The design rests on the
+body-JIT arm being an untouched control, which holds for any change confined to
+`emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
+shared emitter would move both arms and this method would not work.
+
+**Review:** a sequence of cold `jit-reviewer` rounds, every one recorded in
+`REVIEW_PR15.md` — that ledger, not a count repeated here, is the authority on
+how many. (This sentence has now gone stale three times by naming a number.) All
+mergeable, no blockers at any point: no code ships, so none was possible. Round 1
+confirmed the
+revert is exact (`2a0afc3` +36/-6 in `compiler.rs`, `3e61471` +6/-36 — an inverse),
+that pre-registration holds by commit timestamps with author and committer dates
+matching so no rebase hid an earlier order, and that the load-bearing claim is
+true in a **stronger** form than stated: because `emit_cvt_packed_int` was kept
+as a wrapper delegating to `emit_cvt_packed_int_to(e, 25, 26)`, the three
+body-JIT callers emitted **byte-identical words**, so the control arm was
+untouched at the emitted-code level rather than merely the source level.
+
+Its major finding is recorded above: the regression reading was refuted by this
+repo's own prior data and withdrawn.
+
+**What review could not verify, stated because the record is the deliverable.**
+The "92/92 on the modified code" claim cannot be checked from what is committed —
+the gate output was not captured and the code is gone. Corroboration exists:
+`assert_arms_agree` compares the modified native arm against the unmodified body
+JIT every round, and six runs completed without a panic. That is corroboration,
+not confirmation. `make verify-jit` was not re-run after the revert either, since
+`src/`, `scripts/` and `benches/` are byte-identical to `main` and the outcome is
+therefore `main`'s — a reason, not a check.
+
+Round 2 found the verdict itself wrong — "all three fail" asserted while
+endorsing a gate that discards the runs producing two of those failures — and
+warned that the fix must be "unevaluable", not "criterion 2 passed". Round 3
+confirmed the correction did not over-correct, and found that it had been applied
+to two of the three documents round 2 named: a bare "All three fail" survived
+five lines below its own withdrawal, and **the PR body was never updated at all**,
+still carrying the superseded framing in full. It also caught that the prose
+over-generalised the table (criterion 3 fails mechanically; only 1 and 2 are
+unevaluable), that this host has **8 performance and 4 efficiency cores** rather
+than 12 performance cores — so 11 threads puts three on E-cores, which is part of
+why phase 2 cannot resolve the effect — and that the 0.29 pp noise figure leans
+on the most compromised run in the set.
+
+Round 4 re-derived every figure from `PERF1_RUNS.log`, confirmed the four
+documents now agree and that CI was 5/5 green, and found the "hot arm in two of
+three rounds" figure wrong in the *conservative* direction — it is all three, and
+confounded by construction, as recorded above. Its remaining findings were copy:
+a paragraph duplicated in the PR body, a stale round count, and two nits. It
+judged the substantive record accurate and recommended the round sequence stop.
+
+**What no round could verify**, stated because the code is gone and this entry is
+what survives: the benchmark was never independently re-run, so the six results
+are checked for internal consistency only; "11 threads places three workers on
+E-cores" is a sound inference but the harness prints only the mean of per-thread
+means; and the "92/92 on the modified code" claim is permanently uncheckable.
+
+Ledger: `REVIEW_PR15.md`.

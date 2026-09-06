@@ -1,0 +1,106 @@
+# PERF-02 / GitHub #1 — raw A/B output, all six runs
+#
+# Date:     2026-09-06 (session 1e07e554)
+# Host:     Apple M2 Max, macOS (Darwin arm64)
+#           8 performance + 4 efficiency cores (hw.perflevel0/1.logicalcpu).
+#           NOTE: 11 threads therefore places three workers on E-cores. That
+#           is part of why phase 2 resolves less than phase 1, and an earlier
+#           version of this header wrongly said "12 performance cores".
+# Command:  cargo bench --bench nativeloop_ab -- 11 12 256
+#           run alternately: branch, main, branch, main, branch, main
+# branch:   perf/jit-fmov, the modified compiler.rs of commit 2a0afc3
+#           (since reverted in 3e61471; this log is the only surviving record
+#            of the modified code's behaviour)
+# main:     unmodified, at c337229
+# Ledger:   AUDIT.md, entry PERF-02
+#
+# The "##### round N / arm #####" separators are echoed by the driver script,
+# not by the harness, so they are not self-identifying. Arm identity rests on
+# the driver having cd'd into the right worktree. Noted because an arm-identity
+# failure is precisely what produced this project's retracted +9.01% claim.
+#
+##### round 1 / branch #####
+=== 1 thread ===
+  body JIT     : mean    570.1 H/s   median    571.2
+  native loop  : mean    606.0 H/s   median    606.1
+  paired diff  : +6.30%  (95% CI +6.05% .. +6.54%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean 13.84%   median  9.69%
+  native loop  : range/mean  mean 12.56%   median  7.03%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   5055.1 H/s   median   5028.4
+  native loop  : mean   5414.4 H/s   median   5389.6
+  paired diff  : +7.11%  (95% CI +6.70% .. +7.53%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.19%  (95% CI +6.66% .. +7.73%, n=11)
+##### round 1 / main #####
+=== 1 thread ===
+  body JIT     : mean    568.5 H/s   median    570.9
+  native loop  : mean    602.9 H/s   median    606.4
+  paired diff  : +6.05%  (95% CI +5.46% .. +6.64%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean  5.87%   median  6.22%
+  native loop  : range/mean  mean  5.67%   median  5.08%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   4979.5 H/s   median   5000.5
+  native loop  : mean   5347.4 H/s   median   5380.4
+  paired diff  : +7.39%  (95% CI +7.09% .. +7.69%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.42%  (95% CI +6.98% .. +7.86%, n=11)
+##### round 2 / branch #####
+=== 1 thread ===
+  body JIT     : mean    570.1 H/s   median    570.6
+  native loop  : mean    604.9 H/s   median    605.3
+  paired diff  : +6.12%  (95% CI +5.95% .. +6.29%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean  4.80%   median  4.49%
+  native loop  : range/mean  mean  4.77%   median  4.87%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   5020.0 H/s   median   5021.0
+  native loop  : mean   5382.2 H/s   median   5383.3
+  paired diff  : +7.22%  (95% CI +7.09% .. +7.34%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.24%  (95% CI +7.00% .. +7.47%, n=11)
+##### round 2 / main #####
+=== 1 thread ===
+  body JIT     : mean    561.7 H/s   median    562.3
+  native loop  : mean    596.1 H/s   median    596.2
+  paired diff  : +6.14%  (95% CI +5.89% .. +6.39%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean 10.46%   median  9.84%
+  native loop  : range/mean  mean  9.49%   median  9.16%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   4495.8 H/s   median   4488.2
+  native loop  : mean   4837.0 H/s   median   4812.8
+  paired diff  : +7.61%  (95% CI +6.88% .. +8.34%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.71%  (95% CI +7.22% .. +8.21%, n=11)
+##### round 3 / branch #####
+=== 1 thread ===
+  body JIT     : mean    564.1 H/s   median    565.3
+  native loop  : mean    599.2 H/s   median    600.5
+  paired diff  : +6.22%  (95% CI +6.04% .. +6.41%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean  8.74%   median  8.27%
+  native loop  : range/mean  mean  8.21%   median  8.23%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   4714.8 H/s   median   4717.3
+  native loop  : mean   5051.5 H/s   median   5060.5
+  paired diff  : +7.15%  (95% CI +6.65% .. +7.64%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.22%  (95% CI +6.85% .. +7.58%, n=11)
+##### round 3 / main #####
+=== 1 thread ===
+  body JIT     : mean    561.7 H/s   median    562.0
+  native loop  : mean    596.3 H/s   median    600.0
+  paired diff  : +6.15%  (95% CI +5.62% .. +6.67%, n=24)
+=== across-thread spread within a round (barrier tail-idle check) ===
+  body JIT     : range/mean  mean  8.39%   median  8.11%
+  native loop  : range/mean  mean  8.95%   median  8.98%
+=== 11 threads (aggregate) ===
+  body JIT     : mean   4649.1 H/s   median   4675.5
+  native loop  : mean   4991.2 H/s   median   5037.4
+  paired diff  : +7.38%  (95% CI +6.50% .. +8.26%, n=24)
+=== 11 threads (per-thread paired diffs — AUTHORITATIVE) ===
+  mean of per-thread means: +7.45%  (95% CI +6.83% .. +8.06%, n=11)
+ALL DONE

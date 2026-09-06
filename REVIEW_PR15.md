@@ -212,3 +212,164 @@ section.
   observed from a build of `2a0afc3`.
 - **The six runs themselves** were not reproduced (instructed not to; ~4 min per
   run) and cannot be, from what the branch records — see m4.
+
+---
+
+# Round 2 — review of the corrections (`5817552`)
+
+Fresh reviewer, spawned cold. Scope: `git diff f1a0a61..HEAD`, i.e. the fixes
+written for round 1's findings, plus the four documents they touch.
+
+**Verdict: MERGEABLE on code grounds — `src/`, `benches/` and `scripts/` are
+byte-identical to `main` (`git diff origin/main -- src/ benches/ scripts/` is
+empty), so nothing ships and no blocker is possible. But one major is
+ACTIONABLE, so this is not the terminating round.**
+
+## Coverage
+
+| item | verdict |
+|---|---|
+| Withdrawal complete — no surviving regression claim | **clean** (only `AUDIT.md:4790`/`:4872`, both explicit withdrawals) |
+| BENCH-02 figures real, same statistic | **verified** (`AUDIT.md:4523`) — with one softness, m6 |
+| "Unpassable criterion" framing correct, not under-claiming | **correct**, not under-claimed |
+| `PERF1_RUNS.log` genuine and internally consistent | **verified** — provenance thin, m7 |
+| Every quoted figure derivable from the log | **all but one** — 0.25 pp, m5 |
+| Discard/gate corrections accurate and complete | **NO — M2** |
+| Audit-requirement sections; issue-numbering convention | **clean** bar n2 |
+
+## M2 (major, ACTIONABLE) — the discard correction names the defect, then repeats it, and misattributes the criterion
+
+`PERF1_CRITERION.md`: "A run below **either** figure ... is thrown away without
+being read as a result." Applied literally the retained set is branch r1, branch
+r2, main r1. Then, from `PERF1_RUNS.log`:
+
+| row | as written | applied literally |
+|---|---|---|
+| 1. phase-1 positive in every comparison | FAIL — +0.25, **−0.02**, +0.07 | one evaluable pair survives (branch r1 vs main r1) = **+0.25, positive**; the −0.02 is main r2, the worst run in the set at 5.5% below known-good |
+| 2. min(branch) > max(main), phase 1 | FAIL — 6.12 vs 6.15 | 6.15 is main **r3**, a discarded run; retained max(main) = 6.05, so 6.12 > 6.05 |
+| 3. phase-2 branch not entirely below main | FAIL — 7.19–7.24 vs 7.42–7.71 | branch 7.19/7.24 vs main 7.42 — still fails |
+
+Three defects, in one paragraph:
+
+1. **"All three fail" does not survive the discard rule the same paragraph
+   endorses.** The correction discloses provenance taint for **row 3 only**
+   ("criterion 3's ranges above were computed from all six runs"). Rows 1 and 2
+   have exactly the same taint and are not flagged — and row 2's failing datum
+   (6.15) *is* a discarded run.
+2. **The defect is repeated one sentence after being named.** The text says "the
+   write-up silently discarded a *phase*", then immediately does it again:
+   "Phase 1's six runs all passed their gate (>= 560 H/s) and are the decisive
+   evidence." Under the rule as written those runs are gone entirely.
+3. **Criterion 1 is misattributed.** It is explicitly a *phase-1* criterion
+   ("Phase 1 (1 thread) effect is positive ..., at least three of each"). The
+   correction reports its "three of each" as "**unmet for phase 2**" — the one
+   phase where it does not apply — and thereby exonerates phase 1, where it is
+   in fact unmet (2 branch, 1 main). Round 1's m2 said the count requirement is
+   unmet and "**the criteria are unevaluable**"; the correction weakened that to
+   phase 2 only.
+
+**The fix target is "unevaluable at n=2 vs n=1", not "criterion 2 actually
+passed".** Writing the latter would be the next round's over-claim. The revert
+still stands — criterion 3 fails on retained data and "keep only if ALL hold"
+cannot be met at any n — so the *outcome* is unaffected; the *record* is wrong.
+
+Present in **three** documents: `AUDIT.md` (the "Two honesty corrections"
+paragraph), `CLAUDE.md:162` ("phase 1's six all passed and are decisive"), and
+the PR body (same two sentences). This repo has had stale cross-references
+survive inside the commit fixing them; fix all three.
+
+## m5 (minor) — the 0.25 pp "signal" is not derivable from the committed data
+
+The withdrawal's headline arithmetic is "0.39 pp of spread ... *larger* than the
+0.25 pp 'signal'". No phase-2 statistic in `PERF1_RUNS.log` is 0.25 pp: mean
+separation 0.31 (7.2167 vs 7.5267), range gap 0.18, median difference 0.23.
+`+0.25` does appear in the log — as the **phase-1** round-1 effect. So the
+comparison quotes a phase-2 spread against a figure that is either rounded
+loosely or borrowed from the other phase. Conclusion survives (0.39 > 0.31), but
+in a PR whose deliverable is the record, a quoted number that cannot be
+reproduced from the committed data is a finding. Also in `CLAUDE.md:162` and the
+PR body.
+
+## m6 (minor) — "same harness, same statistic, same configuration" is stated more strongly than BENCH-02 supports
+
+BENCH-02's own entry records that the harness was **under modification across
+those four runs** ("the paired interval is new in this change set, so runs 1-3
+printed a bare point estimate") and that one of the four was a reviewer's
+separately executed run. The per-thread paired statistic is tabulated for all
+four, so the load-bearing number is probably comparable — but "same harness" is
+an assertion the record does not fully back.
+
+**Why m5 and m6 stay minor:** the withdrawal does not need BENCH-02 at all.
+PERF1's *own* three `main` runs span **7.42–7.71 = 0.29 pp** on unmodified code,
+in one session, on this machine — already at or above the 0.18–0.31 pp
+separation being called a signal. Saying that would make the withdrawal
+self-contained and immune to any softness in the BENCH-02 comparison.
+
+## m7 (minor) — `PERF1_RUNS.log` has no provenance
+
+Genuineness is well supported: every `===` header matches a `println!` in
+`benches/nativeloop_ab.rs`; all twelve paired diffs reproduce from the printed
+means to ±0.02 pp; and the per-thread mean exceeds the aggregate in all six
+blocks (7.19>7.11, 7.42>7.39, 7.24>7.22, 7.71>7.61, 7.22>7.15, 7.45>7.38), a
+consistent sign that is a signature of real paired data.
+
+What it lacks: no date, no commit SHA per arm, no host facts, no command line.
+The arm labels are `##### round N / branch #####` wrapper echoes, not
+self-identifying output. This repo retracted "+9.01%" precisely because an arm's
+identity came from outside the measurement, so a header line per block giving
+`git rev-parse HEAD` and the date is cheap insurance.
+
+## n2 (nit) — the new "Files changed" section omits `REVIEW_PR15.md`
+
+It lists `compiler.rs`, `PERF1_CRITERION.md`, `PERF1_RUNS.log`, `CLAUDE.md`,
+`AUDIT.md`. `git diff origin/main...HEAD --stat` also shows `REVIEW_PR15.md`
+(+214), a repo-tracked file this PR adds.
+
+## Checked and clean
+
+- **Withdrawal is complete.** No surviving assertion of a regression in
+  `AUDIT.md`, `CLAUDE.md`, `PERF1_CRITERION.md` or the PR body; both remaining
+  mentions are the explicit withdrawal. The register-pressure speculation is
+  gone from all four.
+- **BENCH-02's figures are real and are the right statistic.** `AUDIT.md:4523`,
+  row "per-thread paired (authoritative)": +7.37, +7.50, +7.31, +7.11, at
+  11 threads x 12 pairs x 256 hashes — the same statistic and configuration
+  `PERF1_RUNS.log` prints. +7.11 is indeed below the branch's 7.19–7.24.
+- **Arithmetic in the log checks out.** Phase-1 effects +0.25/−0.02/+0.07;
+  criterion-2 pair 6.12/6.15; criterion-3 ranges 7.19–7.24 / 7.42–7.71; gate
+  failures at 4714.8, 4495.8, 4649.1; all six 1-thread means >= 560. Every
+  figure in the three write-ups traces to the log except m5.
+- **The gate correction is arithmetically right, with one ambiguity.** Issue #1
+  does say "~4756 H/s at 11 threads" and "Discard runs whose baseline is well
+  below that". The three percentages (0.9%, 5.5%, 2.2%) are all relative to
+  4756 — but the sentence's nearest antecedent for "0.9% under **it**" is the
+  4900 gate, against which 4714.8 is 3.8% under. Reword or repeat the referent.
+  Retention 2-of-3 vs 1-of-3 is correct, and "documents, does not excuse" is the
+  right strength.
+- **"Unpassable criterion" is right and is not under-claiming.** No reading of
+  the data supports a real effect either way: phase 1 means +0.10 pp, phase 2
+  means −0.31 pp — *opposite signs*, against 0.29–0.39 pp of spread on unchanged
+  code. The hedge "no sub-1% effect could have cleared either" is the correct
+  hedge; a 1–2% effect would have cleared it easily, so the criterion was not
+  unconditionally unpassable. (Worth adding: the two phases pointing opposite
+  ways is itself the cleanest evidence for "noise".)
+- **Round 1's m4 anomaly is now answerable and unremarkable.** Branch r3's
+  phase-2 diff (7.22) sits *between* r1's and r2's despite a 6.7% lower body-JIT
+  baseline — the paired diff is robust to thermals, which cuts *for* the
+  withdrawal.
+- **Issue numbering.** `#1` bare = GitHub, per `CLAUDE.md`'s convention note;
+  correct throughout. Audit-requirement sections now all present (goal, files
+  changed, behaviour, verification, assumptions, plus a "could not verify"
+  paragraph).
+
+## Not verified — stated, not implied
+
+- The benchmark was **not re-run**; the log was checked for internal consistency
+  and against the harness's own format strings, not reproduced.
+- The "92/92 on the modified code" claim remains uncheckable, as the entry
+  itself now says.
+- No JIT gate was run: `src/`, `benches/` and `scripts/` are byte-identical to
+  `main`, so the outcome is `main`'s.
+
+**Actionable this round: M2 (must), m5/m6/m7/n2 and the "under it" referent
+(should).**

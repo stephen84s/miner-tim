@@ -525,3 +525,43 @@ string-exact, and the whole PR's workflow diff is provably comments-only.
 R3-F1 is the one worth fixing before merge — it is the third recurrence of the
 stale-numbering class, this time under a convention note that lends the wrong
 numbers authority. R3-F5 is one line in each of two files.
+
+### Round 3 — addendum
+
+**R3-F8 (minor, highest-consequence of this set; fix before merge) — the
+convention note collapses the entire Current Task Board on github.com.**
+`f48dbb5` places the blockquote flush against the table header with no blank
+line, so the table header is a lazy continuation of the blockquote paragraph.
+Asked GitHub's own renderer:
+
+```
+gh api --method POST /markdown -f mode=gfm -F text=@CLAUDE.md | grep -c '<table'
+  branch HEAD  → 2
+  origin/main  → 3
+```
+
+Isolated repro confirms the mechanism: without a blank line the output is a
+single `<blockquote><p>` containing `| Status | Task ID | Description |<br>…` as
+literal pipes; with one blank line the `<table>` renders normally outside the
+quote. Every task-board row — the document's central artifact and the thing a
+maintainer reads on the web — becomes one unreadable paragraph. The fix is one
+blank line after the note.
+
+**R3-F9 (minor) — DOC-02's row says "Closes #6" without recording that a #6
+item moved out.** #6's Scope list carries `- [ ] Release flow: RELEASING.md,
+make release, and the v*-tag CI release job all assume GitLab Releases`, and
+this PR's own new `ci.yml` comment says that item is "*mostly* done, not done",
+remainder in #11. `AUDIT.md` records the carve-out; the task-board row does not
+— it reads "Issue #6's retirement items done … Closes #6". (Weakened by #6
+having *no* checked boxes at all, including plainly-finished ones, so the
+checkbox state is not maintained evidence. The substantive point stands: the
+row should name the deferral the way `AUDIT.md` does.)
+
+**R3-F2 sharpenings** (not new findings): the same commit introduces a *third*
+form the note does not define — `GitLab #6 (now GitHub #4)`, `GitLab #9 — now
+GitHub #6` — for issues that **were** imported and which the note's own rule
+says should be plain `#4` and `#6`. And "The migration renumbered everything"
+is loose: GitLab 1→1 and 2→2 kept their numbers.
+
+Verdict unchanged: **MERGEABLE — no blockers, no majors.** R3-F8 and R3-F1 are
+the two to fix before merge; both are one-line edits.

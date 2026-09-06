@@ -4210,3 +4210,148 @@ that work needs a stub job reporting success in the skipped case — real
 complexity for a saving that only applies to documentation commits. Not worth it
 today; revisit if docs-only PRs become frequent.
 
+
+### DOC-02 (2026-09-06): retire the manual JIT gate in prose; correct a false safety claim CI-03 created
+
+Two things, one of which is a regression the previous merge introduced.
+
+**The regression.** CI-03 removed `push: branches: [main]` from `ci.yml` and
+`jit.yml`, leaving `pull_request` + `workflow_dispatch` as the only triggers
+(confirmed by reading the trigger keys directly, not from the entry that made the
+change). Three places still told the reader the gate runs on *every push*, the
+worst of them `CLAUDE.md`'s Operational Protocol step 6 — which told a future
+session that CI enforces the JIT gate automatically and "it is no longer on you
+to remember". After CI-03 that is false in a specific and dangerous way: **a push
+to a branch with no open PR is now checked by nothing at all.** An agent could
+push JIT changes, see no failure, and conclude they were verified.
+
+The discriminating test applied to the replacement wording was "does this
+sentence survive the case *push to a branch with no open PR*?" The two
+platform-coverage rows survive a plain push → pull request substitution. Step 6
+did not: its *reasoning* changed, not just its noun. It now states the uncovered
+window explicitly and inverts the old advice — running the gate locally matters
+**more** now, not less, because a bare branch produces no verdict at all. The
+x86_64 row gained the same qualifier, which it had never carried.
+
+**The retirement.** Issue #6 required that once both `jit-*` jobs were green in
+CI, the "mandatory before merge" language and the paste-the-output-into-the-MR
+requirement be removed, with the make targets demoted from mandatory to useful
+rather than deleted. The first pass found three leftovers; **review found that
+count wrong, and the enumeration is corrected here rather than defended:**
+
+- `Makefile` help text — "mandatory before any MR touching src/randomx/jit/".
+- `Makefile` gate comment — the paste-into-MR sentence, plus "Issue #9 tracks
+  replacing this with GitHub Actions", stale twice over: old GitLab numbering,
+  and the replacement has happened.
+- `scripts/verify-jit.sh` — a final `echo` instructing the operator to paste the
+  PASS lines into the MR description, citing "issue #2 mitigation 3". The `GATE
+  PASSED` line above it is retained; only the instruction is gone.
+- **`scripts/verify-jit.sh`'s header** (review F1) — missed on the first pass,
+  in the very file being edited. It still called itself "the tests CI
+  structurally cannot run ... run by a human" and carried the *identical* stale
+  sentence deleted from the `Makefile`. Rewritten to say what is true: the
+  x86_64 jobs cannot run these tests, `jit.yml` does, on every PR, as required
+  checks.
+- **Five more live `#9` references** (review F1) — `ci.yml` ×2, `jit.yml` ×3,
+  all old GitLab numbering. So the first pass's "deleted rather than
+  renumbered" was true of the `Makefile` and **false repo-wide**; that claim is
+  withdrawn. All six now point at GitHub #6, with the GitLab origin noted where
+  the sentence is historical. `ci.yml`'s further claim that the release flow "is
+  a separate checklist item in issue #9 and needs decisions" was stale in
+  substance too — `release.yml` exists and `RELEASING.md` is `gh`-based — and
+  now says what is genuinely still manual.
+- **`CLAUDE.md` step 6 itself** (review F2) — the first pass left it opening
+  "must pass **`make verify-jit`**" and, worse, *strengthened* the local-run
+  instruction, which is the opposite of the demotion issue #6 box 4 asks for.
+  The requirement is now that the change passes the gate, which CI proves on the
+  PR; running it by hand is a convenience. Without this, `Closes #6` would have
+  closed an issue with an unmet box.
+- **Three stale issue cross-references in `CLAUDE.md`** (review F3), verified
+  against the live issue list rather than inferred: the debug/release gap is
+  GitHub #4, not #6; the silent `MAP_JIT` fallback has no GitHub counterpart and
+  takes the `GitLab #N` convention; and MIGRATE-01's "Closes issues #2 and #4"
+  was wrong twice — the two issues are #2 and #6, and neither was closed when it
+  was written.
+
+Both make targets are kept, as the issue required. Their stated purpose is now
+the window CI genuinely does not cover, rather than a duty CI has taken over.
+
+**Not changed: `README.md`.** Its table says the JIT is tested "automatically, on
+every change" and that "a failure blocks the change". Both became *more* accurate
+under CI-03, not less — it is the change, not the push, that is now gated.
+Rewriting it would have been churn.
+
+**Files changed:** `CLAUDE.md` (step 6, three platform-coverage rows, three
+cross-references, task board), `Makefile` (help text, gate comment),
+`scripts/verify-jit.sh` (header rewritten, one echo removed),
+`.github/workflows/ci.yml` and `jit.yml` (comments only — verified no
+non-comment line changed, both still parse), `AUDIT.md` (this entry).
+
+**Verification.** `bash -n scripts/verify-jit.sh` clean; `make help` renders.
+Trigger keys read directly from all three workflows: `ci.yml` and `jit.yml` are
+`pull_request` + `workflow_dispatch`; `release.yml` keeps `push:` on `v[0-9]*`
+tags and is untouched. No behaviour change — the removed `echo` runs only after
+the gate has already passed, and the exit codes are unchanged, so the gate's
+verdict is bit-identical. The `jit-macos` and `jit-linux-arm` jobs on this PR
+re-run the full 92-test gate regardless.
+
+**The one assumption is no longer an assumption.** The first version of this
+entry closed by stating, as an untested assumption, that no tooling parses
+`verify-jit.sh`'s final line. Review tested it: `jit.yml` runs the gate as plain
+`run:` steps with no `id:`, no output capture, no `grep`/`tee` and no step
+summary, and nothing in the repo greps `GATE PASSED`. It also mutated
+`EXPECTED_PASSES` 92 → 91 in a scratch copy and confirmed the gate still goes
+red (`GATE FAILED`, exit 1) — so the removal is inert *and* the gate's redness
+mechanism is intact. Recorded as tested, because leaving a stale "assumption"
+line standing after it has been checked is the exact shape of finding that
+PR #7 round 2 and PR #8 round 3 each caught.
+
+**Issue #2 was closed separately**, before this branch, since it needed no code
+change. Its acceptance criteria were re-verified against what actually landed
+rather than against the audit's account of it. Issue #6 closes with this PR —
+but only after review found box 4 unmet; on the first pass it would have been
+closed early.
+
+**Review:** three rounds, `ci-reviewer`, all mergeable with no blockers and no
+majors. Round 1's six findings are folded into the sections above. Round 2
+reviewed the *fixes* as new work and found six more, four of which are defects
+introduced or missed by round 1's corrections:
+
+- The stale-numbering class survived **inside the file the fix had just
+  rewritten** — `verify-jit.sh`'s two issue references were swapped against
+  GitHub numbering, and one would have resolved to the very issue this PR
+  closes. Five further `issue #7` references resolve to PR #7. The same fix
+  commit had also left three sibling task-board rows on the old numbering while
+  correcting their neighbour: two standards in one commit. A single convention
+  is now stated once at the top of the task board, because this class has been
+  found in three separate rounds.
+- **"~8 minutes" does not reproduce.** Re-measured rather than adopting the
+  reviewer's figure: `jit-macos` runs 14.08 min mean over the 8 most recent
+  successful runs (12.38–15.27), matching PR #8's 13.94 over 12.
+- **"The release checklist item is done" overstated it.** `release.yml` creates
+  the Release entry, but the macOS tarball is still attached by hand, and
+  `RELEASING.md` still contradicts `release.yml` outright — claiming the CI job
+  "only creates an empty entry ... if it runs at all" and proposing a
+  self-hosted `macos-arm64` runner. No `v*` tag has been pushed since the
+  migration, so `release.yml` has never run. Those defects pre-date this PR and
+  are **not** fixed here; filed as GitHub #11.
+- `DESIGN_JIT_NATIVE_LOOP.md` held the last live "CI can never run any of
+  this ... a mandatory local gate". Marked a historical record with the false
+  claim named, rather than rewritten — its value is the reasoning it captured.
+
+Round 3 then reviewed round 2's fixes, scoped to those commits, and found the
+numbering fix had done it a **third** time — and worse. The convention note it
+added ran flush into the task board's header row, so GitHub's renderer swallowed
+the **entire table** into the blockquote: `<table>` count 3 on `main`, 2 on the
+branch, confirmed against the markdown API rather than by eye. It had also left
+behind exactly the two instances round 2 enumerated, one of them numbering a
+claim `#6` — the issue this PR closes — while the same claim is numbered `#4`
+elsewhere in the same file. And the note asserted a repo-wide rule it had not
+been applied repo-wide; it now carries an explicit scope. A stated count was
+wrong too: "six further `issue #7` references" was five.
+
+Round 3 reproduced the 14.08-minute measurement exactly (12.38/15.27/13.33/
+14.75/14.35/14.12/14.90/13.57, mean 14.083) and confirmed the cut-off is not
+load-bearing — including the next run gives 14.14. Each round re-ran the break
+test from scratch rather than inheriting it, and rounds 2 and 3 each re-derived
+the GitLab→GitHub mapping independently. Ledger: `REVIEW_PR10.md`.

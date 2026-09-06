@@ -5,14 +5,25 @@
 # says *nothing* about emitted ARM64 — on x86_64 `randomx::jit` is cfg'd out of
 # the build entirely (`src/randomx/mod.rs`). The aarch64 JIT is gated by
 # `.github/workflows/jit.yml`, which is the reason this project moved to GitHub
-# at all (issue #9); it runs on separate runners so a slow full suite here does
+# at all (GitHub #6); it runs on separate runners so a slow full suite here does
 # not delay the JIT verdict, and vice versa.
 #
 # Ported from `.gitlab-ci.yml`'s `rust:lint`, `rust:audit` and `rust:test`.
-# NOT ported (deliberately, not an oversight): the `release` job that creates a
-# GitLab Release on a `v*` tag. The release flow — `RELEASING.md`, `make
-# release` and that job — is a separate checklist item in issue #9 and needs
-# decisions (and credentials) that are out of scope for the workflow migration.
+# NOT ported into *this* file (deliberately, not an oversight): the `release`
+# job that creates a GitLab Release on a `v*` tag. It now lives in
+# `.github/workflows/release.yml`, tag-triggered, and `RELEASING.md` describes
+# the `gh`-based flow around it. That checklist item in GitHub #6 is *mostly*
+# done, not done: `release.yml` creates the Release entry, but building and
+# attaching the macOS tarball is still manual (see `release.yml`'s own header),
+# and `RELEASING.md` still carries GitLab-era text that contradicts
+# `release.yml` — it claims "the CI job, if it runs at all, only creates an
+# empty entry" and proposes a self-hosted `macos-arm64` runner. `release.yml`
+# has never actually run. v0.1.0-v0.1.2 do exist on the remote — they were
+# pushed by the migration — but all three tagged commits *predate* `bcad873`,
+# which added this workflow, and a tag-push run uses the workflow file as it
+# exists at that ref. No `v*` tag has been pushed since.
+# Those defects pre-date this comment and are tracked in GitHub #11,
+# deliberately not fixed in the PR that found them.
 
 name: CI
 
@@ -73,7 +84,7 @@ jobs:
   lint:
     name: lint (clippy, x86_64 linux)
     # Pinned, not `ubuntu-latest`: the image's core count drives libtest's
-    # default --test-threads, which drives peak RSS (issue #7). A silent image
+    # default --test-threads, which drives peak RSS (GitLab #7). A silent image
     # bump should not be able to change this pipeline's memory profile.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -234,7 +245,7 @@ jobs:
             ${{ env.CACHE_EPOCH }}-target-test-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
 
       # No --test-threads cap here, unlike the macOS JIT gate: this runner has
-      # 16 GB against the 6.23 GB measured at 12 threads (issue #7), and it runs
+      # 16 GB against the 6.23 GB measured at 12 threads (GitLab #7), and it runs
       # at 4. The cap exists for the 7 GB macos-14 box, not as house style.
       #
       # --locked was added on top of the GitLab command: it fails if the build

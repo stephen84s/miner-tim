@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 #
-# The aarch64 JIT gate — the tests CI structurally cannot run.
+# The aarch64 JIT gate — the tests the x86_64 jobs cannot run.
 #
-# GitLab's shared runners are x86_64 Linux, where `randomx::jit` is cfg'd out of
-# the build entirely (`src/randomx/mod.rs`). A fully green pipeline therefore
-# says *nothing* about emitted ARM64, which is the code that decides whether a
-# share is accepted. This script is that missing coverage, run by a human:
+# On x86_64 `randomx::jit` is cfg'd out of the build entirely
+# (`src/randomx/mod.rs`), so a green `lint`/`test`/`audit` run says *nothing*
+# about emitted ARM64, which is the code that decides whether a share is
+# accepted. This script is that missing coverage.
+#
+# It is no longer run only by a human. `.github/workflows/jit.yml` runs it on
+# every pull request — `jit-macos` (`macos-14`, the shipping platform) and
+# `jit-linux-arm` (`ubuntu-24.04-arm`) — and both are required checks on a
+# protected `main`, so a failure blocks the merge. The two make targets remain
+# as conveniences, and matter most on a branch with no open PR, which triggers
+# no workflow at all:
 #
 #   make verify-jit         — this script on the Apple Silicon host
 #   make verify-jit-linux   — this script inside a native linux/arm64 container
 #
-# Issue #2 tracks the gap; issue #9 tracks moving it into GitHub Actions, which
-# gives public repos free `macos-14` and `ubuntu-24.04-arm` runners.
+# GitHub #2 tracked the coverage gap and GitHub #6 the move to Actions that
+# closed it; both are now closed. (Those were GitLab #2 and #9 before the
+# migration renumbered them.)
 #
 # It is a HARD gate: any failing test, or a test count that does not match the
 # expectation below, exits non-zero.
@@ -39,7 +47,7 @@ set -uo pipefail
 # LOAD-BEARING, do not trim: `full_mode_v1_vm_reports_the_native_loop_effective`
 # (inside full_hash_tests::) is the only test that hard-requires a *successful*
 # JIT allocation. Every known-answer vector still passes when allocation fails,
-# because the interpreter fallback returns the same hash — that is issue #4's
+# because the interpreter fallback returns the same hash — that is GitLab #4's
 # shape. Without this one test the gate can be green on an inert JIT.
 JIT_FILTERS=(
   randomx::jit::
@@ -118,7 +126,8 @@ run_group() {
 # native loop — the imm12/imm7 encoding ranges in `jit/aarch64.rs`, the CBRANCH
 # forward-target rule, the CBZ zero-iteration patch range and the back-branch
 # imm19 range in `jit/compiler.rs` — had therefore never executed in the
-# profile that gets cited as evidence. Issue #6 / issue #2 mitigation 2.
+# profile that gets cited as evidence. GitLab #6 (now GitHub #4) / GitHub #2
+# mitigation 2.
 #
 # The whole set runs here, not a subset: it was measured at ~308 s on an idle
 # M2 Max against 177 s for the JIT-unit-plus-differential subset, and the
@@ -130,7 +139,7 @@ run_group "debug profile (debug_assert! live)" ""
 # ---------------------------------------------------------------------------
 # 2. Release profile — what the miner ships, and what every number refers to.
 # ---------------------------------------------------------------------------
-# Memory: the binary builds ONE 2 GiB dataset (issue #7 removed the second).
+# Memory: the binary builds ONE 2 GiB dataset (GitLab #7 removed the second).
 # Max RSS on an M2 Max for this filtered set, DEBUG profile, at this host's
 # 12-thread default: 6.27 GB before that change, 5.43 GB after — a 0.84 GB
 # saving. (An earlier revision of this comment claimed 6.77 -> 4.50 GB; neither
@@ -153,4 +162,3 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "verify-jit: GATE PASSED on $(uname -s) $arch — $EXPECTED_PASSES tests, debug + release"
-echo "verify-jit: paste these lines into the MR description (issue #2 mitigation 3)"

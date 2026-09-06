@@ -6,7 +6,8 @@
 # runner probe returned `no_matching_runner`; and the JIT is not merely aarch64
 # but aarch64 + Darwin — `MAP_JIT`, `pthread_jit_write_protect_np`,
 # `sys_icache_invalidate`). GitHub gives public repositories both runners for
-# free. Issues #2 and #9.
+# free. GitHub #2 and #6 (GitLab #2 and #9 before the migration renumbered
+# them); both now closed.
 #
 # Two jobs, both hard gates — no `continue-on-error`, no `|| true`, no summary
 # step that swallows a status. A gate that reports without blocking is the
@@ -24,7 +25,7 @@
 #
 # Kept separate from ci.yml on purpose: the two gates here are the slow pair
 # (13.94 and 11.65 min measured) and must not gate the interpreter verdict, nor
-# be gated by it (issue #9).
+# be gated by it (GitHub #6).
 
 name: JIT gate (aarch64)
 
@@ -87,7 +88,7 @@ jobs:
       # THE MEMORY CONSTRAINT. This runner has 7 GB. Peak RSS of the gate scales
       # with libtest's --test-threads, because each concurrent test may hold its
       # own 256 MiB Argon2d cache on top of the one 2 GiB dataset. Measured in
-      # issue #7 / MR !4: 6.23 GB at 12 threads, 4.07 GB at 3, in both profiles.
+      # GitLab #7 / MR !4: 6.23 GB at 12 threads, 4.07 GB at 3, in both profiles.
       #
       # Set explicitly rather than left to default to the runner's core count,
       # so that a future runner image with more cores cannot quietly raise the
@@ -216,7 +217,7 @@ jobs:
           restore-keys: |
             ${{ env.CACHE_EPOCH }}-target-jit-linux-arm-${{ env.RUST_VERSION }}-
 
-      # The script directly, NOT `make verify-jit-linux` (issue #9). That target
+      # The script directly, NOT `make verify-jit-linux` (GitHub #6). That target
       # wraps this same script in a pinned linux/arm64 container under colima and
       # spends most of its body proving the daemon is genuinely aarch64 rather
       # than qemu — which is exactly what this runner is, natively. The two

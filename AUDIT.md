@@ -4785,25 +4785,56 @@ issue's arithmetic to the word.
 | 2. min(branch) phase-1 diff exceeds max(main) | **FAIL** — 6.12 vs 6.15, ranges overlap |
 | 3. phase-2 per-thread: branch not entirely below main | **FAIL** — branch 7.19-7.24, main 7.42-7.71 |
 
-All three fail. Criterion 3 is the uncomfortable one: at 11 threads the branch
-sat **consistently below** `main` by ~0.25 pp, in all three runs, across widely
-varying absolute baselines. That is a weak signal of a small *regression* under
-contention, not merely an absent gain — plausible if removing the FMOVs shifted
-register pressure or scheduling, and equally plausible as noise. It is recorded
-because it points the wrong way, which is exactly when a result is most tempting
-to leave out.
+All three fail.
+
+**Criterion 3 was first written up as "a weak signal of a small regression under
+contention". Review refuted that from this repository's own data, and the claim
+is withdrawn.** BENCH-02 records four barriered runs of **unmodified `main`** —
+same harness, same statistic, same configuration — at **+7.37, +7.50, +7.31,
++7.11**. That is 0.39 pp of spread on identical code, *larger* than the 0.25 pp
+"signal", and +7.11 sits **below the branch's entire 7.19-7.24 range**. The
+branch's numbers are not merely consistent with noise; they fall inside the
+range this harness produces when nothing has changed at all. The
+register-pressure mechanism offered alongside was unsupported speculation and is
+dropped with it.
+
+What criterion 3 actually shows is that the effect, in either direction, is
+**below what this harness can resolve at 11 threads**.
 
 **Three of six runs failed the pre-registered baseline gate** (11-thread body
 JIT >= 4900 H/s): branch run 3 at 4714.8, main runs 2 and 3 at 4495.8 and
 4649.1. The machine was warm from a day of CI and benchmark work. They are
-discarded rather than interpreted, which is what the gate is for — and it leaves
-phase 2 with only one valid `main` run, so criterion 3's signal is *directional
-at best*. Phase 1's six runs all passed their gate (>= 560 H/s), and phase 1
-alone is decisive.
+discarded rather than interpreted, which is what the gate is for.
+
+**Two honesty corrections review found in how that was applied.** The criterion
+discards a *run*; the write-up silently discarded a *phase*, keeping phase 1 of
+runs whose phase 2 failed the gate. And criterion 3's ranges above were computed
+from all six runs while the same paragraph claimed three were discarded. Applied
+literally, phase 2 retains two branch runs and one `main` run — which does not
+change the direction, but does mean criterion 1's "at least three of each" is
+**unmet for phase 2**. Phase 1's six runs all passed their gate (>= 560 H/s) and
+are the decisive evidence; phase 2 never had enough valid data to decide
+anything, which is a better description than "directional at best".
+
+Review also noted the gate itself was **stricter than issue #1's own known-good
+figure** — the issue says ~4756 H/s and "discard runs well below that", while
+the gate was set at 4900. Branch run 3 at 4714.8 is 0.9% under it; `main`'s two
+were 5.5% and 2.2% under. Retention split 2-of-3 against 1-of-3, which is an
+asymmetry a pre-registered gate does not excuse, only documents.
 
 **Not re-run.** The criterion says to record the measurement rather than retry
 until a run cooperates, and nothing here suggests a positive effect that more
 data would reveal.
+
+**The criterion was, in hindsight, unpassable — and that is worth recording.**
+Criterion 2 demanded the branch's minimum exceed `main`'s maximum, against a
+run-to-run spread the same document put at ~0.4 pp; criterion 3 demanded as much
+of phase 2, where BENCH-02 had already measured 0.39 pp of spread on unchanged
+code. No sub-1% effect could have cleared either. The honest verdict is
+therefore not "the change failed three criteria" but **"the effect is smaller
+than this harness can resolve, and the criterion was set at a resolution the
+harness does not have."** The revert stands; the reasoning behind it is now
+stated correctly.
 
 **Precedent, and why this outcome was expected.** `AUDIT.md` 2026-08-15 records
 `emit_mem_addr`: 0.35% fewer emitted instructions, measured *slower*, then null,
@@ -4818,7 +4849,34 @@ instruction counts, the six runs, and this entry. `make verify-jit` passed 92/92
 in debug and release **on the modified code** before it was reverted, so the
 change was correct — it simply bought nothing.
 
+**Files changed:** `src/randomx/jit/compiler.rs` (added, then reverted — now
+byte-identical to `main`), `PERF1_CRITERION.md` (new: the pre-registered
+threshold), `PERF1_RUNS.log` (new: raw output of all six runs, committed because
+the deliverable of this work *is* the record), `CLAUDE.md` (task board),
+`AUDIT.md` (this entry).
+
 **Assumption worth flagging for the next person.** The design rests on the
 body-JIT arm being an untouched control, which holds for any change confined to
 `emit_iteration_pre`/`emit_iteration_post`. A change touching `emit_body` or the
 shared emitter would move both arms and this method would not work.
+
+**Review:** one round, `jit-reviewer`, mergeable, no blockers. It confirmed the
+revert is exact (`2a0afc3` +36/-6 in `compiler.rs`, `3e61471` +6/-36 — an inverse),
+that pre-registration holds by commit timestamps with author and committer dates
+matching so no rebase hid an earlier order, and that the load-bearing claim is
+true in a **stronger** form than stated: because `emit_cvt_packed_int` was kept
+as a wrapper delegating to `emit_cvt_packed_int_to(e, 25, 26)`, the three
+body-JIT callers emitted **byte-identical words**, so the control arm was
+untouched at the emitted-code level rather than merely the source level.
+
+Its major finding is recorded above: the regression reading was refuted by this
+repo's own prior data and withdrawn. Ledger: `REVIEW_PR15.md`.
+
+**What review could not verify, stated because the record is the deliverable.**
+The "92/92 on the modified code" claim cannot be checked from what is committed —
+the gate output was not captured and the code is gone. Corroboration exists:
+`assert_arms_agree` compares the modified native arm against the unmodified body
+JIT every round, and six runs completed without a panic. That is corroboration,
+not confirmation. `make verify-jit` was not re-run after the revert either, since
+`src/`, `scripts/` and `benches/` are byte-identical to `main` and the outcome is
+therefore `main`'s — a reason, not a check.

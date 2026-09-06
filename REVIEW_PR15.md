@@ -539,3 +539,147 @@ two-sentence narrowing. Nothing here changes the outcome: the revert is
 correctly justified, the arithmetic is right, and the entry did not over-correct
 into claiming the change might have worked. Apart from the PR body, the record
 is now substantially accurate.
+
+---
+
+# Round 4 — `jit-reviewer`, cold. Scope: `bf4ff52` (the round-3 correction) + the PR body.
+
+## Coverage
+
+| item | done |
+|---|---|
+| Every number in `AUDIT.md` / `CLAUDE.md` / `PERF1_RUNS.log` / PR body re-derived from `PERF1_RUNS.log` and `PERF1_CRITERION.md` | yes |
+| Four documents mutually consistent (incl. crit-3-fails vs 1-and-2-unevaluable, round count) | yes |
+| The three new claims: "over-determined", 8P+4E, the two confound disclosures | yes |
+| Confound direction checked *against the run data*, not accepted | yes |
+| Anything still missing from the record | yes |
+| CI at the current head | yes |
+| Emitted-instruction semantics, bounds asserts, native-loop preconditions, ABI, FPCR, differential tests, `make verify-jit` | **N/A** — `git diff origin/main --stat` is 5 files, all documentation; `src/`, `benches/`, `scripts/` byte-identical to `main`. No code ships, so no blocker is reachable. |
+
+## Re-derived from the raw log — all correct
+
+Phase-1 paired diffs b/m by round: 6.30/6.05, 6.12/6.14, 6.22/6.15 → effects
++0.25, −0.02, +0.07 pp (table row 1 ✔). min(branch) 6.12 vs max(`main`) 6.15
+(row 2 ✔); admissible 6.12 > 6.05 ✔. Phase-2 per-thread: branch 7.19/7.24/7.22,
+`main` 7.42/7.71/7.45 → ranges 7.19–7.24 vs 7.42–7.71 ✔; admissible {7.19,7.24}
+vs {7.42} ✔. Spread 7.71−7.42 = **0.29 pp**; means 7.2167 vs 7.5267 =
+**0.31 pp** ✔. Gate: all six pass the 1-thread ≥560 leg; three fail 11-thread
+≥4900 (4714.8 / 4495.8 / 4649.1) ✔. Deficits vs ~4756: 0.87 / 5.47 / 2.25 %
+("0.9 / 5.5 / 2.2") and vs 4900: 3.78 / 8.25 / 5.12 % ("3.8 / 8.2 / 5.1") ✔.
+BENCH-02's per-thread set +7.37/+7.50/+7.31/+7.11 matches `AUDIT.md:4523` ✔
+(the +7.05 in that entry is an *aggregate*, correctly not quoted here).
+
+**8P+4E confirmed on this host**: `hw.perflevel0.logicalcpu`=8,
+`hw.perflevel1.logicalcpu`=4, `hw.ncpu`=12, Apple M2 Max. `main` run 2 is
+indeed the most compromised run in the set (4495.8, the lowest of all six).
+"Over-determined" is confirmed against the criterion's literal text: the heading
+is `### Keep only if ALL of these hold` and the rule line is
+`**Revert if any fails**`. Criterion 3 does carry no run-count clause (its only
+count is `n=11`, threads) — so "fails mechanically at 2-vs-1" is right, and the
+1-and-2-unevaluable / 3-fails split is stated identically in `AUDIT.md`'s table
+and prose, `CLAUDE.md`'s row and the PR body's table. Round 3's m8, m9, m10 and
+m11 are all closed.
+
+## m12 (minor, ACTIONABLE) — `bf4ff52` left a duplicated paragraph in the PR body
+
+`gh pr view 15 --json body` lines 46 and 48: "The gate was also **stricter than
+issue #1's own known-good figure** …" appears **twice** — the expanded version
+(with the six percentages) followed by the superseded shorter one. The new text
+was spliced in without removing what it replaced. Both are accurate; the record
+just says it twice. One deletion.
+
+## m13 (minor, ACTIONABLE) — "`main` was the hot arm in two of the three rounds" understates the data
+
+Checked against `PERF1_RUNS.log`, which is what the claim is about. `main` is the
+lower-throughput (hotter) arm in **3 of 3** rounds, on both legs:
+
+| round | 1-thread body JIT b/m | 11-thread body JIT b/m | hotter |
+|---|---|---|---|
+| 1 | 570.1 / 568.5 | 5055.1 / 4979.5 | `main` |
+| 2 | 570.1 / 561.7 | 5020.0 / 4495.8 | `main` |
+| 3 | 564.1 / 561.7 | 4714.8 / 4649.1 | `main` |
+
+That is not a coincidence and the sharper statement is worth having: the schedule
+was branch-main-branch-main-branch-main, so `main` always ran **second** within a
+round — arm identity is confounded with warm-up by construction. "2 of 3" is
+inherited verbatim from round 3's m10 (where it matches the *retention* split,
+2-of-3 branch vs 1-of-3 `main`, a different quantity). The error is conservative:
+the true figure makes the confound disclosure stronger, and the conclusion drawn
+is unchanged.
+
+Cap on the same claim, which the record's "plausibly" hedge already survives: the
+"hotter runs gave higher paired diffs" relation is clean *within* `main`
+(4979.5→7.42, 4649.1→7.45, 4495.8→7.71, monotone) but not within branch — b3 is
+the hottest branch run and its 7.22 is below b2's 7.24. Across all six runs the
+rank correlation is positive (ρ≈0.83), but because `main` is always the second
+arm, thermal drift cannot be separated from the arm effect with this data.
+
+## m14 (minor, ACTIONABLE) — the round count goes stale with *this* commit
+
+`AUDIT.md` ("**Review:** three rounds") and the PR body ("## Review — three
+rounds") are correct as of `bf4ff52` and wrong as of this section. This is round
+3's own m11 recurring, and it was actioned then. Fix in the same edit as m12:
+"four rounds", plus one line — *round 4 re-derived every figure against the raw
+log and found the record accurate; two copy-edits, no substantive change.*
+
+## n3, n4 (nits)
+
+- `AUDIT.md` now ends `Ledger: REVIEW_PR15.md.` **twice** (once after the round-1
+  paragraph, once at the entry's end); the second is redundant.
+- "Round 1: It confirmed the revert is exact" — stray capital mid-sentence,
+  an artifact of splicing "Round 1:" onto the old sentence.
+- Not pressed, listed for completeness: after a squash merge `2a0afc3` /
+  `bb3a469` / `3e61471` become unreachable from `main`, so the modified code
+  survives only under `refs/pull/15/head`. Two AUDIT entries already cite
+  unreachable SHAs (`0002d05`, `0a11083`), so this is a repo-wide convention, not
+  a defect in this entry — and the log's actual claim ("the only surviving record
+  of the modified code's *behaviour*") is true either way.
+
+## Checked and clean
+
+- No new number is wrong. Every figure the correction introduced or moved
+  re-derives from `PERF1_RUNS.log`; the 8P+4E correction matches `sysctl`.
+- The correction did **not** over-correct: nowhere does the record claim the
+  change passed, and the "would read as passing at n=2 vs n=1" is always
+  accompanied by the reason it is not a pass.
+- `main`'s round-1 phase-2 CI (±0.44) and the branch's (±0.53) both swamp the
+  0.31 pp separation, which independently supports "below what this harness can
+  resolve" — the conclusion the entry draws.
+- The bare "All three fail." is gone (round 3's M3, locus 1), and the PR body is
+  now updated (locus 2) — apart from the duplication at m12.
+- `git diff origin/main -- src/ benches/ scripts/` is empty, as the PR body
+  instructs the reader to verify.
+
+## CI at the current head (`bf4ff52`), stated as of this ledger
+
+**5/5 green**, verified at commit time on run `34058298417` (CI) and
+`34058298567` (JIT gate): `lint`, `audit`, `test` pass; **`jit-macos` and
+`jit-linux-arm` both success** — the 92-test gate, debug and release, on
+aarch64 darwin and aarch64 linux. The two `jit-*` jobs were still `pending`
+earlier in this review; they are green now, and the pre-existing "5/5 green"
+claim applied to `a17ec6a`, not to this head.
+
+## Not verified — stated, not implied
+
+- The benchmark was not re-run; all six runs are taken as reported and checked
+  only for internal consistency and against the criterion.
+- "11 threads places three workers on E-cores" is a sound inference from 11 busy
+  threads on 8P+4E, but the harness prints only the mean of per-thread means, so
+  per-thread E-core behaviour cannot be confirmed from the committed data.
+- The "92/92 on the modified code" claim remains uncheckable, as rounds 1–3 said.
+
+## Verdict
+
+**MERGEABLE.** No blockers, no majors (none is reachable — no code ships).
+Three minors (m12, m13, m14) and two nits. **ACTIONABLE: yes, but only as
+copy-edits** — delete the duplicated paragraph in the PR body, change "two of the
+three rounds" to "all three rounds" in `AUDIT.md`, and bump the round count in
+both. Each is a single edit verifiable by whoever makes it.
+
+**The round sequence should stop here.** The substantive record is accurate and
+the four documents agree: the criteria table, the 0.29/0.31 pp figures, the
+8P+4E correction, the criterion-3-fails / criteria-1-and-2-unevaluable
+distinction, and the over-determination argument taken from the criterion's own
+heading all hold against the primary data. What remains is punctuation and one
+figure that errs in the safe direction; a fifth cold reviewer would be reviewing
+copy.

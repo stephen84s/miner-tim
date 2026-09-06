@@ -683,3 +683,123 @@ distinction, and the over-determination argument taken from the criterion's own
 heading all hold against the primary data. What remains is punctuation and one
 figure that errs in the safe direction; a fifth cold reviewer would be reviewing
 copy.
+
+---
+
+# Round 5 (fresh reviewer) — scope: `da7579a` (round 4's corrections) + the PR body
+
+## Coverage
+
+| # | Item | Result |
+|---|---|---|
+| 1 | Hot-arm correction re-derived from `PERF1_RUNS.log` | correct, not over-reached |
+| 2 | Round 4's four copy-edits landed, nothing new spliced | landed; one clause lost with them — R5-1 |
+| 3 | Four documents mutually consistent | consistent; body is thinner in one paragraph (R5-1) |
+| 4 | Record wrong / missing / over-claimed for a future reader | R5-1 minor, two nits |
+| 5 | Code identity, CI | `src/ benches/ scripts/ Makefile Cargo.toml .github/` byte-identical to `origin/main`; CI below |
+
+Items 1-7 of the JIT brief (instruction semantics, range asserts, the four
+native-loop preconditions, W^X/cache maintenance, FPCR, differential tests,
+`make verify-jit`) are **not reachable**: no code, bench or script byte differs
+from `origin/main`, so `verify-jit` was not re-run — its outcome is `main`'s.
+
+## Re-derived — the hot-arm correction is right
+
+`main` is the lower-throughput arm on **both** legs in **all three** rounds
+(1t body JIT 568.5/570.1, 561.7/570.1, 561.7/564.1; 11t 4979.5/5055.1,
+4495.8/5020.0, 4649.1/4714.8), and the log's own schedule line plus the
+separators put `main` at positions 2, 4, 6 — so "perfectly confounded with run
+order" is exact, not rhetorical. The stated limit holds too: ordering runs by 11t
+body-JIT hotness gives 4495.8→7.71, 4649.1→7.45, 4979.5→7.42 within `main`
+(monotone) and 4714.8→7.22 < 5020.0→7.24 within the branch (not), which is
+precisely the pair the entry names. Also re-derived clean: the criteria table's
++0.25/-0.02/+0.07, 6.12 vs 6.15, 6.12 > 6.05, 7.19-7.24 vs 7.42-7.71; the
+retained set {b1, b2, m1}; the 0.9/5.5/2.2% and 3.8/8.2/5.1% figures; 111-103 = 8
+x 16384 = 131,072.
+
+The gate's **other** clause was checked, not assumed: 1-thread body JIT >= 560
+H/s passes on all six runs (561.7-570.1), so citing only the 11-thread clause
+discards the same three runs and is not misleading.
+
+## R5-1 (minor, ACTIONABLE) — the correction deleted the confound's *direction* and kept the assertion that it has one
+
+`da7579a` replaced the sentence "the confound has a direction: hotter runs
+produced *higher* paired diffs, and `main` was the hot arm in two of the three
+rounds, so its apparent advantage is plausibly thermal rather than real". The
+wrong figure went; **the clause carrying the direction went with it**. Both
+documents now say "the confound has a direction, and it is worse than first
+written" and never say what the direction is.
+
+That clause is load-bearing, not decoration. "`main` was the hotter arm" is on
+its own equally consistent with hotter→*lower* diff, under which `main`'s higher
+diff would mean the observed gap *understates* a real `main` advantage — the
+opposite reading. In `AUDIT.md` the premise is recoverable, but only from inside
+scare quotes in the following paragraph ("'hotter gives a higher diff' is
+monotone within `main`..."), and that paragraph's closing line, *"The 'plausibly
+thermal' hedge survives"*, quotes a hedge the same commit deleted from the entry.
+The **PR body** carries neither the direction nor the limit paragraph, so it
+asserts a confound and the conclusion "both cut against reading anything into the
+gap" with the premise absent.
+
+Fix is one restored clause in each document ("hotter runs produced higher paired
+diffs, so `main`'s apparent advantage is plausibly thermal rather than real"),
+not another rewrite — a fresh rewrite of this paragraph is what produced rounds
+3, 4 and 5's findings.
+
+## n5, n6 (nits)
+
+- Round count: "four rounds" is correct as of `da7579a` and stale as of this
+  section. This is round 3's m11 -> round 4's m14 recurring a third time; bumping
+  it to "five" sets up the same finding for round 6. Recommend phrasing that
+  cannot go stale — *reviewed across successive rounds by `jit-reviewer`; the
+  ledger has the sequence* — instead of a number.
+- `CLAUDE.md`'s new "Four review rounds, each finding a defect in the previous
+  round's correction" over-claims by one: rounds 2-4 fit, round 1 found its
+  defect in the original write-up. (The "inherited from the *retention* split"
+  provenance is asserted as fact where round 4 hedged it; unverifiable, harmless,
+  mentioned only for completeness.)
+
+## Checked and clean
+
+- All four of round 4's copy-edits landed: the duplicated "stricter than issue
+  #1" paragraph occurs once in the body, no other long line is duplicated;
+  "four rounds" in both AUDIT and body; a single `Ledger:` line in the entry;
+  "Round 1 confirmed" with the stray capital gone.
+- No new number is wrong, and no stale "two of three" survives outside the
+  sentence describing round 4's finding.
+- The correction does not over-correct: it adds the schedule flaw and its own
+  limit, and stops short of claiming the gap is thermal.
+- `AUDIT.md` PERF-02, the `CLAUDE.md` row, `PERF1_CRITERION.md` and the PR body
+  agree on every figure and on the verdict (criterion 3 fails; 1 and 2
+  unevaluable; keep-only-if-all-hold).
+
+## CI at ledger time
+
+The run on `da7579a` (`34059229618` CI, `34059229622` JIT gate) was still
+`in_progress` when this was written — not asserted green. The commit touches only
+`AUDIT.md` and `CLAUDE.md`, and `git diff origin/main -- src/ benches/ scripts/
+Makefile Cargo.toml .github/` is empty, so its build inputs are byte-identical to
+`bf4ff52`, which was 5/5 green.
+
+## Not verified — stated, not implied
+
+- The benchmark was not re-run; the six results are checked for internal
+  consistency and against the criterion only.
+- "92/92 on the modified code" remains permanently uncheckable, as every prior
+  round said.
+- Arm identity in `PERF1_RUNS.log` still rests on the driver's `cd`, which the
+  log's own header discloses.
+
+## Verdict
+
+**MERGEABLE.** No blockers, no majors — none is reachable, no code ships. One
+minor (R5-1) and two nits. **ACTIONABLE: yes, as single-clause copy edits** —
+restore the direction clause in `AUDIT.md` and the PR body, make the round count
+unstaleable, soften `CLAUDE.md`'s "each".
+
+**The sequence should stop.** Not because little was found, but because of what
+is being found: rounds 3, 4 and 5 have each found a defect *created by the
+previous round's edit to the same paragraph*. That is churn in one paragraph, not
+convergence, and "run until a round finds nothing" will not terminate while every
+correction is a fresh prose rewrite. The three edits above are self-verifying by
+whoever makes them and do not need a sixth cold reviewer.

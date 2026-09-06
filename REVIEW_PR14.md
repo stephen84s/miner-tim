@@ -354,3 +354,21 @@ so a red result there would be an infrastructure surprise, not a code one.
 green on `f5a5155` — `lint` 15s, `audit` 17s, `test` 4m06s (run 34025152736),
 `jit-linux-arm` 11m38s, `jit-macos` 13m36s (run 34025152711). The verdict's
 condition is met: **MERGEABLE**, minors only.
+
+## Three follow-ups checked after the verdict
+
+- **`Makefile:18` confirms R2-F5's replacement check.**
+  `VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed …)` — so
+  `make release` tags from `Cargo.toml`, and `grep '^version' Cargo.toml` on
+  `main` is exactly the invariant step 1 should assert, not the commit subject.
+- **The `CLAUDE.md` table still renders** (the PR10 round-3 failure mode). Task
+  board through the REL-01 row, posted to `POST /markdown` with `mode=gfm`:
+  **28 `<tr>` rows and one `<blockquote>`** — the convention note is still a
+  blockquote and the table is still a table, so the ~90 words added to the
+  REL-01 cell did not swallow it.
+- **Protocol, priority 3.** The REL-01 `AUDIT.md` entry was added on this
+  unmerged branch (`5c5886d`), so editing it in place is what `CLAUDE.md`'s
+  "Correcting `AUDIT.md`" rule allows; nothing here claims to append while
+  editing. R2-F2's count restated precisely: the corrected step-5 note is one
+  place, and the over-broad "not a public window" survives in three —
+  `RELEASING.md:12-15`, `release.yml:10-13`, `AUDIT.md` ~4619 — plus the PR body.

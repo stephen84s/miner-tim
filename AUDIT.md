@@ -4420,6 +4420,9 @@ tags.
 review, deliberately not added to that PR: a reviewer agent was mid-flight
 against its worktree, and changing the tree under a running reviewer is what
 PROC-03 exists to prevent. Both branches append to the end of `AUDIT.md`, so this
-one is rebased onto `main` after #10 lands and the overlap resolved there —
-which is rule (2) applied to its own commit.
+one was rebased onto `main` after #10 landed (`a0473c0`), the two `AUDIT.md`
+entries and the two task-board rows resolved additively, and the branch left
+linear with no merge commit — rule (2) applied to its own commit. The rebase
+also had to take the *later* wording of the PROC-05 task-board row, since the
+second commit on this branch rewrites the row the first one added.
 

@@ -308,3 +308,202 @@ it quotes a median that is off by one order statistic (**F7**); it over-claims
 "Monero" for "the pool" and dramatises with a cherry-picked difficulty pair
 (**F8**); and it omits the response-batching limitation a future reader needs
 most (**F9**).
+
+---
+
+## Round 2
+
+Fresh reviewer, cold. Scope: commit `7cf5e95` (the corrections) reviewed as new
+work — `git diff a361247..HEAD -- AUDIT.md CLAUDE.md` — plus the PR body. Round
+1's findings were **not** inherited; every figure was re-derived from
+`LIVE8H_RUN.log`.
+
+**Scope check / handoff.** The diff touches `AUDIT.md`, `CLAUDE.md` and this
+ledger only. No `src/`, no `src/randomx/jit/`, no `vm.rs`, no `benches/`, no
+`.github/workflows/`, `Makefile`, `scripts/` or `.cargo/config.toml`. Nothing to
+hand to `jit-reviewer` or `ci-reviewer`. The one performance number in the entry
+(median 2226.9 H/s) is an observation read off the committed run log, not a
+benchmark claim from `benches/`, and I verified it from the log; an opinion on
+"median of overlapping 10-minute averages" as a *methodology* would be
+`jit-reviewer`'s.
+
+**Append-only.** LIVE-01 was added on this unmerged branch (`a361247`), so
+`CLAUDE.md`'s protocol permits editing it in place. The heavy in-place rewrite is
+legitimate and the entry never claims to have appended. Not a finding.
+
+### Re-derivation — every figure in the corrected entry
+
+All from `LIVE8H_RUN.log`, independently:
+
+| Claim | Derived | ✓ |
+|---|---|---|
+| 601 found / 600 accepted / 1 rejected / 0 withheld | 601 / 600 / 1 / 0 | ✓ |
+| 0 `ERROR` lines, 0 unplanned disconnects | 0 ERROR, 1 WARN (the rejection); 13 connects all accounted for | ✓ |
+| 1,865 job pushes | 1852 `New job` + 13 `Initial job` | ✓ |
+| 307 adjacent difficulty changes | 307 | ✓ |
+| first 50,000 / last 127,284 / min 50,000 / max 475,896 | all four | ✓ |
+| resets to 50,000 at all 13 logins | all 13 `Initial job` lines are difficulty 50000 | ✓ |
+| 13 logins, 12 rotations (4+4+4) | 13 `Login successful`; 4 Author + 4 Xmrig + 4 User | ✓ |
+| stints 2.5 min on a ~100 min cycle | 150 s each; 22:48:54 → 00:28:55 = 100m01s | ✓ |
+| realised donation 4.17% | 8 × 150 s = 1200 s / 28800 s = 4.167% | ✓ |
+| median 2226.9 H/s, range 2058.0–2345.3, n=2817 | median 2226.9 (n odd), min 2058.0, max 2345.3, 2877−60 = 2817 | ✓ |
+| latency median 8 s / p90 18 s / max 96 s | 8.0 / 18.0 (nearest-rank and linear agree) / 96.0 | ✓ |
+| 578 of 601 within 1 s of a job push | 578 at a ±1 s window | ✓ |
+| rejection 30 min after a switch, 1h04m before the next | 30m09s / 1h04m52s | ✓ |
+| the three-outstanding table (2 s / 4 s / 6 s job ages) | exact, lines 1638–1648 | ✓ |
+| `RECV_POLL_INTERVAL` 50 ms | `pool_connection.rs:20` | ✓ |
+
+Nothing in the table above is wrong. The defects are elsewhere.
+
+### The three things round 1 said were understated — verified independently
+
+1. **Verifier provably armed.** `LIVE8H_RUN.log:42-45`: all four workers log
+   `Worker N: native-loop JIT on | share verification on`. `miner.rs:623-633`
+   derives that text from `native_loop_effective()`, so it is effective, not
+   requested. Confirmed. *(I first thought this claim was false — `grep
+   effective` misses it, because the emitted text does not contain the word.)*
+2. **Receiver cleared.** `RECV_POLL_INTERVAL` = 50 ms; six `New job` pushes fall
+   inside the 96 s gap (23:22:43, :23:02, :23:22, :23:25, :23:42, :24:02), on
+   the ~20 s tick throughout. Confirmed.
+3. **2877/2877.** Recomputed from scratch with a running tally of
+   accepted/rejected/found: **2877 status lines, 2877 matching, 0 mismatched.**
+   Confirmed.
+
+### Findings
+
+**R2-F1 (major) — the PR body still tells the withdrawn story as fact.**
+`AUDIT.md` and `CLAUDE.md` are clean: `grep` across the branch finds the
+withdrawn strings only inside explicit withdrawals. **The PR body is not.** It
+still carries, verbatim and unqualified: the `23:23:46 / 23:23:48 / 23:24:02 /
+23:24:03` timeline; "The one rejection was stale, not wrong"; "A *wrong* hash
+returns `Invalid result` or `Low difficulty share`" — which the entry now says
+appears nowhere in 601 responses; "600 accepted shares is the first evidence that
+what this miner emits is what Monero accepts"; and all five corrected figures
+(2226.8, "1,865 vardiff adjustments", "50,000 → 475,896", "Eight donation
+rotations", "600 opportunities"). Issue #17 says "Found during round 1 of PR
+#16", so a future reader following #17 back lands on exactly this page. This is
+the repo's document-that-argues-with-itself failure spread across artifacts. One
+`gh pr edit` fixes it.
+
+**R2-F2 (major) — "Twelve re-logins produced zero orphaned shares" is vacuous;
+the correction made a true weak claim into an untrue strong one.** Round 1's
+entry said "Eight donation rotations produced zero rejections". The correction
+raised it to "Twelve re-logins produced zero orphaned shares… Each happens
+mid-hash with four workers running — the obvious place to lose an in-flight
+share. **601 shares found, 601 responses received**, so none was lost across any
+of them." Replaying the log as a running count of found-minus-responded gives, at
+each of the twelve `Donation: mining to` lines, **outstanding = 0**. This is
+pairing-free — it needs no attribution of response to submission. No share was
+ever in flight across a rotation, so the run never entered the window it claims
+to have cleared, and the 601 = 601 identity is a global count that would hold
+even if the orphaning path were broken. Present in both `AUDIT.md` and the
+`CLAUDE.md` row ("12 re-logins with 601 found = 601 responses, so nothing was
+orphaned"). The honest statement is: twelve rotations occurred, no share was
+outstanding at any of them, so the orphaning path is untested — it belongs under
+*Not established*.
+
+**R2-F3 (major) — the replacement reasoning leans on a pillar whose documented
+limit the entry does not state.** The wrong-hash conclusion now rests on "600 of
+601 accepted" plus "zero verifier withholds". `miner.rs:740-747` says of the
+second, in its own words: *"the two paths are not independent. Both run
+`emit_body`, so a defect in the shared instruction emitter produces the same
+wrong hash on both sides and passes."* The entry never says this — `grep` over
+the whole LIVE-01 entry for `emit_body`, `independen`, `both paths`, `shared`
+returns only the *pool*-acceptance sentence. Worse, the entry's own opening
+argues that the problem with every existing check is that it "compares the JIT
+against *itself*", and then makes such a check one of two pillars. Pool
+acceptance is the only external evidence here; the withholds are an internal
+consistency check over the native-loop scaffolding. One clause fixes it.
+
+**R2-F4 (minor) — new numeric error introduced by the correction: "superseded
+four times" is six.** Between the 23:22:27 find and the 23:24:03 responses the
+log shows six job pushes (`Hy6Fp3CFgv0BI4m2`, `UFJ7QKSROdad8HXv`,
+`a0DWItt0PaVdbcLE`, `d1A05BcPa1TJh57L`, `nRnKGav31g3d17iB`, `WenvUpDyx1EpocNJ`).
+Four is the count of jobs strictly *between* `OdNs0sPTHTyrpfXY` and
+`nRnKGav31g3d17iB`, which is not what the sentence says. The error runs against
+the entry's own argument, so it is harmless in direction — but it is a wrong
+number in the authoritative record, in the paragraph written to replace a wrong
+number.
+
+**R2-F5 (minor) — the latency figures presuppose the pairing the same paragraph
+declares unsupported.** "Any statement of the form '*this* share got *that*
+response' is therefore unsupported" is immediately followed by "median
+submit-to-response 8 s, p90 18 s". Those two are order statistics over
+found→response pairs zipped in log order, i.e. FIFO — the very assignment the
+entry argues is *probably wrong* at 23:24:03 ("the *opposite* of the assignment
+used"). The maximum, 96 s, survives regardless: some submission was outstanding
+from 23:22:27 to 23:24:03 under any pairing. The median and p90 need a stated
+assumption ("responses arrive in submission order on a single connection") or a
+hedge.
+
+**R2-F6 (minor) — issue #17 is not cited.** The entry says only "Filed as a
+follow-up rather than fixed here"; the `CLAUDE.md` row does not mention it
+either. #17 exists and is exactly this. `AUDIT.md` is the record a future reader
+searches; an uncited follow-up is unfindable.
+
+**R2-F7 (minor) — the Verification paragraph omits the derivations a future
+reader most needs.** It covers share counts, hashrate quantiles, difficulty range
+and donation cadence. It does not cover:
+- **How "0 withheld" is known** — and it is knowable *directly*, better than the
+  entry claims: `ShareVerdict::Withhold` logs at `log::error!`
+  (`miner.rs:764-776`) and the run has **0 `ERROR` lines**. That is an observed
+  absence of the withhold line, not an inference from 601 = 600 + 1. It is the
+  single most load-bearing figure in the entry and its derivation is nowhere.
+- **The definitions behind the three non-obvious numbers**: 307 counts *adjacent
+  differing* difficulties over the 1,865-push series; 578 uses a **±1 s** window;
+  p90 = 18 s under both nearest-rank and linear interpolation (I got 17 s on a
+  first pass with an off-by-one — which is the argument for recording the
+  convention).
+- **A base rate for 578/601.** Without one the claim could be trivially true.
+  With one it is decisive: the ±1 s windows around 1,838 distinct push seconds
+  cover 5,381 of 28,807 seconds — **18.7% of the timeline holding 96.2% of the
+  responses**. That is what actually forecloses the starved-receiver reading.
+
+**R2-N1 (nit) — "Vardiff changes: 307" includes 12 login resets.** Twelve of the
+307 adjacent changes are the drop back to 50,000 at a re-login, plus the climbs
+that follow; they are not vardiff responding to the miner. The row label
+overstates slightly; the prose elsewhere is aware of the resets.
+
+**R2-N2 (nit) — round 1's N1 is unactioned and unmentioned.** n=2817 is still
+quoted without noting that overlapping 10-minute averages sampled every 10 s are
+not independent samples. The entry claims only that the *nine minors* were
+actioned, which is true, so this is not a misstatement — but the caveat is still
+missing.
+
+### Round 1 completeness check
+
+The entry asserts "nine minors — all actionable, all actioned above." Checked
+against round 1's actual F1–F9 rather than the entry's self-description: F1
+(1,865→307) ✓, F2 (sawtooth, min/max/end) ✓, F3 (timeline withdrawn) ✓, F4
+(distinguisher withdrawn, replaced with the hedged "on its face") ✓, F5 (8→12) ✓,
+F6 (600→601) ✓, F7 (2226.8→2226.9) ✓, F8 (both over-claims; the cherry-picked
+132,515→335,439 pair went out with the withdrawn paragraph) ✓, F9 (the new
+attributability paragraph) ✓. **The claim holds.** N1 and N2 were nits and are
+not claimed.
+
+### What I could not verify
+
+- **That the log is authentic.** An 8-hour live run is not reproducible. I rely
+  on 2877/2877 internal consistency, which is tamper-*evidence*, not proof, and
+  on 0 non-monotonic timestamps.
+- **That the binary was `ef40bea`.** The log header asserts it; nothing in the
+  log proves it.
+- **Which submission the rejection belongs to.** Undeterminable, as the entry
+  now correctly says.
+- **Break-testing: N/A.** Docs-only diff, no test added, no code under test.
+  Log re-derivation is the substitute and was done in full.
+
+### Verdict
+
+**NOT MERGEABLE**, on one required change: **R2-F1**, the PR body. It still
+states as fact the timeline the entry withdraws, the distinguisher the entry says
+was never observed, and all five corrected figures. `AUDIT.md` and `CLAUDE.md`
+would be merged saying one thing while the PR that carries them says another, and
+issue #17 points a reader straight at it.
+
+R2-F2 and R2-F3 are majors in `AUDIT.md` and `CLAUDE.md` and should land in the
+same pass: one removes a claim the run cannot support, the other adds a clause
+the code's own comment already supplies.
+
+**All nine findings are ACTIONABLE.** No blockers. Three majors, four minors, two
+nits.

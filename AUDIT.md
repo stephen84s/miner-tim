@@ -5123,3 +5123,90 @@ than widening this change. That issue also records the design tension that must
 be settled first: a gate firing on every push would sit red for most of a PR's
 life, because reviewers commit their ledger *during* review by design — and a
 check that is normally red is one people learn to skip.
+
+### LIVE-01 (2026-09-07): eight-hour live pool run — 600 accepted, 1 rejected, 0 withheld
+
+The first end-to-end run against a real pool since the GitHub migration, and the
+first ever exercising a day's worth of changes to the JIT, the benchmark harness
+and the release flow. User asked for eight hours; it ran 8h 00m, 21:13:53Z to
+05:14:00Z, and stopped cleanly on SIGINT.
+
+**Why this is worth a ledger entry at all.** Every other check in this project
+compares the JIT against *itself* or against the interpreter. The 92-test gate
+proves emitted ARM64 agrees with the reference implementation; it cannot prove
+the network agrees. A JIT defect does not crash and does not dent the hashrate —
+it produces plausible, wrong hashes that a pool silently rejects. Six hundred
+accepted shares is the first evidence that what this miner emits is what Monero
+accepts.
+
+| | |
+|---|---|
+| Commit | `ef40bea` (`main`, post-#15) |
+| Pool | `monerohash.com:2222`, plain TCP |
+| Threads | 4 (the operator's `mining.conf` setting, not the 12-core default) |
+| Shares | **600 accepted, 1 rejected (0.17%), 0 withheld** |
+| `ERROR` lines | **0** |
+| Hashrate, 10 min avg | median **2226.8 H/s**, range 2058.0-2345.3, n=2817 |
+| Pool difficulty | 50,000 -> 475,896 over 1,865 vardiff adjustments |
+| Unplanned disconnects | **0** |
+
+**The one rejection was stale, not wrong, and the distinction is the whole
+point.** `Invalid job id` at 23:24:03: workers found shares against job
+`nRnKGav31g3d17iB` at 23:23:46 and :48, job `WenvUpDyx1EpocNJ` replaced it at
+23:24:02, and one submission landed a second later. The pool was rotating jobs
+every ~20 s while ramping difficulty 132,515 -> 335,439 in three minutes. A
+*wrong* hash returns `Invalid result` or `Low difficulty share`; `Invalid job id`
+means the hash was never evaluated. **Zero rejections for a wrong result in 601
+submissions.**
+
+**Zero verifier withholds is the stronger result.** `ShareVerifier` recomputes
+every submittable hash on the reference path (`set_native_loop(false)`) and
+withholds on disagreement. Six hundred opportunities for the native loop and the
+body JIT to diverge, across a difficulty range widening almost tenfold, and not
+one disagreement. The mechanism has still never fired in anger — which is what
+one wants, and is now evidence rather than an absence of evidence.
+
+**Two findings that came from the user's questions, not from the plan.**
+
+- **Donation accounting verified against a live pool for the first time.** Four
+  Author stints and four XMRig stints, 2.5 minutes each on a ~100-minute cycle,
+  13 logins in total: 5 minutes donated per 100, split 50/50. That is exactly
+  the documented `donate-level 5%`. Previously this was only ever read from
+  `donate.rs`.
+- **Eight donation rotations produced zero rejections.** Each is a full re-login
+  with a fresh session id while four workers keep hashing — the obvious place
+  for an in-flight share to be orphaned. None was. The user asked whether the
+  rejection was near a donation switch; it was not (30 minutes after one, an
+  hour before the next), and checking established a stronger fact than the
+  question assumed.
+
+**A gap in how this was set up, recorded because it nearly invalidated the run.**
+The miner was launched with no sleep inhibitor. On AC power the host has
+`sleep 0` so nothing happened, but that was luck: on battery it is `sleep 1`, and
+an unplug at any point in eight hours would have suspended the run silently. The
+only `caffeinate` present at launch was an unrelated `-t 300` from the harness,
+five minutes from expiry. **The user spotted this 34 minutes in.** Fixed with
+`caffeinate -i -s -w <miner pid>`, tied to the miner's lifetime so it releases on
+exit — confirmed released afterwards. A long unattended run needs its inhibitor
+started *with* it, not after someone asks.
+
+Note also that `caffeinate` does not prevent lid-close sleep; that remains an
+unguarded way to truncate a run of this kind.
+
+**Files changed:** `LIVE8H_RUN.log` (new — the full 6,041-line run log, committed
+because the numbers above are otherwise unverifiable), `CLAUDE.md` (task board),
+`AUDIT.md` (this entry).
+
+**Verification.** All figures derived from the committed log rather than
+recalled: share counts by `grep -c`, hashrate quantiles over 2,817 status lines
+discarding the first 60 (the dataset build and average warm-up), difficulty range
+and rotation count from the `New job` lines, donation cadence from the
+`Donation: mining to` lines.
+
+**Not established by this run.** It exercised **4 threads**, not the 12-core
+default, so nothing here speaks to behaviour at full parallelism. It used one
+pool, plain TCP — the TLS path in `pool_connection.rs` was not exercised at all.
+`mining.conf` had `NATIVE_LOOP` and `VERIFY_SHARES` unset, so both took their
+defaults (on); the `off` paths were not tested. And eight hours says nothing
+about multi-day stability, dataset rotation on a seed change, or recovery from a
+pool-side disconnect — there were none to recover from.

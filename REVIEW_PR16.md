@@ -5,7 +5,14 @@ Branch `docs/live-test` @ `a361247`, base `main` @ `ef40bea`.
 Diff: `AUDIT.md` (+87), `CLAUDE.md` (+1), `LIVE8H_RUN.log` (+6041). No `src/`,
 no `benches/`, no workflow, no build change.
 
-**Verdict: MERGEABLE. 0 blockers, 0 majors, 7 minors, 2 nits — all ACTIONABLE.**
+**Verdict: MERGEABLE. 0 blockers, 0 majors, 9 minors (F1-F9), 2 nits — all
+ACTIONABLE.** (The first commit of this ledger said "7 minors"; that was a
+miscount taken from the bottom-line paragraph, which had omitted F4 and F8.
+Corrected here rather than amended away.)
+
+F1 and F3 carry the most weight. They are *minors* only because this PR changes
+no behaviour — on `_shared-context.md`'s scale a documentation-accuracy defect
+cannot exceed minor. F3 is the entry's load-bearing claim.
 
 No blocker is reachable: nothing here can change an emitted instruction or a
 submitted hash. What is under review is whether the record is accurate, and
@@ -174,6 +181,13 @@ The claim itself holds and is stronger than written: 601 found = 601 responses,
 so **not one share was orphaned across any of the 12 re-logins**. That balance
 is the actual evidence and the entry doesn't state it.
 
+Also in this paragraph: **the run donated 4.17%, not 5%.** The first switch is
+94m59s in; cycles land at 95 / 195 / 295 / 395 min and the run ends at 480 min
+mid-cycle, so 4 x 5 = 20 min of 480. "5 minutes donated per 100 ... exactly the
+documented 5%" is correct *as a statement about the schedule*, but
+"Donation accounting verified against a live pool" invites the reader to take
+5% as the realised figure. One clause separating schedule from realisation.
+
 ### F6 (minor) — "600 opportunities" for the verifier should be 601
 
 0 withheld ⇒ all 601 found shares were verified and submitted. The 601
@@ -268,6 +282,12 @@ That is a real positive result and the entry could claim it.
 - **That the log is unedited.** I established internal consistency
   (2877/2877 counter agreement, monotonic timestamps, no gaps) — strong, but it
   is not provenance.
+- **That the binary that produced the log is `ef40bea`.** The log header asserts
+  `commit : ef40bea` and `binary : 2208992 bytes`; nothing ties the two. Distinct
+  from the point above. The converse *is* sound and is what licenses my reading
+  of `error!` levels and `RECV_POLL_INTERVAL`: this diff is docs-only, so the
+  `miner.rs` and `pool_connection.rs` in this worktree are byte-for-byte
+  `ef40bea`'s source.
 - **Break-testing: N/A.** The PR adds no test and changes no code under test.
 - I did not run `make check` / `make test` / `make verify-jit`: the diff touches
   no compiled file. CI's five jobs exercise nothing this PR changes.
@@ -280,8 +300,11 @@ That is a real positive result and the entry could claim it.
 The run is real, the log is genuine and complete, the headline result (600
 accepted, 0 withheld, verifier provably armed) holds, and the central conclusion
 — the one rejection was not a wrong hash — survives every reading I could
-construct. What needs fixing is that the entry states an inferred timeline as
-fact (F3), gets a job-push count and a difficulty progression wrong (F1, F2),
-undercounts its own donation evidence (F5, F6), quotes a median that is off by
-one order statistic (F7), and omits the response-batching limitation that a
-future reader needs most (F9).
+construct. What needs fixing, across all nine minors: the entry states an inferred timeline
+as fact (**F3**) and presents an uncited pool-behaviour assumption as established
+(**F4**); it gets a job-push count and a difficulty progression wrong (**F1**,
+**F2**); it undercounts its own donation and verifier evidence (**F5**, **F6**);
+it quotes a median that is off by one order statistic (**F7**); it over-claims
+"Monero" for "the pool" and dramatises with a cherry-picked difficulty pair
+(**F8**); and it omits the response-batching limitation a future reader needs
+most (**F9**).

@@ -5171,18 +5171,30 @@ submissions were outstanding:
 **All three were found while their job was current**, so "found against a stale
 job" describes none of them. The earlier account assigned the rejection to a
 `nRnKGav` share by first-in-first-out; but the 23:22:27 submission was 96 s old
-by the time responses arrived and its job had been superseded four times, making
+by the time responses arrived and its job had been superseded by six further
+job pushes, making
 it the likelier candidate — the *opposite* of the assignment used. And it cannot
 be settled either way: `pool_connection.rs:551,558` log bare
 `Share rejected: {}` and `Share accepted by pool`, with no share id, job id or
 nonce, though the JSON-RPC response carries an `id`. **The log cannot attribute a
-response to a submission.** Filed as a follow-up rather than fixed here.
+response to a submission.** Filed as **GitHub #17** rather than fixed here — and
+note the miner already logs `job_id` and `nonce` on the *withhold* path
+(`miner.rs:766`), so this is an omission on the response path, not a missing
+capability.
 
 What survives, on evidence rather than narrative:
 
 - **600 of 601 submissions were accepted.** A wrong hash is not accepted.
 - **Zero verifier withholds** (below) — the native loop and the reference path
-  never disagreed on any submittable hash.
+  never disagreed on any submittable hash. **With the limit the code itself
+  documents**, which an earlier version of this entry omitted while resting the
+  conclusion on it: `miner.rs:740-747` states that the two paths are *not*
+  independent — both run `emit_body`, so a defect in the shared instruction
+  emitter produces the same wrong hash on both sides and passes. The verifier
+  covers the native-loop scaffolding (prologue, per-iteration pre/post, loop
+  control, register residency), not the emitter beneath it. Omitting that was
+  the same error this entry's opening paragraph criticises: treating a check
+  that compares the JIT against itself as though it were independent.
 - The single rejection reads `Invalid job id`, which on its face concerns job
   validity rather than hash validity.
 
@@ -5208,17 +5220,27 @@ one wants, and is now evidence rather than an absence of evidence.
   5 minutes donated per 100, split 50/50, matching the documented
   `donate-level 5%`. Previously only ever read from `donate.rs`. Note the
   *realised* rate over this particular run was **4.17%** (20 minutes of 480), not
-  5% — the run began mid-cycle and ended mid-cycle, so it does not contain a
-  whole number of periods. The cadence is right; eight hours is simply not a
-  multiple of 100 minutes.
-- **Twelve re-logins produced zero orphaned shares.** Not eight: the return to
-  the user's wallet is also a full re-login with a fresh session id, so there
-  were 4 + 4 + 4 rotations and 13 logins including the initial one. Each happens
-  mid-hash with four workers running — the obvious place to lose an in-flight
-  share. **601 shares found, 601 responses received**, so none was lost across
-  any of them. The user asked whether the rejection was near a donation switch;
-  it was not (30 minutes after one, 1h04m before the next), and checking
-  established a stronger fact than the question assumed.
+  5%. The reason is one-sided, not two: the run began *at* a cycle boundary and
+  contained **four complete cycles** — 21:13:55 + 400 min = 03:53:55, exactly the
+  fourth return to the user — each donating its full 5%. The entire shortfall is
+  the undonated 80-minute tail that follows. An earlier version said the run
+  "began mid-cycle and ended mid-cycle", which is wrong on the first clause.
+- **Twelve rotations, not eight** — the return to the user's wallet is also a
+  full re-login with a fresh session id, so 4 + 4 + 4, and 13 logins including
+  the initial one. The user asked whether the rejection was near a donation
+  switch; it was not (30m09s after one, 1h04m52s before the next).
+
+  **What was claimed about those rotations is withdrawn.** An earlier version
+  said "601 found, 601 responses received, so none was lost across any of them",
+  presenting it as evidence the re-login path preserves in-flight shares. Review
+  showed the claim is **vacuous**: replaying found-minus-responded gives
+  **outstanding = 0 at all twelve `Donation` lines and all thirteen login
+  instants**. No share was ever in flight across a rotation, so the run never
+  entered the window the claim says it cleared — and 601 = 601 is a global
+  identity that would hold even if the orphaning path were completely broken.
+  Moved to *Not established* below. This was a true, weak claim ("zero
+  rejections near a rotation") rewritten into a false, strong one while
+  correcting something else.
 
 **A gap in how this was set up, recorded because it nearly invalidated the run.**
 The miner was launched with no sleep inhibitor. On AC power the host has
@@ -5238,15 +5260,37 @@ because the numbers above are otherwise unverifiable), `CLAUDE.md` (task board),
 `AUDIT.md` (this entry).
 
 **Verification.** All figures derived from the committed log rather than
-recalled: share counts by `grep -c`, hashrate quantiles over 2,817 status lines
-discarding the first 60 (the dataset build and average warm-up), difficulty range
-and rotation count from the `New job` lines, donation cadence from the
-`Donation: mining to` lines.
+recalled, with the definitions stated because two of them are not obvious:
+
+- Share counts by `grep -c`.
+- **"0 withheld" is directly observable, not inferred.** `ShareVerdict::Withhold`
+  logs at `error!` with worker, job_id and nonce (`miner.rs:764-772`), and the
+  run has **0 `ERROR` lines**. An earlier version implied it from
+  601 = 600 + 1, which is weaker: that arithmetic cannot distinguish a withheld
+  share from one never found.
+- Hashrate quantiles over 2,817 status lines, discarding the first 60 — 60 × 10 s
+  is exactly the `10m` averaging window, so those are the samples still filling
+  it. **They are not independent samples**: a 10-minute rolling mean sampled
+  every 10 s autocorrelates heavily, so the range is descriptive and no interval
+  is quoted from it.
+- **307 = adjacent difficulty changes**, counted over the `difficulty:` field of
+  all 1,865 job lines; it includes the 12 login resets to 50,000, which are
+  reconnection artefacts rather than vardiff decisions.
+- **578 of 601 responses within ±1 s of a job push**, where the ±1 s windows
+  around 1,838 push seconds cover **18.7% of the run's timeline yet hold 96.2%
+  of responses**. That base rate is what forecloses the starved-receiver
+  reading; the raw count alone would not.
+- Donation cadence from the `Donation: mining to` lines; rotation-window
+  occupancy by replaying found-minus-responded across the whole log.
 
 **A limitation that shapes everything above: responses are not attributable.**
-The pool batches responses onto its ~20 s tick — median submit-to-response 8 s,
-p90 18 s, maximum 96 s — and the client logs no identifier on either outcome
-line. Any statement of the form "*this* share got *that* response" is therefore
+The pool batches responses onto its ~20 s tick and the client logs no identifier
+on either outcome line. Note the tension in quoting latencies at all: **median 8 s
+and p90 18 s are FIFO-paired order statistics**, computed under exactly the
+pairing assumption this paragraph says is unsupported, and are offered as
+indicative only. **Maximum 96 s survives any pairing** — the gap between a
+`SHARE FOUND` and the next response is 96 s however the two sequences are
+matched — so that is the figure the argument rests on. Any statement of the form "*this* share got *that* response" is therefore
 unsupported, which is what sank the rejection timeline. Aggregate counts (601
 found, 600 accepted, 1 rejected) are unaffected, needing no pairing. Cleared as a
 *client* problem: `RECV_POLL_INTERVAL` is 50 ms, job pushes were logged on
@@ -5254,7 +5298,10 @@ schedule right through the 96 s gap, and 578 of 601 responses land within 1 s of
 a job push — pool-side batching, not a starved receiver. The repo's known
 ~15%-stale-reject failure mode is foreclosed for this run.
 
-**Not established by this run.** It exercised **4 threads**, not the 12-core
+**Not established by this run.** That the re-login path preserves an in-flight
+share across a donation rotation: **outstanding was 0 at every rotation**, so the
+case never arose. Twelve rotations passing says only that none was attempted
+under load. It exercised **4 threads**, not the 12-core
 default, so nothing here speaks to behaviour at full parallelism. It used one
 pool, plain TCP — the TLS path in `pool_connection.rs` was not exercised at all.
 `mining.conf` had `NATIVE_LOOP` and `VERIFY_SHARES` unset, so both took their
@@ -5279,3 +5326,20 @@ And the committed log is internally consistent: all 2,877 status lines'
 `Shares: a/r (found:f)` triples match the running counts of the lines above them,
 2,877 of 2,877, which a hand-edit would desynchronise. That check is what makes
 the log trustworthy as evidence rather than merely present.
+
+**Round 2** (`pr-reviewer`, cold) returned **NOT MERGEABLE** — the first of this
+session — with three majors, all actioned above. It re-derived every figure from
+the log independently and found them correct; the defects were in the reasoning
+built on them.
+
+The one worth carrying forward: **the round-1 correction turned a true weak claim
+into a vacuous strong one.** "Zero rejections near a rotation" (true, weak)
+became "601 found, 601 responses, so none was lost across any rotation" — which
+sounds like evidence and is not, because no share was ever in flight at a
+rotation and the identity would hold if the path were broken. Correcting one
+overstatement produced a worse one, which is this repo's documented pattern
+appearing inside the fix for it.
+
+Round 2 also verified, rather than inheriting from round 1, that the verifier was
+armed, the receiver cleared, and the log internally consistent 2,877 of 2,877
+recomputed from a running tally. Ledger: `REVIEW_PR16.md`.

@@ -365,7 +365,9 @@ Nothing in the table above is wrong. The defects are elsewhere.
 2. **Receiver cleared.** `RECV_POLL_INTERVAL` = 50 ms; six `New job` pushes fall
    inside the 96 s gap (23:22:43, :23:02, :23:22, :23:25, :23:42, :24:02), on
    the ~20 s tick throughout. Confirmed.
-3. **2877/2877.** Recomputed from scratch with a running tally of
+3. **2877/2877.** `7cf5e95` touches only the three `.md` files, so
+   `LIVE8H_RUN.log` is byte-identical to what round 1 checked and the evidence
+   base is fixed across rounds. Recomputed from scratch with a running tally of
    accepted/rejected/found: **2877 status lines, 2877 matching, 0 mismatched.**
    Confirmed.
 
@@ -393,7 +395,10 @@ mid-hash with four workers running — the obvious place to lose an in-flight
 share. **601 shares found, 601 responses received**, so none was lost across any
 of them." Replaying the log as a running count of found-minus-responded gives, at
 each of the twelve `Donation: mining to` lines, **outstanding = 0**. This is
-pairing-free — it needs no attribution of response to submission. No share was
+pairing-free — it needs no attribution of response to submission. The same
+replay at the **socket** instants, which is the actual risk moment, gives the
+same answer: outstanding = 0 at all 13 `Connecting to pool` lines, all 13
+`Connected to pool` lines and all 13 `Login successful` lines. No share was
 ever in flight across a rotation, so the run never entered the window it claims
 to have cleared, and the 601 = 601 identity is a global count that would hold
 even if the orphaning path were broken. Present in both `AUDIT.md` and the
@@ -459,6 +464,21 @@ and donation cadence. It does not cover:
   cover 5,381 of 28,807 seconds — **18.7% of the timeline holding 96.2% of the
   responses**. That is what actually forecloses the starved-receiver reading.
 
+**R2-F8 (minor) — second new error in the correction: the run did not begin
+mid-cycle.** The 4.17% figure is right; the explanation given for it is not.
+"the run began mid-cycle and ended mid-cycle, so it does not contain a whole
+number of periods" — but the donation cycle is anchored to process start, and the
+donation block sits at roughly minutes 95–100 of each 100-minute window. Mining
+starts 21:13:55; the first `Author` stint is 94m59s later at 22:48:54;
+Author→Author spacing is 100m01s / 100m00s / 100m00s; and 21:13:55 + 400 min =
+**03:53:55**, exactly the fourth `User` resume. So the run began *on* a cycle
+boundary and contained **four complete cycles**, in which exactly 5% was donated.
+The entire shortfall is the undonated 79m58s tail of cycle 5. The second clause
+("eight hours is simply not a multiple of 100 minutes") is the real and
+sufficient reason; the first clause is a wrong causal claim, written into the
+authoritative record inside the paragraph added to correct a number — same class
+as R2-F4.
+
 **R2-N1 (nit) — "Vardiff changes: 307" includes 12 login resets.** Twelve of the
 307 adjacent changes are the drop back to 50,000 at a re-login, plus the climbs
 that follow; they are not vardiff responding to the miner. The row label
@@ -495,15 +515,17 @@ not claimed.
 
 ### Verdict
 
-**NOT MERGEABLE**, on one required change: **R2-F1**, the PR body. It still
-states as fact the timeline the entry withdraws, the distinguisher the entry says
-was never observed, and all five corrected figures. `AUDIT.md` and `CLAUDE.md`
-would be merged saying one thing while the PR that carries them says another, and
-issue #17 points a reader straight at it.
+**NOT MERGEABLE — three majors, all three required.**
 
-R2-F2 and R2-F3 are majors in `AUDIT.md` and `CLAUDE.md` and should land in the
-same pass: one removes a claim the run cannot support, the other adds a clause
-the code's own comment already supplies.
+- **R2-F1** — the PR body still states as fact the timeline the entry withdraws,
+  the distinguisher the entry says was never observed, and all five corrected
+  figures. `AUDIT.md` and `CLAUDE.md` would merge saying one thing while the PR
+  carrying them says another, and issue #17 points a reader straight at it. This
+  one is additionally visible to the public.
+- **R2-F2** — a false claim in `AUDIT.md` *and* the `CLAUDE.md` row. The record
+  this repo trusts later rather than re-derives.
+- **R2-F3** — the replacement wrong-hash reasoning omits the limit `miner.rs`'s
+  own comment already states.
 
-**All nine findings are ACTIONABLE.** No blockers. Three majors, four minors, two
-nits.
+No blockers. **Three majors, five minors, two nits.** R2-F1 through R2-F8 are all
+**ACTIONABLE**; R2-N1 and R2-N2 are optional additions, not misstatements.

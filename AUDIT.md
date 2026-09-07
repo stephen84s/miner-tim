@@ -5136,8 +5136,10 @@ compares the JIT against *itself* or against the interpreter. The 92-test gate
 proves emitted ARM64 agrees with the reference implementation; it cannot prove
 the network agrees. A JIT defect does not crash and does not dent the hashrate —
 it produces plausible, wrong hashes that a pool silently rejects. Six hundred
-accepted shares is the first evidence that what this miner emits is what Monero
-accepts.
+accepted shares is the first evidence that what this miner emits is what a
+**pool** accepts. Not "what Monero accepts": no block was found, so nothing here
+was validated by the network itself. Pool acceptance is a real and independent
+check on the emitted ARM64; it is not the same claim.
 
 | | |
 |---|---|
@@ -5146,39 +5148,77 @@ accepts.
 | Threads | 4 (the operator's `mining.conf` setting, not the 12-core default) |
 | Shares | **600 accepted, 1 rejected (0.17%), 0 withheld** |
 | `ERROR` lines | **0** |
-| Hashrate, 10 min avg | median **2226.8 H/s**, range 2058.0-2345.3, n=2817 |
-| Pool difficulty | 50,000 -> 475,896 over 1,865 vardiff adjustments |
+| Hashrate, 10 min avg | median **2226.9 H/s**, range 2058.0-2345.3, n=2817 |
+| Pool difficulty | started and reset to 50,000; min 50,000, max 475,896, ended 127,284 |
+| Vardiff changes | **307** adjacent changes across 1,865 job pushes |
 | Unplanned disconnects | **0** |
 
-**The one rejection was stale, not wrong, and the distinction is the whole
-point.** `Invalid job id` at 23:24:03: workers found shares against job
-`nRnKGav31g3d17iB` at 23:23:46 and :48, job `WenvUpDyx1EpocNJ` replaced it at
-23:24:02, and one submission landed a second later. The pool was rotating jobs
-every ~20 s while ramping difficulty 132,515 -> 335,439 in three minutes. A
-*wrong* hash returns `Invalid result` or `Low difficulty share`; `Invalid job id`
-means the hash was never evaluated. **Zero rejections for a wrong result in 601
-submissions.**
+**The one rejection: what can and cannot be said.** An earlier version of this
+entry told a specific story — shares found against `nRnKGav31g3d17iB` at 23:23:46
+and :48, job `WenvUpDyx1EpocNJ` replacing it at 23:24:02, one submission landing
+a second late. **Review showed that story is not supported by the log, and it is
+withdrawn.**
+
+Three responses arrived in the same second at 23:24:03, not two, and three
+submissions were outstanding:
+
+| found | job | age of job when found |
+|---|---|---|
+| 23:22:27 | `OdNs0sPTHTyrpfXY` | 2 s |
+| 23:23:46 | `nRnKGav31g3d17iB` | 4 s |
+| 23:23:48 | `nRnKGav31g3d17iB` | 6 s |
+
+**All three were found while their job was current**, so "found against a stale
+job" describes none of them. The earlier account assigned the rejection to a
+`nRnKGav` share by first-in-first-out; but the 23:22:27 submission was 96 s old
+by the time responses arrived and its job had been superseded four times, making
+it the likelier candidate — the *opposite* of the assignment used. And it cannot
+be settled either way: `pool_connection.rs:551,558` log bare
+`Share rejected: {}` and `Share accepted by pool`, with no share id, job id or
+nonce, though the JSON-RPC response carries an `id`. **The log cannot attribute a
+response to a submission.** Filed as a follow-up rather than fixed here.
+
+What survives, on evidence rather than narrative:
+
+- **600 of 601 submissions were accepted.** A wrong hash is not accepted.
+- **Zero verifier withholds** (below) — the native loop and the reference path
+  never disagreed on any submittable hash.
+- The single rejection reads `Invalid job id`, which on its face concerns job
+  validity rather than hash validity.
+
+What this entry previously claimed and should not have: that "a *wrong* hash
+returns `Invalid result` or `Low difficulty share`". The pool software is never
+identified, and **neither string appears anywhere in 601 responses**, so that
+distinguisher is untested on this pool. It is a reasonable expectation of Stratum
+implementations, not an observation from this run.
 
 **Zero verifier withholds is the stronger result.** `ShareVerifier` recomputes
 every submittable hash on the reference path (`set_native_loop(false)`) and
-withholds on disagreement. Six hundred opportunities for the native loop and the
-body JIT to diverge, across a difficulty range widening almost tenfold, and not
-one disagreement. The mechanism has still never fired in anger — which is what
+withholds on disagreement. **601** opportunities for the native loop and the body
+JIT to diverge — one per share *found*, not per share accepted — across
+difficulty from 50,000 to 475,896, and not one disagreement. The verifier was
+**provably armed**: the per-worker startup lines report *effective* state, not
+the requested state, so "0 withheld" is not vacuous. The mechanism has still never fired in anger — which is what
 one wants, and is now evidence rather than an absence of evidence.
 
 **Two findings that came from the user's questions, not from the plan.**
 
 - **Donation accounting verified against a live pool for the first time.** Four
-  Author stints and four XMRig stints, 2.5 minutes each on a ~100-minute cycle,
-  13 logins in total: 5 minutes donated per 100, split 50/50. That is exactly
-  the documented `donate-level 5%`. Previously this was only ever read from
-  `donate.rs`.
-- **Eight donation rotations produced zero rejections.** Each is a full re-login
-  with a fresh session id while four workers keep hashing — the obvious place
-  for an in-flight share to be orphaned. None was. The user asked whether the
-  rejection was near a donation switch; it was not (30 minutes after one, an
-  hour before the next), and checking established a stronger fact than the
-  question assumed.
+  Author stints and four XMRig stints, 2.5 minutes each on a ~100-minute cycle:
+  5 minutes donated per 100, split 50/50, matching the documented
+  `donate-level 5%`. Previously only ever read from `donate.rs`. Note the
+  *realised* rate over this particular run was **4.17%** (20 minutes of 480), not
+  5% — the run began mid-cycle and ended mid-cycle, so it does not contain a
+  whole number of periods. The cadence is right; eight hours is simply not a
+  multiple of 100 minutes.
+- **Twelve re-logins produced zero orphaned shares.** Not eight: the return to
+  the user's wallet is also a full re-login with a fresh session id, so there
+  were 4 + 4 + 4 rotations and 13 logins including the initial one. Each happens
+  mid-hash with four workers running — the obvious place to lose an in-flight
+  share. **601 shares found, 601 responses received**, so none was lost across
+  any of them. The user asked whether the rejection was near a donation switch;
+  it was not (30 minutes after one, 1h04m before the next), and checking
+  established a stronger fact than the question assumed.
 
 **A gap in how this was set up, recorded because it nearly invalidated the run.**
 The miner was launched with no sleep inhibitor. On AC power the host has
@@ -5203,6 +5243,17 @@ discarding the first 60 (the dataset build and average warm-up), difficulty rang
 and rotation count from the `New job` lines, donation cadence from the
 `Donation: mining to` lines.
 
+**A limitation that shapes everything above: responses are not attributable.**
+The pool batches responses onto its ~20 s tick — median submit-to-response 8 s,
+p90 18 s, maximum 96 s — and the client logs no identifier on either outcome
+line. Any statement of the form "*this* share got *that* response" is therefore
+unsupported, which is what sank the rejection timeline. Aggregate counts (601
+found, 600 accepted, 1 rejected) are unaffected, needing no pairing. Cleared as a
+*client* problem: `RECV_POLL_INTERVAL` is 50 ms, job pushes were logged on
+schedule right through the 96 s gap, and 578 of 601 responses land within 1 s of
+a job push — pool-side batching, not a starved receiver. The repo's known
+~15%-stale-reject failure mode is foreclosed for this run.
+
 **Not established by this run.** It exercised **4 threads**, not the 12-core
 default, so nothing here speaks to behaviour at full parallelism. It used one
 pool, plain TCP — the TLS path in `pool_connection.rs` was not exercised at all.
@@ -5210,3 +5261,21 @@ pool, plain TCP — the TLS path in `pool_connection.rs` was not exercised at al
 defaults (on); the `off` paths were not tested. And eight hours says nothing
 about multi-day stability, dataset rotation on a seed change, or recovery from a
 pool-side disconnect — there were none to recover from.
+
+**Review:** one round, `pr-reviewer`, mergeable, no blockers, no majors, nine
+minors — all actionable, all actioned above. As first written this entry
+overstated in five separate ways: it reported job pushes (1,865) as vardiff
+adjustments (307), a 6x error; gave difficulty as 50,000 -> 475,896 when that is
+min-to-max on a series that reset to 50,000 at all 13 logins and ended at
+127,284; counted 8 rotations when there are 12; claimed 600 verifier
+opportunities when there are 601; and said the miner's output is "what Monero
+accepts" when no block was found. Its rejection timeline was **withdrawn
+entirely** as unsupported by the log.
+
+Review also established three things the entry had understated. The verifier was
+provably armed — the per-worker line reports *effective* state, not requested.
+The client's receiver was empirically cleared as the cause of response latency.
+And the committed log is internally consistent: all 2,877 status lines'
+`Shares: a/r (found:f)` triples match the running counts of the lines above them,
+2,877 of 2,877, which a hand-edit would desynchronise. That check is what makes
+the log trustworthy as evidence rather than merely present.

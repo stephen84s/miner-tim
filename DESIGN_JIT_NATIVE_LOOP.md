@@ -96,7 +96,8 @@ JIT: prologue: load r and a from nreg ONCE   (see note on f/e below)
 ```
 
 Ordering hazards that a reader must not "simplify" (each verified against
-`vm.rs`, line refs in the review on MR !1):
+`vm.rs`, line refs in the review on MR !1 — that review is
+`REVIEW_MR1.md`, removed from the tree; `git show 445466b:REVIEW_MR1.md`):
 
 - **`mx` is updated BEFORE the dataset XOR** (`vm.rs:1222-1226` precedes
   `:1234-1236`). Doing it after would derive `mx` from post-XOR registers and

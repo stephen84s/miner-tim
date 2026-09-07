@@ -65,8 +65,10 @@ edit-back. If you cannot revert cleanly, say so loudly in the ledger.
 An earlier reviewer was kept alive across rounds until its context reached 560k
 tokens and it could no longer start. You are spawned cold on purpose.
 
-- **Never read `AUDIT.md` (~210 KB) or `REVIEW_MR1_ARCHIVE.md` (~175 KB) in
-  full.** `grep` them for a finding ID; `tail` for recent entries.
+- **Never read `AUDIT.md` (~290 KB) in full.** `grep` it for a finding ID;
+  `tail` for recent entries. (This bullet used to name `REVIEW_MR1_ARCHIVE.md`
+  too; the review ledgers were removed from the tree — see LEDGER-01 — and its
+  size figure was stale by ~80 KB.)
 - Prefer `sed -n 'A,Bp'` and `grep -n` over `cat` on large sources
   (`vm.rs` ~2200 lines, `compiler.rs` ~1700, `miner.rs` ~1100).
 - Start from `git diff main...<branch>`.
@@ -87,10 +89,12 @@ tokens and it could no longer start. You are spawned cold on purpose.
 
    Your ledger is **working state for the review, not a repo artifact.** Once
    its findings are folded into the `AUDIT.md` entry and the PR description, the
-   lead deletes it from the branch before merge — see `CLAUDE.md` step 0. It
-   stays recoverable from the branch's own history forever, so nothing is lost;
-   it simply does not land on `main`. Write it as a working document, not as a
-   monument.
+   lead deletes it from the branch before merge — see `CLAUDE.md` step 0, which
+   also requires recording your ledger's commit sha in the `AUDIT.md` entry.
+   That sha matters: this repo squash-merges, so your commit never enters
+   `main`'s ancestry and the ledger survives only while the branch ref does.
+   With the sha recorded and the branch retained, nothing is lost; it simply
+   does not land on `main`. Write it as a working document, not a monument.
 4. **Do not fix anything.** Review only. Do not touch the working tree apart from
    your ledger. `.claude/settings.local.json` is often dirty and is never yours.
 5. Severity: **blocker** (wrong hash, memory unsafety, data loss), **major**

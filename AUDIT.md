@@ -5006,10 +5006,19 @@ into the `AUDIT.md` entry and the PR description — where they are already
 reproduced. Recorded in `CLAUDE.md` step 0's reviewer bullet and in all four
 agent files.
 
-**Nothing is lost, and that is checkable rather than asserted.** Every ledger
-remains in the history of the branch that carried it:
-`git show <sha>:REVIEW_PR15.md` works today and will keep working. Removal takes
-them out of the working tree, not out of git.
+**Nothing is lost here, and that is checkable rather than asserted.** All
+thirteen are in `main`'s own ancestry, so they are retrievable from any clone
+via the table below; removal takes them out of the working tree, not out of git.
+
+**But "readable forever" does not generalise to future ledgers, and the rule as
+first written implied it did.** This repo squash-merges: under the new rule a
+ledger commit never enters `main`'s ancestry and survives only while the branch
+ref does. That is safe today only because `delete_branch_on_merge` is `false`
+and no merged branch has been deleted — one "Delete branch" click would leave
+the objects reachable solely from `refs/pull/N/head`, which an ordinary clone
+never fetches. The rule now requires recording the ledger's commit sha in the
+`AUDIT.md` entry, and states the branch-retention precondition instead of
+assuming it.
 
 **Two classes of reference had to survive the removal.**
 
@@ -5025,10 +5034,14 @@ them out of the working tree, not out of git.
   finding no such file should land here.
 
 **Files changed:** thirteen `REVIEW_*.md` deleted (9,193 lines),
-`.claude/agents/_shared-context.md` and the three agent definitions (the rule),
-`CLAUDE.md` (step 0 reviewer bullet, and the Project Structure line that listed
-the ledgers as repo contents), `src/randomx/jit/memory.rs` (one comment),
-`AUDIT.md` (this entry).
+`.claude/agents/_shared-context.md` (the rule, plus the stale bullet in class 2
+above) and the three agent definitions, `CLAUDE.md` (step 0 reviewer bullet, the
+Project Structure line that listed the ledgers as repo contents, and seven
+task-board citations), `DESIGN_JIT_NATIVE_LOOP.md` (one unnamed reference),
+`src/randomx/jit/memory.rs` (one comment), `AUDIT.md` (this entry). Four files
+carry the rule: three agent definitions plus `_shared-context.md`, which is
+shared context rather than an agent — an earlier version of this entry said
+"all four agent files", which miscounts what `_shared-context.md` is.
 
 **Not done here.** `REVIEW_PR16.md` is still in flight on `docs/live-test` and
 will be removed when that PR merges under the new rule. `AUDIT.md` itself
@@ -5036,7 +5049,73 @@ will be removed when that PR merges under the new rule. `AUDIT.md` itself
 problem one level up and remain unaddressed; the task board in particular
 duplicates `AUDIT.md` by design, because Operational Protocol step 4 mandates it.
 
-**Verification.** `git show 445466b:REVIEW_PLAT01.md` returns the file;
-`cargo build --release` and `cargo clippy --all-targets -- -D warnings` clean
-after the comment edit; no remaining reference to a `REVIEW_*.md` file outside
-`AUDIT.md`'s historical citations and this entry.
+**Retrieval table.** Each removed ledger, and a commit on `main` that still
+contains it. `git show <sha>:<file>` returns the full text; every sha below was
+checked with `git cat-file -e`.
+
+| ledger | sha | ledger | sha |
+|---|---|---|---|
+| `REVIEW_ISSUE4.md` | `445466b` | `REVIEW_PR9.md` | `10d5b2e` |
+| `REVIEW_ISSUE7.md` | `445466b` | `REVIEW_PR10.md` | `a0473c0` |
+| `REVIEW_MR1.md` | `445466b` | `REVIEW_PR12.md` | `28588e3` |
+| `REVIEW_MR1_ARCHIVE.md` | `445466b` | `REVIEW_PR13.md` | `7bad445` |
+| `REVIEW_PLAT01.md` | `445466b` | `REVIEW_PR14.md` | `c337229` |
+| `REVIEW_PR7.md` | `c74787c` | `REVIEW_PR15.md` | `ef40bea` |
+| `REVIEW_PR8.md` | `9102bf3` | | |
+
+This table is what "LEDGER-01 is the pointer" actually requires. An earlier
+version of this entry made that claim without it — but `git show <sha>:file`
+needs a sha at which the file existed, and a reader holding only "Ledger:
+`REVIEW_PR13.md`" has none. The claim was unusable as written.
+
+**Verification, and a correction to how it was done.** `cargo build --release`
+and `cargo clippy --all-targets -- -D warnings` clean after the comment edit;
+all thirteen shas above verified retrievable.
+
+An earlier version of this entry claimed "no remaining reference to a
+`REVIEW_*.md` file outside `AUDIT.md`'s historical citations and this entry."
+**That was false, and the method that produced it could not have found the
+truth**: it was a grep for the filename pattern, which structurally cannot find a
+reference that does not name a file. Review found **five** classes, not two:
+
+1. **`CLAUDE.md`'s task board — seven citations.** `CLAUDE.md` is not
+   append-only, so the argument protecting `AUDIT.md` never covered them. All
+   seven now point at the table above.
+2. **`.claude/agents/_shared-context.md` — a file this change edits** — still
+   told reviewers "never read `AUDIT.md` (~210 KB) or `REVIEW_MR1_ARCHIVE.md`
+   (~175 KB) in full", naming a file this same change deletes. Its size figure
+   was also stale by ~80 KB. Fixed.
+3. **`DESIGN_JIT_NATIVE_LOOP.md:99`** cites "the review on MR !1" **without
+   naming the file** — the class a filename grep cannot see. It is the
+   provenance for ordering hazards a reader is warned not to "simplify", so a
+   dangling pointer there is worse than most. Now names `REVIEW_MR1.md` and its
+   retrieval sha.
+4. **`CLAUDE.md:172`** "see the ledger for the count" — same unnamed class.
+5. `AUDIT.md`'s own historical citations, which are left unedited as merged
+   history and resolve through the table above.
+
+The count of those historical citations was also wrong: **24** filename
+occurrences on `origin/main`, not 25.
+
+**Review:** one round, `pr-reviewer`, mergeable, two majors, both actioned above
+— the false "no remaining reference" claim, and the unstated squash-merge
+precondition behind "readable forever". It verified retrievability for **all
+thirteen** ledgers rather than the one this entry had quoted, confirmed the byte
+figures from `origin/main`'s tree via `git cat-file -s`, and confirmed the
+`memory.rs` change is comment-only with no non-comment line touched.
+
+The reviewer was also, by construction, the reflexive test case: this change
+governs its own ledger, which under the new rule is deleted before merge. Asked
+whether the rule is wrong, it judged the split between "commit for crash
+recovery" and "retain on `main`" to be the correct cut, with the squash-merge
+precondition its one substantive objection. That objection is now fixed.
+
+**One finding deliberately not actioned here.** The new rule "describes an
+intention with nothing enforcing it — the recurrence being fixed came from a
+rule followed exactly as written." A CI check failing any PR whose head tree
+contains a `REVIEW_*.md` would make it a gate rather than a hope. That is a
+workflow change, belongs under `ci-reviewer`, and is filed as GitHub #19 rather
+than widening this change. That issue also records the design tension that must
+be settled first: a gate firing on every push would sit red for most of a PR's
+life, because reviewers commit their ledger *during* review by design — and a
+check that is normally red is one people learn to skip.

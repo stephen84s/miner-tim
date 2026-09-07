@@ -110,7 +110,9 @@ mod platform {
 // has ever been measured here and none is claimed — do not read "the JIT works
 // on Linux" as "the JIT is fast on Linux". Making it fast would mean a dual
 // mapping (one RW alias and one RX alias of the same pages) so the hot path
-// stops calling `mprotect` at all. Recorded from REVIEW_PLAT01.md finding F11.
+// stops calling `mprotect` at all. Recorded from the PLAT-01 review, finding
+// F11 — see AUDIT.md's PLAT-01 entry, or `git show 445466b:REVIEW_PLAT01.md`
+// (the review ledgers were removed from the tree; see LEDGER-01).
 #[cfg(target_os = "linux")]
 mod platform {
     use std::ptr;

@@ -79,6 +79,18 @@ tokens and it could no longer start. You are spawned cold on purpose.
    item, so an interruption leaves an accurate picture.
 3. `git add <your ledger> && git commit` periodically. **That file only.** Never
    amend, never push, never merge.
+
+   Why commit at all: the commit is **crash recovery, not archival**. Reviewers
+   in this project have been killed by session limits mid-review, and an
+   uncommitted ledger dies with them. Commit early and often for that reason
+   alone.
+
+   Your ledger is **working state for the review, not a repo artifact.** Once
+   its findings are folded into the `AUDIT.md` entry and the PR description, the
+   lead deletes it from the branch before merge — see `CLAUDE.md` step 0. It
+   stays recoverable from the branch's own history forever, so nothing is lost;
+   it simply does not land on `main`. Write it as a working document, not as a
+   monument.
 4. **Do not fix anything.** Review only. Do not touch the working tree apart from
    your ledger. `.claude/settings.local.json` is often dirty and is never yours.
 5. Severity: **blocker** (wrong hash, memory unsafety, data loss), **major**

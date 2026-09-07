@@ -58,3 +58,6 @@ name what you are handing off.
 
 `REVIEW_<topic>.md` at the repo root — e.g. `REVIEW_PR12.md`. Coverage ledger of
 the seven items, findings as you go, verdict at the end.
+
+Temporary: it is deleted from the branch before merge, once its findings are
+in `AUDIT.md` and the PR description. It stays retrievable from branch history.

@@ -67,3 +67,6 @@ retracted a "+9.01%" figure for exactly that reason.
 
 `REVIEW_<topic>.md` at the repo root — e.g. `REVIEW_PR12.md`. Coverage ledger of
 the seven items above, findings as you go, verdict at the end.
+
+Temporary: it is deleted from the branch before merge, once its findings are
+in `AUDIT.md` and the PR description. It stays retrievable from branch history.

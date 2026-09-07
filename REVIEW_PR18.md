@@ -17,7 +17,7 @@ no `jit-reviewer` handoff. No `benches/`, no speed claim. No
 | # | Item | State |
 |---|---|---|
 | 1 | Is anything lost? (all 13 + `445466b`) | done — nothing lost |
-| 2 | Do all references resolve? | done — **two missed classes (M1)** |
+| 2 | Do all references resolve? | done — **three missed classes (M1)** |
 | 3 | The rule change itself | done — sound, but **M2** + m3 |
 | 4 | `memory.rs` comment-only, build/clippy | done — holds |
 | 5 | LEDGER-01 / `CLAUDE.md` row vs the diff | done — m1, m2 |
@@ -34,7 +34,9 @@ no `jit-reviewer` handoff. No `benches/`, no speed claim. No
   (`git merge-base --is-ancestor` → yes). The file contains three `F11`
   mentions, so the citation resolves to real content.
 - **Every measured figure reproduces exactly**: 13 ledgers = **530,655** bytes
-  and **9,193** lines; `src/` + `benches/` `*.rs` on `main` = **503,986**;
+  and **9,193** lines; `src/` + `benches/` `*.rs` **on `origin/main`'s tree** = **503,986** (summed
+  via `git cat-file -s` over `git ls-tree -r origin/main`, not the working
+  filesystem);
   `AUDIT.md` = **288,719**; `CLAUDE.md` = **43,122**; sum 862,496 ≈ "862 KB";
   `REVIEW_MR1_ARCHIVE.md` = 175,768 (34.9% of source).
 - **`memory.rs` is comment-only.** No changed line outside a `//` comment. It is
@@ -73,9 +75,32 @@ False on the branch's own tree:
    PR deletes. Its `~210 KB` for `AUDIT.md` is also stale: the PR measured
    288,719 B (282 KB) and did not propagate it.
 
-So the reference classes are four, not two. The `CLAUDE.md` Project Structure
-line does give a generic retrieval command, which softens (1) but does not make
-the Verification sentence true. This is the repo's recurring defect — a claim in
+3. **`DESIGN_JIT_NATIVE_LOOP.md`** (tracked on `main`, untouched by this PR)
+   refers to the MR !1 ledgers *without naming them* — line 99, "each verified
+   against `vm.rs`, line refs in **the review on MR !1**", and line 254, "**The
+   review** stated this as exactly zero margin; it conflated ...". Both point at
+   `REVIEW_MR1.md` / `REVIEW_MR1_ARCHIVE.md`, both deleted here. Line 99 is
+   load-bearing: it is the provenance for ordering hazards a reader is warned
+   not to "simplify".
+4. **`CLAUDE.md:172`** (PERF-02) says "Reviewed over several cold rounds (**see
+   the ledger for the count**)" — after the merge there is no ledger to see.
+   Recoverable only because the same row names `REVIEW_PR15.md` further on.
+
+Classes 3 and 4 matter for *why* this recurs: the enumeration was produced by a
+filename grep, which structurally cannot find a reference that does not name its
+target. A semantic sweep (`grep -niE '\bledger\b|the review'`) finds them.
+
+**Related**: LEDGER-01 calls itself "the pointer that makes them resolvable",
+but the recipe it offers — `git show <sha>:REVIEW_X.md` — needs a sha at which
+the file still existed, and a reader holding only "Ledger: `REVIEW_PR13.md`" has
+no sha. `memory.rs` gives a concrete one (`445466b`); the 24 `AUDIT.md`
+citations and the 7 `CLAUDE.md` ones do not. One generic line in LEDGER-01
+(e.g. `git log --all --diff-filter=D -- REVIEW_PR13.md` to find the sha, then
+`git show <sha>^:REVIEW_PR13.md`) would make the claim true.
+
+So the reference classes are five, not two. The `CLAUDE.md` Project Structure
+line does give a generic retrieval command, which softens (1) and (4) but does
+not make the Verification sentence true, and does not reach (3) at all. This is the repo's recurring defect — a claim in
 the authoritative record that the diff does not support — and once merged the
 correction can only be appended. LEDGER-01 is on an unmerged branch, so it may
 still be edited in place.

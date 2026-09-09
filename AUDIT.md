@@ -5342,4 +5342,6 @@ appearing inside the fix for it.
 
 Round 2 also verified, rather than inheriting from round 1, that the verifier was
 armed, the receiver cleared, and the log internally consistent 2,877 of 2,877
-recomputed from a running tally. Ledger: `REVIEW_PR16.md`.
+recomputed from a running tally. Round 3 verified the resolution of all round 2
+majors and minors. Under LEDGER-01, `REVIEW_PR16.md` is removed before merge; its
+retrieval sha on this branch is `48351c2` (`git show 48351c2:REVIEW_PR16.md`).

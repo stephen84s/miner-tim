@@ -5097,12 +5097,16 @@ reference that does not name a file. Review found **five** classes, not two:
 The count of those historical citations was also wrong: **24** filename
 occurrences on `origin/main`, not 25.
 
-**Review:** one round, `pr-reviewer`, mergeable, two majors, both actioned above
-— the false "no remaining reference" claim, and the unstated squash-merge
-precondition behind "readable forever". It verified retrievability for **all
-thirteen** ledgers rather than the one this entry had quoted, confirmed the byte
-figures from `origin/main`'s tree via `git cat-file -s`, and confirmed the
-`memory.rs` change is comment-only with no non-comment line touched.
+**Review:** two rounds, `pr-reviewer`, both mergeable. Round 1 returned
+mergeable with two majors, both actioned above — the false "no remaining
+reference" claim, and the unstated squash-merge precondition behind "readable
+forever". It verified retrievability for **all thirteen** ledgers rather than the
+one this entry had quoted, confirmed the byte figures from `origin/main`'s tree
+via `git cat-file -s`, and confirmed the `memory.rs` change is comment-only with
+no non-comment line touched. Round 2 verified the resolution of both majors
+across all five reference classes and the branch retention rule. Under
+LEDGER-01, `REVIEW_PR18.md` is removed before merge; its retrieval sha on this
+branch is `e53239a` (`git show e53239a:REVIEW_PR18.md`).
 
 The reviewer was also, by construction, the reflexive test case: this change
 governs its own ledger, which under the new rule is deleted before merge. Asked

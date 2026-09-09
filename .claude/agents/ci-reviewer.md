@@ -63,3 +63,6 @@ from a run that was competing for CPU.
 
 `REVIEW_<topic>.md` at the repo root. Coverage ledger of the eight items,
 findings as you go, verdict at the end.
+
+Temporary: it is deleted from the branch before merge, once its findings are
+in `AUDIT.md` and the PR description. It stays retrievable from branch history.

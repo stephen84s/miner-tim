@@ -14,6 +14,10 @@ DONATE_LEVEL ?=
 NATIVE_LOOP ?=
 # VERIFY_SHARES unset by default: the binary uses its built-in default (on).
 VERIFY_SHARES ?=
+# TLS_FINGERPRINT unset by default: certificates are fully verified. Set it only
+# for a pool whose certificate cannot pass standard validation; see RELEASING-
+# adjacent notes in mining.conf.example for how to read one.
+TLS_FINGERPRINT ?=
 
 VERSION   := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 DIST_NAME := minertim-$(VERSION)-macos-arm64
@@ -44,7 +48,7 @@ run: build
 ifndef WALLET
 	$(error WALLET is required. Usage: make run POOL=host:port WALLET=your_address THREADS=N)
 endif
-	./target/release/minertim $(POOL) $(WALLET) $(THREADS) $(if $(DONATE_LEVEL),--donate-level $(DONATE_LEVEL),) $(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),) $(if $(VERIFY_SHARES),--verify-shares $(VERIFY_SHARES),)
+	./target/release/minertim $(POOL) $(WALLET) $(THREADS) $(if $(DONATE_LEVEL),--donate-level $(DONATE_LEVEL),) $(if $(NATIVE_LOOP),--native-loop $(NATIVE_LOOP),) $(if $(VERIFY_SHARES),--verify-shares $(VERIFY_SHARES),) $(if $(TLS_FINGERPRINT),--tls-fingerprint $(TLS_FINGERPRINT),)
 
 bench:
 	cargo bench

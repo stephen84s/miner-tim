@@ -9,7 +9,8 @@ use crate::donate::{Beneficiary, DonationSchedule};
 use crate::hex::{hex_decode, hex_encode};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::ClientConfig;
+use rustls::client::WebPkiServerVerifier;
+use rustls::{ClientConfig, RootCertStore};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -23,46 +24,107 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// Delay between reconnection attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
-/// Certificate verifier that accepts all certificates.
-/// Mining pool data (wallet address, shares) is public, and many pools
-/// run expired or self-signed certs on their Stratum ports.
-#[derive(Debug)]
-struct NoVerifier;
+/// SHA-256 of a server certificate, as `tls-fingerprint` pins it.
+pub type CertFingerprint = [u8; 32];
 
-impl ServerCertVerifier for NoVerifier {
+/// Parse a 64-character hex SHA-256 fingerprint, as printed by
+/// `openssl x509 -noout -fingerprint -sha256`. Case-insensitive, and colons are
+/// accepted because that is how openssl prints it.
+pub fn parse_cert_fingerprint(text: &str) -> Option<CertFingerprint> {
+    let cleaned: String = text.chars().filter(|c| *c != ':').collect();
+    if cleaned.len() != 64 {
+        return None;
+    }
+    let bytes = hex_decode(&cleaned)?;
+    bytes.try_into().ok()
+}
+
+/// The Mozilla root store, from the `webpki-roots` crate already in `Cargo.toml`.
+///
+/// This was a dependency for the project's whole life and was never referenced:
+/// `NoVerifier` bypassed it. Nothing new is vendored to verify properly.
+fn webpki_verifier() -> Result<Arc<WebPkiServerVerifier>, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| format!("could not build the TLS certificate verifier: {e}"))
+}
+
+/// Accepts exactly one certificate, identified by its SHA-256 fingerprint.
+///
+/// This exists because the Monero pool landscape mostly cannot satisfy WebPKI.
+/// Surveyed 2026-09-13: `pool.supportxmr.com:443` and
+/// `gulf.moneroocean.stream:20128` both present *self-signed* certificates whose
+/// subject is the stock `C=IT, O=Mining Pool, L=Daemon` shipped with pool daemon
+/// software, named `CN=mining.pool` / `CN=mining.proxy` — so they fail on both
+/// trust chain and hostname, and are valid for a century so they never rotate.
+/// `monerohash.com:9999` is the opposite case: a genuine Let's Encrypt
+/// certificate for the right host that had simply expired.
+///
+/// Pinning is the only mechanism that *authenticates* the first group rather
+/// than waving it through. The operator records the certificate they expect; a
+/// substituted one then fails, which is precisely what a blanket bypass cannot
+/// detect.
+///
+/// **Signature verification is delegated, not skipped.** The verifier this
+/// replaced also stubbed `verify_tls12_signature` and `verify_tls13_signature`
+/// to `assertion()`, which is worse than accepting the certificate: it means the
+/// handshake signature went unchecked, so there was no proof the peer even held
+/// the private key. Those two methods defer to the real WebPKI verifier here, so
+/// pinning narrows *which* certificate is acceptable without weakening the
+/// handshake itself.
+#[derive(Debug)]
+struct PinnedCertVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    expected: CertFingerprint,
+}
+
+impl ServerCertVerifier for PinnedCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
         _intermediates: &[rustls::pki_types::CertificateDer<'_>],
         _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
+        let actual = ring::digest::digest(&ring::digest::SHA256, end_entity.as_ref());
+        if actual.as_ref() == self.expected {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "pool certificate does not match the pinned fingerprint.\n                   expected: {}\n                   presented: {}\n                   The pool may have renewed its certificate — re-read it with \
+                 `openssl s_client -connect <host>:<port> -servername <host> </dev/null \
+                 | openssl x509 -noout -fingerprint -sha256` and update \
+                 --tls-fingerprint. If you did not expect a change, treat this as a \
+                 possible interception and do not simply overwrite the pin.",
+                hex_encode(&self.expected),
+                hex_encode(actual.as_ref()),
+            )))
+        }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        self.inner.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        self.inner.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.inner.supported_verify_schemes()
     }
 }
 
@@ -163,10 +225,41 @@ impl Default for PoolConnection {
 
 impl PoolConnection {
     pub fn new(donate_level: u8) -> Self {
-        let tls_config = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth();
+        Self::with_tls_fingerprint(donate_level, None)
+    }
+
+    /// `fingerprint` pins the pool's certificate by SHA-256. `None` — the
+    /// default — uses standard WebPKI validation: trust chain, hostname and
+    /// expiry, all checked.
+    ///
+    /// A verifier that cannot be built is a hard failure rather than a silent
+    /// downgrade. Falling back to "accept anything" on an error is how a
+    /// security control quietly stops existing, and this one was absent for the
+    /// project's whole life without anything reporting it.
+    pub fn with_tls_fingerprint(donate_level: u8, fingerprint: Option<CertFingerprint>) -> Self {
+        let verifier = webpki_verifier()
+            .unwrap_or_else(|e| panic!("{e}; refusing to fall back to unverified TLS"));
+
+        let tls_config = match fingerprint {
+            Some(expected) => {
+                log::warn!(
+                    "TLS: pinned to certificate {}. The trust chain, hostname and expiry \
+                     are NOT checked for this pool — only that the certificate is exactly \
+                     the one pinned. Re-pin if the pool renews.",
+                    hex_encode(&expected)
+                );
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier {
+                        inner: verifier,
+                        expected,
+                    }))
+                    .with_no_client_auth()
+            }
+            None => ClientConfig::builder()
+                .with_webpki_verifier(verifier)
+                .with_no_client_auth(),
+        };
 
         Self {
             stream: Mutex::new(None),
@@ -715,4 +808,113 @@ pub fn target_to_difficulty(target: &[u8]) -> u64 {
         return 0xFFFFFFFF_u64 / t as u64;
     }
     0
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    /// The real monerohash.com:9999 fingerprint, read 2026-09-13. Used as a
+    /// realistic shape rather than as a live expectation — the pool rotates via
+    /// Let's Encrypt, so the value will change and that is fine: nothing here
+    /// contacts the network.
+    const SAMPLE: &str = "3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420";
+
+    #[test]
+    fn parses_a_plain_hex_fingerprint() {
+        let fp = parse_cert_fingerprint(SAMPLE).expect("should parse");
+        assert_eq!(hex_encode(&fp), SAMPLE);
+    }
+
+    #[test]
+    fn accepts_the_colon_separated_form_openssl_prints() {
+        // `openssl x509 -fingerprint` emits AA:BB:CC..., and operators paste it
+        // verbatim. Rejecting that would send them to a text editor for no
+        // reason.
+        let colons = SAMPLE
+            .as_bytes()
+            .chunks(2)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(parse_cert_fingerprint(&colons), parse_cert_fingerprint(SAMPLE));
+    }
+
+    #[test]
+    fn is_case_insensitive() {
+        assert_eq!(
+            parse_cert_fingerprint(&SAMPLE.to_uppercase()),
+            parse_cert_fingerprint(SAMPLE)
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_and_non_hex() {
+        // Truncation is the realistic paste error, and a short pin that silently
+        // "worked" would pin nothing.
+        assert!(parse_cert_fingerprint(&SAMPLE[..62]).is_none());
+        assert!(parse_cert_fingerprint(&format!("{SAMPLE}ab")).is_none());
+        assert!(parse_cert_fingerprint("").is_none());
+        let mut bad = SAMPLE.to_string();
+        bad.replace_range(0..1, "z");
+        assert!(parse_cert_fingerprint(&bad).is_none());
+    }
+
+    #[test]
+    fn the_default_configuration_verifies_certificates() {
+        // The regression this guards: for the project's whole life the default
+        // was `NoVerifier`, which accepted every certificate. Building the
+        // verifier proves the webpki root store is present and usable, so a
+        // default connection has something to check against.
+        let verifier = webpki_verifier().expect("webpki verifier must build");
+        assert!(
+            !verifier.supported_verify_schemes().is_empty(),
+            "a verifier with no signature schemes would accept nothing and is not a working default"
+        );
+    }
+
+    #[test]
+    fn a_pinned_verifier_rejects_a_certificate_that_is_not_the_pinned_one() {
+        let verifier = PinnedCertVerifier {
+            inner: webpki_verifier().unwrap(),
+            expected: parse_cert_fingerprint(SAMPLE).unwrap(),
+        };
+        // Any DER that is not the pinned certificate must fail. The point of the
+        // pin is that a *substituted* certificate is detected, which is exactly
+        // what a blanket bypass cannot do.
+        let other = rustls::pki_types::CertificateDer::from(vec![0u8; 64]);
+        let name = rustls::pki_types::ServerName::try_from("monerohash.com").unwrap();
+        let result = verifier.verify_server_cert(
+            &other,
+            &[],
+            &name,
+            &[],
+            rustls::pki_types::UnixTime::now(),
+        );
+        assert!(result.is_err(), "a non-matching certificate must be rejected");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("pinned fingerprint"),
+            "the error should say why it failed, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_verifier_accepts_exactly_the_pinned_certificate() {
+        // Pin whatever this DER hashes to, then present that same DER.
+        let der = rustls::pki_types::CertificateDer::from(vec![7u8; 128]);
+        let digest = ring::digest::digest(&ring::digest::SHA256, der.as_ref());
+        let expected: CertFingerprint = digest.as_ref().try_into().unwrap();
+        let verifier = PinnedCertVerifier {
+            inner: webpki_verifier().unwrap(),
+            expected,
+        };
+        let name = rustls::pki_types::ServerName::try_from("mining.pool").unwrap();
+        assert!(
+            verifier
+                .verify_server_cert(&der, &[], &name, &[], rustls::pki_types::UnixTime::now())
+                .is_ok(),
+            "the pinned certificate itself must be accepted, self-signed or not"
+        );
+    }
 }

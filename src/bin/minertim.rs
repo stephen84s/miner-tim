@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use minertim::donate;
+use minertim::pool_connection::{parse_cert_fingerprint, CertFingerprint};
 use minertim::miner::Miner;
 
 fn main() {
@@ -17,10 +18,12 @@ fn main() {
         eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
         eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]", args[0]);
+        eprintln!("       {:width$}  [--verify-shares on|off] [--tls-fingerprint <sha256-hex>]", "", width = args[0].len());
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} pool.supportxmr.com:443 4...address 4", args[0]);
         eprintln!("  {} pool.hashvault.pro:443 4...address --donate-level 1", args[0]);
+        eprintln!("  {} pool.supportxmr.com:443 4...address --tls-fingerprint a1b2...  # self-signed pool", args[0]);
         eprintln!();
         eprintln!("Arguments:");
         eprintln!("  pool:port    Mining pool address with port (TLS auto-detected)");
@@ -33,6 +36,27 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
+        eprintln!("  --tls-fingerprint <sha256-hex>");
+        eprintln!("                    Pin the pool's TLS certificate by its SHA-256 fingerprint,");
+        eprintln!("                    64 hex characters (colons optional). Also settable via");
+        eprintln!("                    MINERTIM_TLS_FINGERPRINT.");
+        eprintln!();
+        eprintln!("                    By DEFAULT, certificates are fully verified: trust chain,");
+        eprintln!("                    hostname and expiry. Use a pin only for pools that cannot");
+        eprintln!("                    satisfy that — several Monero pools ship a self-signed");
+        eprintln!("                    certificate named CN=mining.pool or CN=mining.proxy, which");
+        eprintln!("                    fails on both trust and hostname. A pin still authenticates:");
+        eprintln!("                    it accepts that one certificate and rejects a substitute.");
+        eprintln!();
+        eprintln!("                    Read a pool's fingerprint with:");
+        eprintln!("                      openssl s_client -connect <host>:<port> -servername <host> \\");
+        eprintln!("                        </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256");
+        eprintln!();
+        eprintln!("                    Two caveats. You are trusting whatever you saw the first");
+        eprintln!("                    time, so read it from a network you trust. And a pin breaks");
+        eprintln!("                    when the pool renews — expected for Let's Encrypt pools,");
+        eprintln!("                    which rotate every ~90 days; self-signed pool certs");
+        eprintln!("                    typically never do.");
         eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
         eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
         eprintln!("                    if shares start being rejected, turn it off and restart to");
@@ -59,6 +83,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
+    let tls_fingerprint = match parse_tls_fingerprint(&args) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     let native_loop = parse_native_loop(&args);
     let verify_shares = parse_verify_shares(&args);
 
@@ -121,7 +152,7 @@ fn main() {
     );
 
     log::info!("Connecting to {}...", pool);
-    if let Err(e) = miner.initialize(pool, wallet, threads, donate_level) {
+    if let Err(e) = miner.initialize(pool, wallet, threads, donate_level, tls_fingerprint) {
         eprintln!("Failed to initialize: {}", e);
         std::process::exit(1);
     }
@@ -240,6 +271,43 @@ fn parse_donate_level(args: &[String]) -> u8 {
         i += 1;
     }
     donate::clamp_level(level)
+}
+
+/// Parse `--tls-fingerprint <hex>`, falling back to `MINERTIM_TLS_FINGERPRINT`.
+///
+/// Returns `Err` on a malformed value rather than ignoring it. A pin is a
+/// security control the operator deliberately asked for: silently dropping an
+/// unparseable one would connect *without* the protection they believe they
+/// configured, which is the worst of both outcomes. An absent value is fine and
+/// means standard verification.
+fn parse_tls_fingerprint(args: &[String]) -> Result<Option<CertFingerprint>, String> {
+    let mut raw: Option<String> = std::env::var("MINERTIM_TLS_FINGERPRINT").ok();
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix("--tls-fingerprint=") {
+            raw = Some(v.to_string());
+        } else if args[i] == "--tls-fingerprint" {
+            raw = args.get(i + 1).cloned();
+            i += 1;
+        }
+        i += 1;
+    }
+    match raw {
+        None => Ok(None),
+        // An empty value is treated as absent, matching how the on/off switches
+        // handle `--flag "$UNSET_VAR"`, so an unset shell variable cannot turn
+        // into a hard startup failure.
+        Some(v) if v.trim().is_empty() => Ok(None),
+        Some(v) => parse_cert_fingerprint(v.trim()).map(Some).ok_or_else(|| {
+            format!(
+                "--tls-fingerprint: expected 64 hex characters (SHA-256), got {:?}.\n\
+                 Read a pool's fingerprint with:\n  \
+                 openssl s_client -connect <host>:<port> -servername <host> </dev/null \\\n    \
+                 | openssl x509 -noout -fingerprint -sha256",
+                v.trim()
+            )
+        }),
+    }
 }
 
 /// Resolve an `--flag on|off` switch with an environment-variable fallback.

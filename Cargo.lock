@@ -382,6 +382,7 @@ dependencies = [
  "ctrlc",
  "env_logger",
  "log",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

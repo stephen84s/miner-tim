@@ -32,3 +32,36 @@ NATIVE_LOOP=
 # Costs about 0.005% of mining time: only the rare hashes good enough to submit
 # are re-checked, not the hundreds per second that are discarded. Leave it on.
 VERIFY_SHARES=
+# TLS_FINGERPRINT: pin the pool's TLS certificate by its SHA-256 fingerprint,
+# 64 hex characters. Colons are fine — paste openssl's output as-is.
+#
+# Leave this UNSET unless you need it. By default MinerTim fully verifies the
+# pool's certificate: trust chain, hostname and expiry. That is what you want,
+# and it needs no configuration.
+#
+# You need a pin when a pool's certificate cannot pass that check. Several
+# Monero pools ship the stock self-signed certificate that comes with the pool
+# daemon software — it is named CN=mining.pool or CN=mining.proxy, so it fails
+# on both trust and hostname no matter how long it is valid for. Surveyed
+# 2026-09-13, pool.supportxmr.com:443 and gulf.moneroocean.stream:20128 are both
+# in this category.
+#
+# A pin is not a bypass. It says "accept exactly this certificate", so if someone
+# substitutes their own, the connection fails — which is precisely what accepting
+# everything cannot detect.
+#
+# Read a pool's fingerprint:
+#
+#   openssl s_client -connect <host>:<port> -servername <host> </dev/null 2>/dev/null \
+#     | openssl x509 -noout -fingerprint -sha256
+#
+# Two things to know before you rely on it:
+#
+#   * You are trusting whatever certificate you saw the first time. If you read
+#     it over a connection someone is already intercepting, you have pinned the
+#     attacker. Read it from a network you trust, ideally more than one.
+#   * A pin breaks when the pool renews its certificate, and mining stops until
+#     you update this line. Pools using Let's Encrypt rotate roughly every 90
+#     days; the self-signed pool certificates above are typically issued for a
+#     century and never change.
+TLS_FINGERPRINT=

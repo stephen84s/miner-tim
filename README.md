@@ -35,6 +35,7 @@ THREADS=                 # blank = one fewer than your core count (recommended)
 DONATE_LEVEL=5
 NATIVE_LOOP=             # blank = on
 VERIFY_SHARES=           # blank = on
+TLS_FINGERPRINT=         # blank = verify the pool's certificate normally
 ```
 
 You can override any of them on the command line:
@@ -48,6 +49,61 @@ Or run the built binary directly:
 ```bash
 ./target/release/minertim pool.supportxmr.com:443 <wallet> 12
 ```
+
+### Connecting securely to a pool
+
+If the pool's port uses TLS, MinerTim checks its certificate the way a browser
+does — that it was issued by a recognised authority, that it belongs to the host
+you typed, and that it has not expired. You do not have to configure anything for
+this. If the check fails, the connection fails, because a certificate that cannot
+be verified means you have no way of knowing whether you are talking to the pool
+or to someone sitting in the middle of the connection.
+
+Some pools cannot pass that check. A number of Monero pools have never replaced
+the certificate that came with their pool software: it is self-signed, and it is
+named `mining.pool` or `mining.proxy` rather than the pool's actual address. As
+of September 2026, `pool.supportxmr.com` and `gulf.moneroocean.stream` are both
+like this. Their certificates are issued for about a century, so they are not
+going to change.
+
+For those, you pin the certificate instead. You record the exact certificate you
+expect once, and from then on MinerTim accepts that one and nothing else:
+
+```ini
+POOL=pool.supportxmr.com:443
+TLS_FINGERPRINT=3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420
+```
+
+That long string is a fingerprint — a short ID calculated from the certificate
+itself. Change anything about the certificate and the fingerprint changes
+completely, so it works as a unique name for one specific certificate.
+
+Read a pool's fingerprint with this, and paste what it prints:
+
+```bash
+openssl s_client -connect pool.supportxmr.com:443 -servername pool.supportxmr.com \
+  </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+```
+
+This is genuinely safer than turning checking off, which is what miners usually
+do here. Pinning still catches an impostor: whoever they are, their certificate
+is a different one, so it will not match and the connection stops.
+
+Two things worth knowing:
+
+**You are trusting the first look.** Pinning assumes the certificate you read was
+really the pool's. If you read it over a connection someone was already
+interfering with, you have just pinned *their* certificate. Read it from a
+network you trust, and if you can, check it gives the same answer from somewhere
+else.
+
+**A pin breaks when the pool changes its certificate.** Mining stops until you
+update the line, which is the system working — but it means you should expect it.
+Pools using free automated certificates renew every three months or so. The
+self-signed pool certificates described above effectively never change.
+
+If a pool has a proper certificate, do not pin it. Leave `TLS_FINGERPRINT` blank
+and let the normal check do its job; that way a renewal is invisible to you.
 
 ### The two switches
 

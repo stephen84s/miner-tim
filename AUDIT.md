@@ -5345,3 +5345,104 @@ armed, the receiver cleared, and the log internally consistent 2,877 of 2,877
 recomputed from a running tally. Round 3 verified the resolution of all round 2
 majors and minors. Under LEDGER-01, `REVIEW_PR16.md` is removed before merge; its
 retrieval sha on this branch is `48351c2` (`git show 48351c2:REVIEW_PR16.md`).
+
+### SEC-02 (2026-09-13): TLS pool connections authenticated by default (GitHub #20)
+
+`PoolConnection::new` built its rustls config with
+`.dangerous().with_custom_certificate_verifier(Arc::new(NoVerifier))`, accepting
+every certificate. TLS encrypted the traffic and authenticated nothing, so an
+active network attacker could impersonate a pool and redirect the work.
+
+**Three findings from investigating first, each of which changed the fix.**
+
+**1. XMRig does not verify certificates either — at all.** The whole decision in
+`src/base/net/stratum/Tls.cpp` is
+`return fingerprint == nullptr || strncasecmp(m_fingerprint, fingerprint, 64) == 0;`
+— no `SSL_set_verify`, no `SSL_get_verify_result`, no chain, hostname or expiry
+check. With no fingerprint configured every certificate is accepted. So
+`NoVerifier` was a faithful translation of upstream, not a MinerTim defect. Worth
+stating because it removes "parity with XMRig" as an argument for keeping it.
+
+**2. The issue's premise — pools use expired certificates — is one case in
+five.** Surveyed the advertised TLS ports on 2026-09-13:
+
+| pool | certificate | why standard validation fails |
+|---|---|---|
+| `pool.supportxmr.com:443` | self-signed, CN=mining.pool, valid to 2126 | trust chain **and** hostname |
+| `gulf.moneroocean.stream:20128` | self-signed, CN=mining.proxy, valid to 2117 | trust chain **and** hostname |
+| `xmr.2miners.com:12222` | no TLS on that port | — |
+| `pool.hashvault.pro:443` | no TLS on that port | — |
+| `monerohash.com:9999` | real Let's Encrypt, correct CN, expired 2026-08-10 | expiry only |
+
+The dominant pattern is **self-signed certificates with placeholder hostnames**.
+Both carry the identical subject `C=IT, ST=Pool, L=Daemon, O=Mining Pool` — the
+stock certificate shipped with pool daemon software, never replaced — and are
+valid for a century, so expiry is deliberately a non-issue for them.
+
+This **ruled out the obvious narrow fix**. An "allow expired but otherwise valid"
+exception rescues monerohash and nothing else: the two self-signed pools fail on
+trust *and* hostname regardless of dates. It would have weakened the default for
+every pool to buy one in five.
+
+**3. `webpki-roots` was already a dependency and had never been used.**
+`Cargo.toml:20` pulled it in; `grep -rn webpki_roots src/` returned nothing. The
+machinery for proper validation was already vendored and paid for, and simply
+bypassed.
+
+**What changed.** Default is now `WebPkiServerVerifier` over that root store —
+chain, hostname and expiry all checked, no configuration required. The opt-in is
+SHA-256 certificate pinning via `--tls-fingerprint` / `MINERTIM_TLS_FINGERPRINT` /
+`TLS_FINGERPRINT`, matching XMRig's `tls-fingerprint` so a pinned value is
+portable between the two miners.
+
+**Pinning was chosen over an "insecure mode" toggle because it authenticates.**
+A pin says "accept exactly this certificate", so a substituted certificate fails
+— which is precisely what a blanket bypass cannot detect. It is the only
+mechanism that gives the self-signed pools a real guarantee rather than a waiver.
+
+**A second defect found while reading `NoVerifier`, not mentioned in the issue.**
+It also stubbed `verify_tls12_signature` and `verify_tls13_signature` to
+`assertion()`. That is worse than accepting the certificate: the handshake
+signature went unchecked too, so there was no proof the peer even held the
+private key for the certificate it presented. `PinnedCertVerifier` **delegates
+both to the real WebPKI verifier**, so pinning narrows which certificate is
+acceptable without weakening the handshake.
+
+**Failure modes chosen deliberately.**
+
+- A verifier that cannot be built **panics** rather than falling back. A silent
+  downgrade to "accept anything" on an error is how a security control stops
+  existing without anyone noticing — which is the state this entry is fixing.
+- A malformed `--tls-fingerprint` **exits 2 with the openssl command to read a
+  correct one**, rather than being ignored. Dropping an unparseable pin would
+  connect *without* the protection the operator believes they configured.
+- An empty value is treated as absent, matching how the on/off switches handle
+  `--flag "$UNSET_VAR"`, so an unset shell variable cannot become a hard failure.
+- Pinning logs at `warn!` that chain, hostname and expiry are not checked for
+  that pool, so the narrowing is visible in the log rather than implicit.
+
+**Files changed:** `src/pool_connection.rs` (verifier replaced, constructor,
+`parse_cert_fingerprint`, tests), `src/miner.rs` (`initialize` threads the
+fingerprint), `src/bin/minertim.rs` (`parse_tls_fingerprint`, help text),
+`Cargo.toml` (`ring` named directly — already in the tree via rustls's ring
+provider, so no new code enters the dependency graph), `Makefile`
+(`TLS_FINGERPRINT` passthrough), `mining.conf.example`, `README.md` (a
+"Connecting securely to a pool" section written for operators), `AUDIT.md`.
+
+**Verification.** 138 lib + 10 bin tests pass, `cargo clippy --all-targets
+--release -- -D warnings` clean. Seven new tests cover fingerprint parsing
+(plain, colon-separated as openssl prints it, case-insensitive, and rejection of
+truncated/over-long/non-hex values), that the default configuration builds a
+verifier with a non-empty set of signature schemes, and both pinning outcomes —
+a non-matching certificate rejected with an explanatory error, and the pinned
+certificate itself accepted.
+
+**Not verified, and it matters.** **No connection to a real pool was made with
+this build.** The tests exercise the verifier's decision logic with synthetic
+DER, not a TLS handshake, so what is proven is the policy rather than its
+behaviour on the wire. The live run recorded in LIVE-01 used
+`monerohash.com:2222` over **plain TCP**, so the TLS path in this codebase has
+never been exercised against a pool at all — before or after this change. That
+gap predates this work and is not closed by it. A live check against a pinned
+self-signed pool and against a normally-verifying pool is the remaining
+verification.

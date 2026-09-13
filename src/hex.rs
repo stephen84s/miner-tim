@@ -11,7 +11,12 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 }
 
 pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    // Reject non-ASCII before slicing. `hex[i..i + 2]` panics rather than
+    // returning None when the boundary falls inside a multi-byte character, so
+    // a value like "aaa…€" reached the caller as a process abort instead of a
+    // parse failure. Found reviewing --tls-fingerprint, where the operator
+    // pastes arbitrary text.
+    if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
         return None;
     }
 

@@ -51,13 +51,30 @@ fn webpki_verifier() -> Result<Arc<WebPkiServerVerifier>, String> {
         .map_err(|e| format!("could not build the TLS certificate verifier: {e}"))
 }
 
+/// Choose the certificate verifier: pinned if the operator configured one,
+/// otherwise standard WebPKI validation.
+///
+/// Factored out so a test can hold the *default* verifier and assert it actually
+/// rejects something. Review found that swapping the default arm for an
+/// accept-anything verifier left the whole suite green — the seven tests written
+/// for this change all exercised the pinning path, so the security property that
+/// matters most had no coverage at all.
+fn server_verifier(fingerprint: Option<CertFingerprint>) -> Arc<dyn ServerCertVerifier> {
+    let inner = webpki_verifier()
+        .unwrap_or_else(|e| panic!("{e}; refusing to fall back to unverified TLS"));
+    match fingerprint {
+        Some(expected) => Arc::new(PinnedCertVerifier { inner, expected }),
+        None => inner,
+    }
+}
+
 /// Accepts exactly one certificate, identified by its SHA-256 fingerprint.
 ///
 /// This exists because the Monero pool landscape mostly cannot satisfy WebPKI.
 /// Surveyed 2026-09-13: `pool.supportxmr.com:443` and
 /// `gulf.moneroocean.stream:20128` both present *self-signed* certificates whose
-/// subject is the stock `C=IT, O=Mining Pool, L=Daemon` shipped with pool daemon
-/// software, named `CN=mining.pool` / `CN=mining.proxy` — so they fail on both
+/// subject is the stock `C=IT, ST=Pool, L=Daemon, O=Mining Pool` shipped with pool
+/// daemon software, named `CN=mining.pool` / `CN=mining.proxy` — so they fail on both
 /// trust chain and hostname, and are valid for a century so they never rotate.
 /// `monerohash.com:9999` is the opposite case: a genuine Let's Encrypt
 /// certificate for the right host that had simply expired.
@@ -212,6 +229,10 @@ pub struct PoolConnection {
     user_wallet: Mutex<String>,
     donation: DonationSchedule,
     tls_config: Arc<ClientConfig>,
+    /// Set when the operator pinned a certificate. Kept so `connect` can detect
+    /// the case where a pin was configured but the port is not treated as TLS —
+    /// otherwise the pin is silently inert while the startup log says otherwise.
+    pinned_fingerprint: Option<CertFingerprint>,
     session_id: Mutex<String>,
     accepted_shares: AtomicU32,
     rejected_shares: AtomicU32,
@@ -237,27 +258,24 @@ impl PoolConnection {
     /// security control quietly stops existing, and this one was absent for the
     /// project's whole life without anything reporting it.
     pub fn with_tls_fingerprint(donate_level: u8, fingerprint: Option<CertFingerprint>) -> Self {
-        let verifier = webpki_verifier()
-            .unwrap_or_else(|e| panic!("{e}; refusing to fall back to unverified TLS"));
-
         let tls_config = match fingerprint {
             Some(expected) => {
                 log::warn!(
-                    "TLS: pinned to certificate {}. The trust chain, hostname and expiry \
-                     are NOT checked for this pool — only that the certificate is exactly \
-                     the one pinned. Re-pin if the pool renews.",
+                    "TLS: certificate pinned to {}. For a TLS connection this replaces the \
+                     usual checks — trust chain, hostname and expiry are NOT verified; only \
+                     that the certificate is exactly the pinned one. Re-pin if the pool \
+                     renews. Whether TLS is used at all depends on the port, and is \
+                     reported when the connection is made.",
                     hex_encode(&expected)
                 );
                 ClientConfig::builder()
                     .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier {
-                        inner: verifier,
-                        expected,
-                    }))
+                    .with_custom_certificate_verifier(server_verifier(Some(expected)))
                     .with_no_client_auth()
             }
             None => ClientConfig::builder()
-                .with_webpki_verifier(verifier)
+                .dangerous()
+                .with_custom_certificate_verifier(server_verifier(None))
                 .with_no_client_auth(),
         };
 
@@ -271,6 +289,7 @@ impl PoolConnection {
             user_wallet: Mutex::new(String::new()),
             donation: DonationSchedule::new(donate_level),
             tls_config: Arc::new(tls_config),
+            pinned_fingerprint: fingerprint,
             session_id: Mutex::new(String::new()),
             accepted_shares: AtomicU32::new(0),
             rejected_shares: AtomicU32::new(0),
@@ -292,6 +311,25 @@ impl PoolConnection {
         tcp_stream
             .set_nodelay(true)
             .map_err(|e| format!("Set nodelay failed: {}", e))?;
+
+        // A pin is a security decision, and TLS here is inferred from the port
+        // rather than asked for. Connecting in plaintext while the log reports a
+        // pin would leave the operator believing the pool is authenticated when
+        // nothing is: worse than not offering pinning at all. Observed on
+        // `gulf.moneroocean.stream:20128`, which really does speak TLS but is
+        // not in TLS_PORTS — so the pin was accepted, announced, and ignored.
+        if self.pinned_fingerprint.is_some() && !is_tls_port(address) {
+            return Err(format!(
+                "a TLS certificate is pinned, but port {} is not treated as a TLS port, so \
+                 the connection would be plaintext and the pin would do nothing. Refusing \
+                 rather than connecting unauthenticated.\n  \
+                 If this pool speaks TLS on that port, it needs adding to TLS_PORTS \
+                 ({:?}).\n  \
+                 If it does not, remove the pin — there is no certificate to pin.",
+                address.rsplit_once(':').map(|(_, p)| p).unwrap_or("?"),
+                TLS_PORTS,
+            ));
+        }
 
         let pool_stream = if is_tls_port(address) {
             let host = address
@@ -852,12 +890,70 @@ mod tls_tests {
     fn rejects_wrong_length_and_non_hex() {
         // Truncation is the realistic paste error, and a short pin that silently
         // "worked" would pin nothing.
-        assert!(parse_cert_fingerprint(&SAMPLE[..62]).is_none());
-        assert!(parse_cert_fingerprint(&format!("{SAMPLE}ab")).is_none());
-        assert!(parse_cert_fingerprint("").is_none());
+        // Exercise the length guard across the boundary. Review found the old
+        // version still passed with `!= 64` loosened to `< 2`, because
+        // `try_into()` was doing the real work — so the test named a guard it
+        // was not actually testing.
+        for n in [0usize, 1, 2, 30, 62, 63, 65, 66, 128] {
+            let candidate: String = SAMPLE.chars().cycle().take(n).collect();
+            assert!(
+                parse_cert_fingerprint(&candidate).is_none(),
+                "{n} hex characters must be rejected; only 64 is a SHA-256"
+            );
+        }
+        assert!(parse_cert_fingerprint(SAMPLE).is_some(), "64 must still be accepted");
+        // Non-ASCII must parse-fail, not panic: hex_decode used to slice on a
+        // byte index that could land inside a multi-byte character.
+        assert!(parse_cert_fingerprint(&format!("{}€", &SAMPLE[..61])).is_none());
         let mut bad = SAMPLE.to_string();
         bad.replace_range(0..1, "z");
         assert!(parse_cert_fingerprint(&bad).is_none());
+    }
+
+    /// The regression review caught: replacing the default arm with an
+    /// accept-anything verifier left all 148 tests green, because every test
+    /// written for this change exercised the *pinning* path. The property that
+    /// matters most — that an unpinned connection rejects a certificate it
+    /// cannot validate — had no coverage.
+    ///
+    /// This asserts a rejection, so it fails if the default is ever loosened.
+    /// It uses input WebPKI cannot accept rather than a well-formed self-signed
+    /// certificate, because generating one would mean vendoring a certificate
+    /// builder; the stronger check — a real `CN=mining.pool` self-signed cert
+    /// rejected inside a live handshake against `openssl s_server` — was run by
+    /// review and is recorded in SEC-02.
+    #[test]
+    fn the_default_verifier_rejects_what_it_cannot_validate() {
+        let verifier = server_verifier(None);
+        let der = rustls::pki_types::CertificateDer::from(vec![0u8; 64]);
+        let name = rustls::pki_types::ServerName::try_from("pool.supportxmr.com").unwrap();
+        assert!(
+            verifier
+                .verify_server_cert(&der, &[], &name, &[], rustls::pki_types::UnixTime::now())
+                .is_err(),
+            "the default verifier accepted a certificate it cannot validate — TLS would be \
+             encrypted but unauthenticated, which is the defect SEC-02 exists to fix"
+        );
+    }
+
+    #[test]
+    fn a_pin_and_a_plaintext_port_is_refused_rather_than_silently_ignored() {
+        // gulf.moneroocean.stream:20128 speaks TLS but is not in TLS_PORTS, so
+        // the pin was accepted, announced in the log, and then ignored while the
+        // connection went out in plaintext. Refusing is the only honest
+        // outcome: the alternative tells the operator they are authenticated
+        // when nothing is.
+        let conn = PoolConnection::with_tls_fingerprint(
+            crate::donate::DEFAULT_DONATE_LEVEL,
+            parse_cert_fingerprint(SAMPLE),
+        );
+        let err = conn
+            .connect("gulf.moneroocean.stream:20128")
+            .expect_err("a pinned connection to a non-TLS port must not succeed");
+        assert!(
+            err.contains("pinned") && err.contains("plaintext"),
+            "the error must explain why, got: {err}"
+        );
     }
 
     #[test]

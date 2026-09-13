@@ -281,33 +281,86 @@ fn parse_donate_level(args: &[String]) -> u8 {
 /// configured, which is the worst of both outcomes. An absent value is fine and
 /// means standard verification.
 fn parse_tls_fingerprint(args: &[String]) -> Result<Option<CertFingerprint>, String> {
-    let mut raw: Option<String> = std::env::var("MINERTIM_TLS_FINGERPRINT").ok();
-    let mut i = 0;
-    while i < args.len() {
-        if let Some(v) = args[i].strip_prefix("--tls-fingerprint=") {
-            raw = Some(v.to_string());
-        } else if args[i] == "--tls-fingerprint" {
-            raw = args.get(i + 1).cloned();
-            i += 1;
+    parse_tls_fingerprint_with(args, std::env::var("MINERTIM_TLS_FINGERPRINT").ok().as_deref())
+}
+
+/// The testable half, so the environment variable can be supplied directly.
+///
+/// Precedence and empty-value handling deliberately mirror `parse_switch_with`:
+/// a later source wins, but an *empty* or absent value declines to have an
+/// opinion rather than erasing one already resolved. Without the `.or(resolved)`
+/// below, `MINERTIM_TLS_FINGERPRINT=<pin> minertim … --tls-fingerprint ""` would
+/// silently drop the pin and connect with ordinary verification — the operator
+/// believing they were pinned. That is R10-F2, the same defect this file already
+/// documents for `--native-loop`, and review found it had been reintroduced here.
+/// Both empty forms warn, because silently ignoring part of a security setting is
+/// exactly what must not happen quietly.
+fn parse_tls_fingerprint_with(
+    args: &[String],
+    env_value: Option<&str>,
+) -> Result<Option<CertFingerprint>, String> {
+    let parse = |v: &str| -> Result<Option<CertFingerprint>, String> {
+        if v.trim().is_empty() {
+            return Ok(None);
         }
-        i += 1;
-    }
-    match raw {
-        None => Ok(None),
-        // An empty value is treated as absent, matching how the on/off switches
-        // handle `--flag "$UNSET_VAR"`, so an unset shell variable cannot turn
-        // into a hard startup failure.
-        Some(v) if v.trim().is_empty() => Ok(None),
-        Some(v) => parse_cert_fingerprint(v.trim()).map(Some).ok_or_else(|| {
+        parse_cert_fingerprint(v.trim()).map(Some).ok_or_else(|| {
             format!(
                 "--tls-fingerprint: expected 64 hex characters (SHA-256), got {:?}.\n\
                  Read a pool's fingerprint with:\n  \
                  openssl s_client -connect <host>:<port> -servername <host> </dev/null \\\n    \
-                 | openssl x509 -noout -fingerprint -sha256",
+                 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n\
+                 Paste only the hex after the '=' — colons are fine, the label is not.",
                 v.trim()
             )
-        }),
+        })
+    };
+
+    let mut resolved: Option<CertFingerprint> = match env_value {
+        Some(v) if v.trim().is_empty() => {
+            eprintln!(
+                "WARNING: MINERTIM_TLS_FINGERPRINT is set but empty; ignoring it. \
+                 The pool's certificate will be verified normally."
+            );
+            None
+        }
+        Some(v) => parse(v)?,
+        None => None,
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        let value: Option<&str> = if let Some(v) = args[i].strip_prefix("--tls-fingerprint=") {
+            Some(v)
+        } else if args[i] == "--tls-fingerprint" {
+            i += 1;
+            match args.get(i) {
+                Some(v) => Some(v.as_str()),
+                None => {
+                    eprintln!(
+                        "WARNING: --tls-fingerprint given with no value; ignoring it. \
+                         Any MINERTIM_TLS_FINGERPRINT setting still applies."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(v) = value {
+            if v.trim().is_empty() {
+                eprintln!(
+                    "WARNING: --tls-fingerprint given an empty value; ignoring it. \
+                     Any MINERTIM_TLS_FINGERPRINT setting still applies."
+                );
+            }
+            // `.or(resolved)` is the load-bearing part: an empty value must not
+            // erase a pin resolved from the environment.
+            resolved = parse(v)?.or(resolved);
+        }
+        i += 1;
     }
+    Ok(resolved)
 }
 
 /// Resolve an `--flag on|off` switch with an environment-variable fallback.

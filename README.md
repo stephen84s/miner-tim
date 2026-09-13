@@ -29,7 +29,8 @@ run.
 `mining.conf` holds the settings:
 
 ```ini
-POOL=pool.supportxmr.com:443
+POOL=pool.supportxmr.com:443   # this pool needs TLS_FINGERPRINT set; see
+                               # "Connecting securely to a pool" below
 WALLET=4...your_monero_address
 THREADS=                 # blank = one fewer than your core count (recommended)
 DONATE_LEVEL=5
@@ -71,7 +72,7 @@ expect once, and from then on MinerTim accepts that one and nothing else:
 
 ```ini
 POOL=pool.supportxmr.com:443
-TLS_FINGERPRINT=3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420
+TLS_FINGERPRINT=<the 64 hex characters the command below prints for that pool>
 ```
 
 That long string is a fingerprint — a short ID calculated from the certificate
@@ -84,6 +85,14 @@ Read a pool's fingerprint with this, and paste what it prints:
 openssl s_client -connect pool.supportxmr.com:443 -servername pool.supportxmr.com \
   </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
 ```
+
+It prints a line like `SHA256 Fingerprint=3D:58:7C:...`. Copy **only the hex
+after the `=`** — the colons can stay, but the `SHA256 Fingerprint=` label is not
+part of the value.
+
+Read it for the pool you actually use. A fingerprint names **one specific
+certificate**, so a value copied from documentation belongs to a different pool
+and will fail — which is pinning working, but it wastes your time.
 
 This is genuinely safer than turning checking off, which is what miners usually
 do here. Pinning still catches an impostor: whoever they are, their certificate

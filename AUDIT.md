@@ -5437,8 +5437,62 @@ verifier with a non-empty set of signature schemes, and both pinning outcomes �
 a non-matching certificate rejected with an explanatory error, and the pinned
 certificate itself accepted.
 
-**Not verified, and it matters.** **No connection to a real pool was made with
-this build.** The tests exercise the verifier's decision logic with synthetic
+**Round 1 review returned NOT MERGEABLE with five majors, all actioned.** It also
+did the thing this entry had listed as unverified: exercised the TLS path inside
+**real handshakes** against a local `openssl s_server` holding a self-signed
+`CN=mining.pool` certificate — default rejected it (`CaUsedAsEndEntity`), the
+correct pin completed the handshake, a wrong pin was rejected with the
+explanatory error. That is the strongest evidence this change has.
+
+- **A pin could be silently inert while the log announced it.** TLS is inferred
+  from the port, and `gulf.moneroocean.stream:20128` — named in this repo's own
+  example config — is *not* in `TLS_PORTS` despite genuinely speaking TLS
+  (confirmed live by review). The observed sequence was
+  `WARN TLS: pinned to certificate X` followed two lines later by
+  `Connected to pool (plain TCP)`. The operator is told they are authenticated
+  while nothing is, which is worse than not offering pinning. `connect` now
+  **refuses** that combination and names both remedies.
+- **An environment pin could be silently erased.** `--tls-fingerprint ""`, and a
+  bare `--tls-fingerprint` at the end of argv, both discarded
+  `MINERTIM_TLS_FINGERPRINT` with no warning. This is **R10-F2 recurring in the
+  file that documents it** — `parse_switch_with` solved exactly this with
+  `.or(value)` plus a warning. Worse, this entry, the PR body and the code
+  comment all claimed the behaviour "matches how the on/off switches handle
+  `--flag "$UNSET_VAR"`", which review disproved side by side against the built
+  binary. Now genuinely mirrored, both empty forms warn, and the false claim is
+  withdrawn.
+- **`README.md` printed monerohash's fingerprint under `POOL=pool.supportxmr.com`.**
+  Review proved it by reading monerohash's certificate live and matching the
+  value byte for byte. An operator copying it would have hit the "treat this as a
+  possible interception" error on first run. The literal is removed rather than
+  corrected: a fingerprint must be read from the pool in hand, never copied from
+  documentation.
+- **The shipped quick-start pointed at a pool this change breaks.**
+  `POOL=pool.supportxmr.com:443` is self-signed per the survey, so the default
+  now rejects it — and neither this entry nor the task board said so. Both
+  `README.md` and `mining.conf.example` now flag it at the point of use.
+  (Review could not re-reach that host to confirm, and stated the finding as a
+  disjunction: either the quick-start is broken, or the survey is wrong and this
+  entry's justification with it. The first is true.)
+- **The default verifier had no test coverage at all.** Review replaced the
+  `None` arm with an accept-anything verifier and the whole suite stayed green —
+  all seven new tests exercised the *pinning* path. The verifier choice is now
+  factored into `server_verifier()` so a test can hold the default and assert it
+  rejects. **Break-tested twice**: the first mutation attempted here pinned
+  all-zeros, which rejects everything and therefore proved nothing — the test
+  passed and nearly closed the finding falsely. A true accept-anything mutation
+  fails it.
+
+Minors also fixed: `hex_decode` **panicked** on a non-ASCII fingerprint
+(`hex[i..i+2]` sliced inside a multi-byte character, exit 101 where this entry
+promised exit 2); the length test still passed with `!= 64` loosened to `< 2`,
+because `try_into()` was doing the real work, so it now sweeps the boundary; the
+`openssl` guidance said "paste what it prints" when the `SHA256 Fingerprint=`
+label survives colon-stripping; a `Makefile` comment referenced notes that do not
+exist; and the self-signed subject was transcribed wrong in a source comment.
+
+**Still not verified, and it matters.** **No connection to a real pool was made
+with this build.** The tests exercise the verifier's decision logic with synthetic
 DER, not a TLS handshake, so what is proven is the policy rather than its
 behaviour on the wire. The live run recorded in LIVE-01 used
 `monerohash.com:2222` over **plain TCP**, so the TLS path in this codebase has

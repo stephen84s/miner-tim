@@ -134,6 +134,25 @@ INFO  minertim::pool_connection] Connected to pool (plain TCP): 127.0.0.1:20128
 Two lines apart: "pinned to certificate X" and "plain TCP". Nothing correlates
 them, and the wallet address and shares then go over an unencrypted socket.
 
+**And 20128 really is a TLS port.** Read live on 2026-09-13:
+
+```
+$ openssl s_client -connect gulf.moneroocean.stream:20128 -servername gulf.moneroocean.stream </dev/null 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -enddate -fingerprint -sha256
+subject=C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.proxy
+issuer=C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.proxy
+notAfter=Aug 10 14:37:37 2117 GMT
+sha256 Fingerprint=23:9D:AA:DD:5C:7D:0A:C0:97:37:6C:78:71:F7:87:73:88:26:EE:F1:C0:24:72:9E:FF:87:0E:47:3B:97:08:55
+```
+
+That is the survey's row reproduced exactly — self-signed, `CN=mining.proxy`, the
+stock `C=IT, ST=Pool, L=Daemon, O=Mining Pool` subject, valid to 2117. So this is
+not a hypothetical: an operator who follows `mining.conf.example` verbatim points
+MinerTim at a **live TLS endpoint**, MinerTim speaks **plain TCP** to it because
+20128 is not in `TLS_PORTS`, the pin they configured is never consulted, and the
+log says it is. The connection then fails on protocol confusion rather than on
+anything that names the real cause.
+
 `TLS_PORTS` itself is pre-existing and out of scope. **The composition is new.**
 This PR is the first thing that lets an operator ask for certificate pinning and
 the first thing that documents `:20128` as a place to ask for it. A safety
@@ -161,11 +180,27 @@ TLS_FINGERPRINT=3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420
 
 > "The real **monerohash.com:9999** fingerprint, read 2026-09-13."
 
-The two documents contradict each other. I cannot determine which is wrong — I
-made no network connection (see *Not verified*) — and for the finding it does not
-matter: the README presents a concrete, copy-pasteable, real-looking 64-hex value
-as `pool.supportxmr.com`'s, in the one section whose entire subject is that the
-value must be exactly right.
+**Settled by measurement — the README is the wrong one.** Read live on
+2026-09-13 from this host:
+
+```
+$ openssl s_client -connect monerohash.com:9999 -servername monerohash.com </dev/null 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -enddate -fingerprint -sha256
+subject=CN=monerohash.com
+issuer=C=US, O=Let's Encrypt, CN=E8
+notAfter=Aug 10 23:14:06 2026 GMT
+sha256 Fingerprint=3D:58:7C:82:4A:6F:60:32:E1:76:75:18:F0:F1:DB:29:CD:F2:06:BA:29:BD:7C:B1:64:7F:52:2F:8A:E3:D4:20
+```
+
+Lower-cased and stripped of colons that is
+`3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420` — **byte for
+byte the value the README prints under `POOL=pool.supportxmr.com:443`**. The test
+comment is correct; the README attributes monerohash's certificate to supportxmr.
+This is no longer a contradiction to be resolved, it is a documented wrong value.
+
+(The same read confirms two of the survey's own rows exactly: monerohash is a
+genuine Let's Encrypt certificate for the right host, expiring `Aug 10 2026` —
+so expired as of today, 2026-09-13.)
 
 What an operator who copies it sees (**observed**, wrong pin against a live
 self-signed TLS server):
@@ -201,10 +236,28 @@ direct-binary example. Port 443 is in `TLS_PORTS`, so that connection is TLS.
 This PR's own survey — issue #20, the PR body, `AUDIT.md` SEC-02 and
 `pool_connection.rs:57-63` — states that `pool.supportxmr.com:443` presents a
 **self-signed** certificate named **`CN=mining.pool`**. Under the new default
-that fails WebPKI on trust chain *and* hostname. **The configuration this
-repository ships as its quick-start cannot connect after this commit.**
+that fails WebPKI on trust chain *and* hostname.
 
-The decision is defensible. The silence about it is not:
+**I tried to confirm this and could not: `pool.supportxmr.com:443` would not
+accept a TCP connection from this host today** (`nc -z -w 5` returns 1;
+`openssl s_client` gives `BIO_connect: Operation timed out`, `errno=60`), while
+`github.com:443`, `monerohash.com:9999` and `gulf.moneroocean.stream:20128` all
+connected from the same shell in the same minute. So the supportxmr row is the one
+row of the survey I cannot verify, and I am not going to assume it.
+
+State it as the disjunction, which is airtight either way and which the PR must
+resolve:
+
+> **Either** the survey is right, and the configuration this repository ships as
+> its quick-start cannot connect after this commit — an undisclosed breaking
+> change; **or** the survey is wrong about supportxmr, and the PR's central
+> justification for adding pinning at all is built on a bad reading.
+
+Both are findings. The two rows I *could* read (monerohash, moneroocean)
+reproduced the survey exactly, which makes the first branch much the likelier —
+but "likelier" is not the standard this repo applies to a claim in `AUDIT.md`.
+
+On the first branch, the decision is defensible and the silence about it is not:
 
 - `README.md:20` still says `make run` with that `POOL` is "the whole setup" —
   three paragraphs above the section explaining why it now is not.
@@ -216,9 +269,10 @@ The decision is defensible. The silence about it is not:
   record, the omission *is* the defect.
 - `CLAUDE.md`'s SEC-02 row inherits the same omission.
 
-**ACTIONABLE.** Whatever the code does, the shipped example config and the
-quick-start must be internally consistent with it, and `AUDIT.md` must record the
-behaviour change.
+**ACTIONABLE.** Re-read `pool.supportxmr.com:443` from a host that can reach it
+and settle the branch. Then: whatever the code does, the shipped example config
+and the quick-start must be internally consistent with it, and if the default
+pool stops connecting, `AUDIT.md` must record the behaviour change.
 
 ## M-5 — no test exercises the default path this PR exists to create (break-tested)
 
@@ -248,6 +302,20 @@ and `git diff --stat` both empty afterwards, verified.
 
 This is the repo's documented failure shape — an assertion positioned where it
 cannot fail on the thing it names.
+
+**The seven new tests were also mutation-checked individually.** Two of the three
+mutations were caught, one was not:
+
+| mutation | tests that failed |
+|---|---|
+| `actual.as_ref() == self.expected` → `!=` in `verify_server_cert` | **both** `a_pinned_verifier_rejects_…` and `a_pinned_verifier_accepts_…` failed. The pinning pair is genuine. |
+| `None` arm of `with_tls_fingerprint` → accept-anything verifier | **nothing failed** (M-5). |
+| `cleaned.len() != 64` → `cleaned.len() < 2` | **nothing failed** (m-7). |
+
+**Test-count arithmetic checks out and rules out silent coverage loss:** `main`
+carries 131 lib + 10 bin (recorded in PLAT-01 and MEM-01); 131 + 7 new = **138
+lib + 10 bin**, which is what I observed. No pre-existing test was removed or
+renamed to keep the count flat.
 
 **ACTIONABLE.** A test that constructs `PoolConnection::with_tls_fingerprint(0, None)`
 and asserts something about the resulting config's verifier would close it. If
@@ -375,6 +443,25 @@ reads well. **Withdrawn.** The only residue is that `rustls` prefixes it with
 "unexpected error:", which reads oddly for a deliberate policy rejection —
 `rustls::Error::InvalidCertificate(CertificateError::Other(...))` would render
 better. Nit, not actionable.
+
+## m-7 — `rejects_wrong_length_and_non_hex` survives removal of the length check it names
+
+Break-tested. Loosened the gate in `parse_cert_fingerprint` from
+`if cleaned.len() != 64` to `if cleaned.len() < 2`, effectively deleting it.
+Result: **all 7 new tests still pass**, `rejects_wrong_length_and_non_hex`
+included.
+
+The reason is that the real length guard is `bytes.try_into().ok()` into
+`[u8; 32]`, one line below. Every case the test feeds it — `SAMPLE[..62]` (31
+bytes), `SAMPLE + "ab"` (33 bytes), `""` (0 bytes) — is caught there instead. So
+the explicit length check is untested, and the test's name claims coverage it
+does not have.
+
+**Not a production defect** — `try_into` is a correct guard and the two together
+are defence in depth, which I would keep. It is a test-quality finding of the
+shape this repo has been bitten by: an assertion that cannot fail on the thing it
+names. It also shows the seven new tests were not mutation-checked before
+submission (in contrast to the pinning pair, which are sound — see below).
 
 ## m-6 — `Makefile` comment points at a document that says nothing about this (→ `ci-reviewer`)
 
@@ -524,11 +611,20 @@ Environment: macOS 25.6.0, aarch64. `openssl` = OpenSSL 3.6.1 (Homebrew);
 
 # Not verified — say it rather than imply it
 
-- **No connection to any real pool.** I did not contact `pool.supportxmr.com`,
-  `gulf.moneroocean.stream` or `monerohash.com`. I therefore **cannot confirm or
-  refute the five-pool survey**, and cannot say which side of M-3's contradiction
-  is correct. The PR is honest that it did not do this either; my local
-  `s_server` test narrows the gap but does not close it.
+- **`pool.supportxmr.com:443` — could not reach it.** TCP connect times out from
+  this host (`errno=60`) while three other hosts connected in the same minute. So
+  the one survey row that matters most for M-4 is unverified, and M-4 is stated as
+  a disjunction rather than as a fact. I did **not** simply take the PR's word
+  and I did not pretend to have checked.
+- **The two rows I could read reproduced the survey exactly** (monerohash:9999 and
+  gulf.moneroocean.stream:20128 — subject, issuer, expiry and fingerprint all as
+  described), which is why I did not reopen the survey as a whole. The
+  `xmr.2miners.com:12222` and `pool.hashvault.pro:443` "no TLS on that port" rows
+  I did not test.
+- **No Stratum exchange with a real pool.** Nothing here logged in, mined or
+  submitted a share over TLS. My local `openssl s_server` exercise proves the
+  verifier's behaviour inside a real handshake; it does not prove the miner works
+  end to end against a pool over TLS. That gap predates this PR and the PR says so.
 - **XMRig's `Tls.cpp`.** I did not fetch upstream source. The quoted line is taken
   on the PR's word; it is at least internally consistent across all four
   documents.

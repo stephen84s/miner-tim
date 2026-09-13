@@ -5,10 +5,15 @@ Branch `security/tls-verify` @ `82e99ea`, base `origin/main` @ `6f5afdc`.
 Reviewer: cold `pr-reviewer`, worktree `.claude/worktrees/tls-verify`.
 
 **Verdict: NOT MERGEABLE.** No blocker by this repo's definition (no wrong hash,
-no memory unsafety, no data loss). Five majors, four of which are **ACTIONABLE**
-before merge. The core cryptographic change is correct and I verified it against
-a live TLS handshake; what is wrong is the wiring around it, the test coverage of
-it, and three documents that describe it inaccurately.
+no memory unsafety, no data loss). **Five majors, all five ACTIONABLE** before
+merge, plus seven minors of which two are actionable.
+
+The core cryptographic change is **correct** — I verified the default and both
+pinning outcomes inside real TLS handshakes, which the PR states had never been
+done. What is wrong is the wiring around it, the test coverage of it, and three
+documents that describe it inaccurately. One of those inaccuracies is now proved
+by measurement rather than argued: the README pins **monerohash's** certificate
+under **supportxmr's** address (M-3).
 
 ## Scope check / handoff
 
@@ -34,9 +39,9 @@ Diff: `src/pool_connection.rs`, `src/bin/minertim.rs`, `src/miner.rs`,
 | 3 | Fingerprint parsing | done | Sound for all realistic input; one panic path (m-2), one usability defect (m-3). |
 | 4 | The CLI path | done | **M-1** — silently erases an env pin; does not match the house convention it claims to. |
 | 5 | The panic in the constructor | done | **Defensible.** Unreachable; evidence recorded. Not a finding. |
-| 6 | Accuracy of claims (PR / AUDIT / CLAUDE / README) | done | **M-3, M-5**; survey numbers internally consistent. |
+| 6 | Accuracy of claims (PR / AUDIT / CLAUDE / README) | done | **M-3 proved by live cert read**; two survey rows reproduced exactly, one unreachable (M-4); numbers internally consistent. |
 | 7 | Operator documentation | done | Strong prose; **M-3** value is wrong, **M-4** regression undisclosed. |
-| — | Break-testing | done | M-6 break-tested (mutation reverted, tree clean). M-1, M-2, m-2, m-3 reproduced against the built binary. |
+| — | Break-testing | done | Three mutations applied and reverted: two survived (**M-5**, **m-7**), one was caught. M-1, M-2, m-2, m-3 reproduced against the built binary. Tree clean afterwards. |
 | — | `cargo test --release`, clippy | done | 138 + 10 pass; clippy clean. Both claims confirmed. |
 | — | Concurrency (standing item) | done | Nothing new. `tls_config: Arc<ClientConfig>` is shared read-only across the receiver and submit paths. No change to job handoff or nonce interleaving. |
 | — | Resource use (standing item) | done | No new allocation. `ring` was already in the graph via rustls; `Cargo.lock` gains one line (direct-dep edge), no new crate. |
@@ -599,10 +604,16 @@ quality and carries M-2.
   beyond `Finished`. Matches the PR's claim.
 - `cargo build --release` — clean.
 - Live TLS exercise against a local `openssl s_server` (three configurations,
-  table above).
+  table under *Item 1*).
+- **Live certificate reads** of `monerohash.com:9999` and
+  `gulf.moneroocean.stream:20128` (2026-09-13) — both reproduce the PR's survey
+  rows exactly, and the monerohash read is what proves M-3.
+  `pool.supportxmr.com:443` was unreachable; see *Not verified*.
 - Binary-level reproduction of M-1, M-2, m-2 and m-3.
-- Break-test of M-5 (mutation applied, 138+10 still green, reverted from a
-  pre-taken copy; tree confirmed clean).
+- Three break-test mutations (table under M-5), each applied, observed and
+  restored from a pre-taken copy. `git status --porcelain` and `git diff --stat`
+  both empty afterwards; `git diff HEAD -- src/` empty. Nothing mutated was ever
+  committed.
 - JIT gate **not** run: no `src/randomx/` change in this diff, so `make verify-jit`
   is not implicated. CI's `jit-macos` / `jit-linux-arm` run it regardless.
 

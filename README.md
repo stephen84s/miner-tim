@@ -29,8 +29,7 @@ run.
 `mining.conf` holds the settings:
 
 ```ini
-POOL=pool.supportxmr.com:443   # this pool needs TLS_FINGERPRINT set; see
-                               # "Connecting securely to a pool" below
+POOL=pool.supportxmr.com:443
 WALLET=4...your_monero_address
 THREADS=                 # blank = one fewer than your core count (recommended)
 DONATE_LEVEL=5
@@ -38,6 +37,11 @@ NATIVE_LOOP=             # blank = on
 VERIFY_SHARES=           # blank = on
 TLS_FINGERPRINT=         # blank = verify the pool's certificate normally
 ```
+
+A note on that first line: `pool.supportxmr.com` presents a self-signed
+certificate, so it needs `TLS_FINGERPRINT` set — see
+[Connecting securely to a pool](#connecting-securely-to-a-pool). A pool with an
+ordinary certificate needs nothing extra.
 
 You can override any of them on the command line:
 
@@ -79,14 +83,14 @@ That long string is a fingerprint — a short ID calculated from the certificate
 itself. Change anything about the certificate and the fingerprint changes
 completely, so it works as a unique name for one specific certificate.
 
-Read a pool's fingerprint with this, and paste what it prints:
+Read a pool's fingerprint with this:
 
 ```bash
 openssl s_client -connect pool.supportxmr.com:443 -servername pool.supportxmr.com \
   </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
 ```
 
-It prints a line like `SHA256 Fingerprint=3D:58:7C:...`. Copy **only the hex
+It prints a line like `SHA256 Fingerprint=A1:B2:C3:...`. Copy **only the hex
 after the `=`** — the colons can stay, but the `SHA256 Fingerprint=` label is not
 part of the value.
 

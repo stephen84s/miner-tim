@@ -5426,11 +5426,16 @@ acceptable without weakening the handshake.
 fingerprint), `src/bin/minertim.rs` (`parse_tls_fingerprint`, help text),
 `Cargo.toml` (`ring` named directly — already in the tree via rustls's ring
 provider, so no new code enters the dependency graph), `Makefile`
-(`TLS_FINGERPRINT` passthrough), `mining.conf.example`, `README.md` (a
-"Connecting securely to a pool" section written for operators), `AUDIT.md`.
+(`TLS_FINGERPRINT` passthrough), `src/hex.rs` (reject non-ASCII before slicing),
+`tests/fixtures/` (a self-signed certificate and key for the handshake tests),
+`mining.conf.example`, `README.md` (a "Connecting securely to a pool" section
+written for operators), `AUDIT.md`.
 
-**Verification.** 138 lib + 10 bin tests pass, `cargo clippy --all-targets
---release -- -D warnings` clean. Seven new tests cover fingerprint parsing
+**Verification.** `cargo clippy --all-targets --release -- -D warnings` clean.
+Test counts and coverage are described under the review rounds below, which
+superseded them twice; the figures that were here (138 lib + 10 bin, "seven new
+tests") are left out rather than restated, because they went stale inside this
+entry twice. Original coverage: fingerprint parsing
 (plain, colon-separated as openssl prints it, case-insensitive, and rejection of
 truncated/over-long/non-hex values), that the default configuration builds a
 verifier with a non-empty set of signature schemes, and both pinning outcomes —
@@ -5471,9 +5476,16 @@ explanatory error. That is the strongest evidence this change has.
   `POOL=pool.supportxmr.com:443` is self-signed per the survey, so the default
   now rejects it — and neither this entry nor the task board said so. Both
   `README.md` and `mining.conf.example` now flag it at the point of use.
-  (Review could not re-reach that host to confirm, and stated the finding as a
-  disjunction: either the quick-start is broken, or the survey is wrong and this
-  entry's justification with it. The first is true.)
+  Review could not re-reach that host and stated the finding as a disjunction:
+  either the quick-start is broken, or the survey is wrong and this entry's
+  justification with it. An earlier version of this paragraph resolved that to
+  "the first is true" **with no new measurement**, which is the kind of
+  unsupported promotion three rounds of review have now caught elsewhere in this
+  file. What is actually established: the survey read a self-signed
+  `CN=mining.pool` certificate from that host on 2026-09-13, and round 2 could
+  complete TCP but not a TLS handshake to it. Both are consistent with the
+  quick-start being broken; neither proves it. The documentation flags it either
+  way, which is correct under both branches.
 - **The default verifier had no test coverage at all.** Review replaced the
   `None` arm with an accept-anything verifier and the whole suite stayed green —
   all seven new tests exercised the *pinning* path. The verifier choice is now
@@ -5500,3 +5512,62 @@ never been exercised against a pool at all — before or after this change. That
 gap predates this work and is not closed by it. A live check against a pinned
 self-signed pool and against a normally-verifying pool is the remaining
 verification.
+
+**Round 2 also returned NOT MERGEABLE, four majors, all actioned.** Its sharpest
+finding is that **round 1's major #5 was only half-closed, and this entry said
+otherwise.** The fix tested `server_verifier(None)` — a helper — while round 1's
+mutation targeted the *wiring*. Re-applying it left `140 passed; 0 failed`, so
+the exact defect was still shippable green while this entry claimed
+"break-tested twice".
+
+It took **three** attempts to close, and the first two failures are worth
+recording because each looked like success:
+
+1. Testing the helper. The mutation bypasses the helper, so the test never sees
+   it.
+2. Collapsing the `match` to a single `server_verifier(fingerprint)` call site,
+   on the theory that one call site cannot be mutated inconsistently. It can: the
+   mutation simply replaces the argument at that call site, and the test still
+   holds the helper. Verified — the mutation passed again.
+3. **A real TLS handshake, in memory.** Nothing can inspect a built
+   `ClientConfig` to learn what it will accept, so no structural rearrangement
+   could have worked; only exercising it can. `tests/fixtures/` now carries a
+   self-signed certificate with the exact shape of the real article
+   (`C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.pool`, valid 100 years so
+   it cannot rot), and three tests drive `ClientConnection` against
+   `ServerConnection` over in-memory buffers — no sockets, no ports, no network.
+   The mutation now fails two of them.
+
+That test also gives the change something it never had: **a completed handshake
+in which a pinned self-signed certificate is accepted.** Previously the only
+evidence pinning worked at all was round 1's external `openssl s_server` run,
+which is not reproducible in CI.
+
+- **The refusal guard sat behind `TcpStream::connect`**, so its test needed a
+  live TCP connection to `gulf.moneroocean.stream:20128`. That name has an A
+  record which blackholes, so the test took **75 seconds**, and with no route at
+  all it **fails** rather than skips — a third party's routing deciding a
+  verdict about our own code. The guard reads only `address`; it now runs before
+  the socket is opened, and the test takes 0.00 s.
+- **`parse_tls_fingerprint_with` had no tests**, despite being split out *for
+  testability* — while `parse_switch_with`, which solves the identical R10-F2
+  problem, has ten. Review confirmed all ten precedence cases by hand against the
+  binary; nine tests now pin them, including that a bare flag cannot swallow a
+  following `--donate-level`.
+- **The PR body was never updated**, while this entry claimed the false parity
+  statement had been "withdrawn" from all three places carrying it. It had been
+  withdrawn from two. **Third round-2 in this repo to find an un-updated PR
+  body.**
+
+Minors also fixed: the parity claim was still inexact even after withdrawal
+(`parse_switch_with` resolves a bare trailing flag to its fail-safe value and
+this declines; a malformed env value aborts here before argv can override — both
+deliberate, a pin having no safe default); the empty-value warnings named
+`MINERTIM_TLS_FINGERPRINT` as the survivor when an earlier flag may be; the
+README still said "paste what it prints" six lines above the correction; the
+`SHA256 Fingerprint=` example used the first three bytes of the very fingerprint
+removed as misattributed; the README config block grew inline `#` comments in a
+file the `Makefile` `-include`s; and the `hex_decode` comment credited operator
+paste when `parse_job` runs it on **pool-supplied** `blob`, `target` and
+`seed_hash` — so the panic was remotely reachable, and the fix is worth more than
+the route that found it.

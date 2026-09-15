@@ -286,9 +286,15 @@ fn parse_tls_fingerprint(args: &[String]) -> Result<Option<CertFingerprint>, Str
 
 /// The testable half, so the environment variable can be supplied directly.
 ///
-/// Precedence and empty-value handling deliberately mirror `parse_switch_with`:
-/// a later source wins, but an *empty* or absent value declines to have an
-/// opinion rather than erasing one already resolved. Without the `.or(resolved)`
+/// Empty-value handling follows `parse_switch_with`'s rule — a later source
+/// wins, but an *empty* or absent value declines to have an opinion rather than
+/// erasing one already resolved. It is not identical to that function and the
+/// claim that it "matches" was withdrawn after review: `parse_switch_with`
+/// resolves a bare flag at the end of argv to its fail-safe value, overriding
+/// the environment, whereas a bare flag here declines; and a malformed
+/// environment value aborts startup here before argv could override it. Both
+/// differences are deliberate — a pin has no safe default to fall back to, and a
+/// malformed one must not be silently discarded. Without the `.or(resolved)`
 /// below, `MINERTIM_TLS_FINGERPRINT=<pin> minertim … --tls-fingerprint ""` would
 /// silently drop the pin and connect with ordinary verification — the operator
 /// believing they were pinned. That is R10-F2, the same defect this file already
@@ -337,8 +343,10 @@ fn parse_tls_fingerprint_with(
                 Some(v) => Some(v.as_str()),
                 None => {
                     eprintln!(
-                        "WARNING: --tls-fingerprint given with no value; ignoring it. \
-                         Any MINERTIM_TLS_FINGERPRINT setting still applies."
+                        "WARNING: --tls-fingerprint given with no value; ignoring it. Any pin set \
+                         earlier on the command line, or in MINERTIM_TLS_FINGERPRINT, \
+                         still applies; if neither is set the certificate is verified \
+                         normally."
                     );
                     None
                 }
@@ -350,8 +358,9 @@ fn parse_tls_fingerprint_with(
         if let Some(v) = value {
             if v.trim().is_empty() {
                 eprintln!(
-                    "WARNING: --tls-fingerprint given an empty value; ignoring it. \
-                     Any MINERTIM_TLS_FINGERPRINT setting still applies."
+                    "WARNING: --tls-fingerprint given an empty value; ignoring it. Any pin set \
+                     earlier on the command line, or in MINERTIM_TLS_FINGERPRINT, still \
+                     applies; if neither is set the certificate is verified normally."
                 );
             }
             // `.or(resolved)` is the load-bearing part: an empty value must not
@@ -546,6 +555,96 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // --- --tls-fingerprint -----------------------------------------------
+    // This function was split from `parse_tls_fingerprint` "so the environment
+    // variable can be supplied directly" — and then had no tests, while
+    // `parse_switch_with`, which solves the identical problem, has ten. Review
+    // verified the behaviour by hand against the built binary; these pin it.
+
+    const FP: &str = "3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420";
+    const FP2: &str = "bdd5fe3031d2729cb79dc027441988f7b4c6a2c0258e0d382f7eb1a308890c7d";
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tls_fingerprint_absent_means_normal_verification() {
+        assert_eq!(parse_tls_fingerprint_with(&argv(&[]), None), Ok(None));
+    }
+
+    #[test]
+    fn tls_fingerprint_env_is_used_when_no_flag_is_given() {
+        let got = parse_tls_fingerprint_with(&argv(&[]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
+    #[test]
+    fn tls_fingerprint_flag_overrides_env_and_the_last_flag_wins() {
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", FP2]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "argv must win over the environment");
+
+        let got = parse_tls_fingerprint_with(
+            &argv(&["--tls-fingerprint", FP, "--tls-fingerprint", FP2]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "the last flag must win");
+    }
+
+    /// R10-F2, the defect this repo has now hit twice: an empty value must
+    /// *decline* rather than erase. Silently dropping a pin connects without the
+    /// protection the operator believes they configured.
+    #[test]
+    fn an_empty_value_never_erases_a_pin() {
+        let got =
+            parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", ""]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP), "empty argv must not erase the env pin");
+
+        let got = parse_tls_fingerprint_with(
+            &argv(&["--tls-fingerprint", FP2, "--tls-fingerprint", ""]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "empty argv must not erase an earlier flag");
+
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint="]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP), "empty --flag= must not erase either");
+    }
+
+    #[test]
+    fn a_bare_flag_at_the_end_declines_rather_than_erasing() {
+        let got =
+            parse_tls_fingerprint_with(&argv(&["--tls-fingerprint"]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
+    /// A bare flag must not swallow the argument after it when that argument is
+    /// another flag — otherwise `--tls-fingerprint --donate-level 1` would
+    /// consume `--donate-level` and silently change two settings.
+    #[test]
+    fn a_bare_flag_followed_by_another_flag_is_an_error_not_a_silent_swallow() {
+        let r = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", "--donate-level"]), None);
+        assert!(r.is_err(), "'--donate-level' is not a fingerprint and must be rejected");
+    }
+
+    #[test]
+    fn a_malformed_value_is_an_error_with_the_openssl_recipe() {
+        let e = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", "nope"]), None)
+            .expect_err("must reject");
+        assert!(e.contains("64 hex"), "should say what was expected: {e}");
+        assert!(e.contains("openssl"), "should tell the operator how to read one: {e}");
+    }
+
+    #[test]
+    fn colons_and_case_survive_the_cli_path() {
+        let spaced = FP.to_uppercase();
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", &spaced]), None).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
     use super::{parse_native_loop, parse_switch_with, parse_verify_shares, startup_state_line};
 
     fn args(extra: &[&str]) -> Vec<String> {

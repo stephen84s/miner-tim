@@ -258,26 +258,28 @@ impl PoolConnection {
     /// security control quietly stops existing, and this one was absent for the
     /// project's whole life without anything reporting it.
     pub fn with_tls_fingerprint(donate_level: u8, fingerprint: Option<CertFingerprint>) -> Self {
-        let tls_config = match fingerprint {
-            Some(expected) => {
-                log::warn!(
-                    "TLS: certificate pinned to {}. For a TLS connection this replaces the \
-                     usual checks — trust chain, hostname and expiry are NOT verified; only \
-                     that the certificate is exactly the pinned one. Re-pin if the pool \
-                     renews. Whether TLS is used at all depends on the port, and is \
-                     reported when the connection is made.",
-                    hex_encode(&expected)
-                );
-                ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(server_verifier(Some(expected)))
-                    .with_no_client_auth()
-            }
-            None => ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(server_verifier(None))
-                .with_no_client_auth(),
-        };
+        if let Some(expected) = fingerprint {
+            log::warn!(
+                "TLS: certificate pinned to {}. For a TLS connection this replaces the \
+                 usual checks — trust chain, hostname and expiry are NOT verified; only \
+                 that the certificate is exactly the pinned one. Re-pin if the pool \
+                 renews. Whether TLS is used at all depends on the port, and is \
+                 reported when the connection is made.",
+                hex_encode(&expected)
+            );
+        }
+
+        // One call site, deliberately. This was a `match` whose two arms differed
+        // only in the argument to `server_verifier` — and that duplication was the
+        // defect: review mutated the `None` arm to accept anything, left
+        // `server_verifier` intact, and the suite stayed green, because the test
+        // written for round 1's finding held the *helper* rather than the wiring.
+        // With a single call there is no second place for the choice to be made,
+        // so a test of `server_verifier` is a test of what the connection uses.
+        let tls_config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(server_verifier(fingerprint))
+            .with_no_client_auth();
 
         Self {
             stream: Mutex::new(None),
@@ -299,19 +301,11 @@ impl PoolConnection {
     pub fn connect(&self, address: &str) -> Result<(), String> {
         log::info!("Connecting to pool: {}", address);
 
-        let tcp_stream = TcpStream::connect(address)
-            .map_err(|e| format!("TCP connect failed: {}", e))?;
-
-        tcp_stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .map_err(|e| format!("Set read timeout failed: {}", e))?;
-        tcp_stream
-            .set_write_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| format!("Set write timeout failed: {}", e))?;
-        tcp_stream
-            .set_nodelay(true)
-            .map_err(|e| format!("Set nodelay failed: {}", e))?;
-
+        // Checked before the socket is opened: this reads only `address`, and
+        // sitting behind `TcpStream::connect` made the test for it depend on a
+        // third party's routing — 75 s when one A record blackholes, and a
+        // *failure* rather than a skip with no route at all.
+        //
         // A pin is a security decision, and TLS here is inferred from the port
         // rather than asked for. Connecting in plaintext while the log reports a
         // pin would leave the operator believing the pool is authenticated when
@@ -330,6 +324,20 @@ impl PoolConnection {
                 TLS_PORTS,
             ));
         }
+
+
+        let tcp_stream = TcpStream::connect(address)
+            .map_err(|e| format!("TCP connect failed: {}", e))?;
+
+        tcp_stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .map_err(|e| format!("Set read timeout failed: {}", e))?;
+        tcp_stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| format!("Set write timeout failed: {}", e))?;
+        tcp_stream
+            .set_nodelay(true)
+            .map_err(|e| format!("Set nodelay failed: {}", e))?;
 
         let pool_stream = if is_tls_port(address) {
             let host = address
@@ -922,6 +930,98 @@ mod tls_tests {
     /// builder; the stronger check — a real `CN=mining.pool` self-signed cert
     /// rejected inside a live handshake against `openssl s_server` — was run by
     /// review and is recorded in SEC-02.
+    /// Drive a **real TLS handshake** against the config the connection actually
+    /// uses, in memory — no sockets, no ports, no network.
+    ///
+    /// This exists because two weaker attempts did not hold. Round 1 found that
+    /// swapping the default verifier for accept-anything left the suite green.
+    /// The fix tested `server_verifier(None)` — a helper — and round 2 showed the
+    /// same mutation applied to the *wiring* still passed. Collapsing the two
+    /// call sites into one did not close it either: a mutation at the call site
+    /// simply bypasses the helper the test holds.
+    ///
+    /// No structural trick can close that gap, because nothing can inspect a
+    /// built `ClientConfig` to learn what it will accept. Only exercising it
+    /// can. The certificate is a fixture with the exact shape of the real
+    /// article — `C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.pool`, the
+    /// stock pool-daemon certificate — valid for a century so the test cannot
+    /// rot.
+    fn handshake_against_self_signed(fingerprint: Option<CertFingerprint>) -> Result<(), rustls::Error> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let cert = CertificateDer::from(
+            include_bytes!("../tests/fixtures/selfsigned-mining-pool.crt.der").to_vec(),
+        );
+        let key = PrivateKeyDer::try_from(
+            include_bytes!("../tests/fixtures/selfsigned-mining-pool.key.der").to_vec(),
+        )
+        .expect("fixture key must parse");
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .expect("fixture cert/key must load");
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+
+        // Build the client from the connection's OWN config, so this tests what
+        // `PoolConnection` will really use rather than a parallel construction.
+        let conn = PoolConnection::with_tls_fingerprint(
+            crate::donate::DEFAULT_DONATE_LEVEL,
+            fingerprint,
+        );
+        let name = rustls::pki_types::ServerName::try_from("mining.pool").unwrap();
+        let mut client = rustls::ClientConnection::new(conn.tls_config.clone(), name).unwrap();
+
+        // Pump bytes between the two in memory until the handshake settles.
+        for _ in 0..16 {
+            let mut buf = Vec::new();
+            client.write_tls(&mut buf).ok();
+            if !buf.is_empty() {
+                server.read_tls(&mut buf.as_slice()).ok();
+                server.process_new_packets().map_err(|e| rustls::Error::General(e.to_string()))?;
+            }
+            let mut buf = Vec::new();
+            server.write_tls(&mut buf).ok();
+            if !buf.is_empty() {
+                client.read_tls(&mut buf.as_slice()).ok();
+                // This is the call that runs the certificate verifier.
+                client.process_new_packets()?;
+            }
+            if !client.is_handshaking() {
+                return Ok(());
+            }
+        }
+        Err(rustls::Error::General("handshake did not complete".into()))
+    }
+
+    #[test]
+    fn by_default_a_self_signed_pool_certificate_is_rejected_in_a_real_handshake() {
+        let err = handshake_against_self_signed(None)
+            .expect_err("the default must reject a self-signed certificate");
+        // Any rejection is the point; naming it keeps the failure legible.
+        assert!(
+            format!("{err:?}").contains("Certificate") || format!("{err:?}").contains("Invalid"),
+            "expected a certificate rejection, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_pinned_certificate_completes_a_real_handshake() {
+        let pin = parse_cert_fingerprint(
+            "bdd5fe3031d2729cb79dc027441988f7b4c6a2c0258e0d382f7eb1a308890c7d",
+        )
+        .unwrap();
+        handshake_against_self_signed(Some(pin))
+            .expect("the pinned certificate must be accepted — this is the whole point of a pin");
+    }
+
+    #[test]
+    fn a_wrong_pin_fails_a_real_handshake() {
+        let pin = parse_cert_fingerprint(SAMPLE).unwrap();
+        handshake_against_self_signed(Some(pin))
+            .expect_err("a certificate that is not the pinned one must be rejected");
+    }
+
     #[test]
     fn the_default_verifier_rejects_what_it_cannot_validate() {
         let verifier = server_verifier(None);

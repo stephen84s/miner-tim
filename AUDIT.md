@@ -5571,3 +5571,21 @@ file the `Makefile` `-include`s; and the `hex_decode` comment credited operator
 paste when `parse_job` runs it on **pool-supplied** `blob`, `target` and
 `seed_hash` — so the panic was remotely reachable, and the fix is worth more than
 the route that found it.
+
+**RUSTSEC-2026-0285, folded in because it blocked the merge and is the same
+subsystem.** Published 2026-09-14, mid-review: *"TLS 1.3 handshake messages
+incorrectly accepted across encryption level boundaries"* in rustls itself,
+severity 5.3, fixed in 0.23.45. The `audit` job went red on this branch.
+
+It is **not caused by this change** — `main` pins the same 0.23.37 and is equally
+affected — but a PR hardening TLS cannot merge with an unpatched TLS advisory in
+its own dependency, so `Cargo.lock` moves to rustls 0.23.45 (and
+rustls-webpki 0.103.15 behind it). `cargo audit` clean, 143 lib + 18 bin tests
+pass, clippy clean.
+
+Worth recording that the advisory describes a flaw in *handshake state
+validation* — accepting messages across encryption-level boundaries — which is a
+different failure class from the one this entry is about. Certificate
+verification decides **who** you are talking to; this decides **when** a message
+is legitimate. Having fixed one, it would be easy to assume the other was covered.
+

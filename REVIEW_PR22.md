@@ -643,3 +643,196 @@ Environment: macOS 25.6.0, aarch64. `openssl` = OpenSSL 3.6.1 (Homebrew);
   owns it.
 - **Whether a public-CA pool handshake succeeds.** My live test covers rejection
   and pinning, not a successful WebPKI chain build against a real CA.
+
+---
+
+# Round 2 — review of the fixes (`d33972d..44e2dab`)
+
+Fresh reviewer, cold context. Scope: commit `44e2dab` only. `make verify-jit`
+not implicated (no `src/randomx/` change). The `Makefile` hunk is **ci-reviewer's**
+— read, no defect seen, not my verdict.
+
+`cargo test --release` 150 passed / 2 ignored; `cargo clippy --all-targets
+--release -- -D warnings` clean. Tree restored to `7a88045f…` (md5) after every
+mutation; `git status --porcelain` empty.
+
+## Coverage
+
+| # | Item | Verdict |
+|---|---|---|
+| 1 | `connect` refusal (R1 major 1) | correct, but **ordered after the socket opens** — R2-M2 |
+| 2 | `parse_tls_fingerprint_with` (R1 major 2) | behaviour correct (10/10 matrix), **untested** — R2-M3, m-1, m-2 |
+| 3 | New tests (R1 major 5) | one break-test discriminates; **the wiring still does not** — R2-M1 |
+| 4 | Docs (R1 majors 3, 4) | literal gone, warning well placed; m-3, n-1, n-2 |
+| 5 | Claims across four documents | **PR body never updated** — R2-M4; m-4, m-5, m-6 |
+
+## R2-M1 (major) — round 1's M-5 is half-closed; the default *connection* is still uncovered
+
+Round 1 was precise: "the wiring that decides whether the *default connection*
+gets `with_webpki_verifier(...)` or something permissive has no coverage at all."
+The fix added `the_default_verifier_rejects_what_it_cannot_validate`, which holds
+`server_verifier(None)` — a helper — not the `ClientConfig` the connection uses.
+
+**Break-test.** Left `server_verifier` untouched; replaced only the `None =>` arm
+of `with_tls_fingerprint` with an accept-anything verifier (all four trait methods
+delegating except `verify_server_cert`):
+
+```
+test result: ok. 140 passed; 0 failed; 2 ignored   (lib)
+```
+
+The exact defect round 1 found is still shippable with a green suite. The
+*second* break-test — accept-anything inside `server_verifier` — does fail the new
+test (`panicked at pool_connection.rs:939`), so the new test is not vacuous; it
+just guards one call short of the path that matters. `AUDIT.md` and the
+`CLAUDE.md` row present this finding as closed.
+
+*Fix:* assert on `PoolConnection::with_tls_fingerprint(level, None)`, or on
+something reachable from it, rather than on the helper.
+
+## R2-M2 (major) — the refusal test's verdict is decided by a third party's routing
+
+The guard sits **after** `TcpStream::connect`, so it cannot be reached without a
+live connection to `gulf.moneroocean.stream:20128`.
+
+Measured here: the name resolves to `205.172.58.170` (**SYN timeout**) and
+`2402:1f00:8001:86d::1` (connects in 0.18 s). `std` tries them in resolver order,
+so the test takes **75.2 s** (3/3 runs, `real 75.75 / 75.29 / 75.29`) — and in an
+earlier run in this same session it took 0.19 s. On a host with no working route
+it does not skip, it **fails**: the error is `TCP connect failed: …`, and
+`err.contains("pinned")` is false. Round 1 recorded exactly that condition for a
+different pool from this very machine. It is the sole automated guard for round
+1's most serious finding.
+
+Confirmed against the built binary: with nothing listening the refusal never runs
+(`TLS: certificate pinned to aaaa…` then `TCP connect failed`); with a local
+listener on `127.0.0.1:1234` it fires and names port, `TLS_PORTS` and both
+remedies. Break-tested (`if false && …`): the test fails, so it does discriminate.
+
+*Fix:* move the guard above `TcpStream::connect` — it reads only `address`. The
+test becomes hermetic and instant, and refusing before opening a socket is better
+behaviour anyway.
+
+## R2-M3 (major) — the rewritten parser has no tests at all
+
+`parse_tls_fingerprint_with` was split out "so the environment variable can be
+supplied directly" — the testability refactor — and **zero tests call it**
+(`grep -n '#\[test\]' src/bin/minertim.rs`: 10 tests, none for the fingerprint).
+`parse_switch_with`, which solved the identical R10-F2 problem, has ten, including
+`an_empty_value_does_not_erase_an_explicit_setting`. This class of defect has now
+recurred twice in this repo; the second correction ships unguarded.
+
+I verified the behaviour myself against the binary (oracle: the `TLS: certificate
+pinned to <hex>` line plus the new refusal). All ten cases correct:
+
+| case | result |
+|---|---|
+| `--tls-fingerprint A` | A |
+| `--tls-fingerprint A --tls-fingerprint B` | **B** (last wins) |
+| `--tls-fingerprint=A --tls-fingerprint ""` | **A kept**, warns |
+| env=E + `--tls-fingerprint ""` | **E kept**, warns |
+| env=E + bare flag at end | **E kept**, warns |
+| env=E + `--tls-fingerprint A` | A (flag beats env) |
+| env=E + argv malformed | exit 2 |
+| env malformed + argv A | exit 2 (see m-1) |
+| bare flag mid-argv (`--tls-fingerprint --native-loop off`) | exit 2; the `i += 1` correctly skips the absorbed token |
+| colon-separated | accepted |
+
+So this is a coverage gap, not a live bug — but it is the gap that let the bug in.
+
+## R2-M4 (major) — the PR body was never updated, and `AUDIT.md` says otherwise
+
+`AUDIT.md` (SEC-02, new text): "this entry, **the PR body** and the code comment
+all claimed the behaviour 'matches how the on/off switches handle
+`--flag \"$UNSET_VAR\"`' … and the false claim is withdrawn."
+
+`gh pr view 22` still carries it verbatim:
+
+> **An empty value is treated as absent**, matching how the on/off switches handle `--flag "$UNSET_VAR"` …
+
+The entry and the code comment were fixed; the PR body was not. So the
+authoritative record asserts a correction that was not made, about the security
+behaviour round 1 majored. The body also still says "138 lib + 10 bin tests",
+"Seven new tests" (nine now) and does not mention the five majors at all. This is
+the third round-2 in this repo to find an un-updated PR body (PROC-01, CI-03).
+
+## Minors
+
+- **m-1 — the parity claim is still not exact.** The doc comment says precedence
+  and empty-value handling "deliberately mirror `parse_switch_with`" and that an
+  "empty *or absent*" value declines to have an opinion. `parse_switch_with`'s
+  absent case does the opposite: a bare flag at end of argv sets
+  `value = Some(fail_safe)`, **overriding** the environment. And a malformed
+  *environment* value here aborts with exit 2 before argv can override it, which
+  contradicts "a later source wins". Both behaviours are defensible for a pin;
+  the claim of mirroring is what is inaccurate — the same class round 1 majored.
+- **m-2 — warning text names the wrong survivor.** Both empty-value warnings say
+  "Any `MINERTIM_TLS_FINGERPRINT` setting still applies", but in
+  `--tls-fingerprint=A --tls-fingerprint ""` what survives is the earlier *flag*,
+  and with no env set nothing applies.
+- **m-3 — README argues with itself.** Line 82 still reads "Read a pool's
+  fingerprint with this, **and paste what it prints**", six lines above the new
+  "Copy **only the hex after the `=`**". `AUDIT.md` lists that guidance as fixed.
+- **m-4 — SEC-02's Verification paragraph is stale.** "138 lib + 10 bin" (now 140
+  lib + 10 bin, 2 ignored) and "Seven new tests" (nine), directly above new text
+  describing two more. Its files-changed list omits **`src/hex.rs`**, which this
+  commit changed.
+- **m-5 — no ledger sha recorded.** Neither `AUDIT.md` nor the `CLAUDE.md` row
+  cites `REVIEW_PR22.md` or a retrieval sha. LEDGER-01 requires it; the branch is
+  squash-merged, so both rounds become unretrievable once the branch ref goes.
+- **m-6 — a disjunction promoted to a fact.** `AUDIT.md` now states "The first is
+  true" for round 1's either/or about the quick-start pool, while conceding review
+  could not re-reach the host. No new measurement backs it. From here TCP to
+  `pool.supportxmr.com:443` succeeds on all three A records but the TLS handshake
+  never completes (`openssl s_client` hangs; the miner hangs the same way) — which
+  is consistent with the quick-start being broken, but *not* evidence for the
+  stated reason, and equally consistent with the survey row being wrong.
+- **m-7 — `hex_decode`'s rationale understates its own fix.** The comment
+  attributes the panic to operator paste, but `parse_job` runs `hex_decode` on
+  pool-supplied `blob`/`target`/`seed_hash` (`pool_connection.rs:819-821`), so a
+  non-ASCII, even-byte-length field from the pool aborted the receiver thread.
+  The guard is strictly tighter and valid hex is ASCII, so no regression; the
+  write-up just sells it short.
+
+## Nits
+
+- **n-1** — the replacement example `SHA256 Fingerprint=3D:58:7C:…` is the first
+  three bytes of the monerohash fingerprint removed as misattributed, still shown
+  under a `pool.supportxmr.com` command. Unpasteable at 3 of 32 bytes.
+- **n-2** — the README config block now uses inline `#` comments in a file the
+  `Makefile` `-include`s, so `POOL` becomes `"pool.supportxmr.com:443   "`
+  (verified with a stub makefile). Harmless only because `$(POOL)` is unquoted in
+  the `run` recipe. `TLS_FINGERPRINT=  # …` is safe — `$(if …)` strips whitespace.
+
+## Confirmed good
+
+- **The refusal predicate is the exact complement of the plaintext arm**
+  (`if pinned && !is_tls_port → Err`, then `if is_tls_port {tls} else {plain}`),
+  so the plain branch is unreachable with a pin set. `is_tls_port`'s
+  `unwrap_or(true)` routes a malformed address to TLS, where
+  `ServerName::try_from` fails loudly — it cannot be used to reach plaintext.
+- **The pin holds across reconnects**: `reconnect` (`:586`) and `:635` both go
+  through `self.connect`, so the guard is not a startup-only check.
+- **Refuse rather than warn is right.** The operator set a pin because they do not
+  trust the path; a log line they may not be reading leaves them on plaintext
+  under a guarantee that is not there — the worst outcome for this change. The
+  cost is real and should be stated: a globally-set `TLS_FINGERPRINT` now blocks
+  any plaintext-port pool. That is the right price.
+- New tests break-tested twice; `the_default_verifier_rejects_what_it_cannot_validate`
+  is not vacuous. Precedence matrix 10/10. Clippy clean, 150 pass.
+
+## Not verified
+
+- No handshake with `pool.supportxmr.com:443` completed from this host, so the
+  survey row behind m-6 is still unconfirmed by me.
+- No connection to a real pool with this build — unchanged, and SEC-02 says so.
+- XMRig's `Tls.cpp` not fetched (same as round 1).
+
+# Round 2 verdict
+
+**NOT MERGEABLE. ACTIONABLE.** Four majors — but all four are small edits, not
+rework: one test assertion moved up a level (R2-M1), one guard moved above
+`TcpStream::connect` (R2-M2), tests written for a function that was split out to
+be testable (R2-M3), and the PR body brought in line with the record it claims
+(R2-M4). The security behaviour itself, exercised against the built binary, is
+correct in every case I could construct.

@@ -836,3 +836,9 @@ rework: one test assertion moved up a level (R2-M1), one guard moved above
 be testable (R2-M3), and the PR body brought in line with the record it claims
 (R2-M4). The security behaviour itself, exercised against the built binary, is
 correct in every case I could construct.
+
+**R2-M1 addendum.** The `AUDIT.md` sentence is narrower than it reads:
+"Break-tested twice … A true accept-anything mutation fails it." The mutation
+that *found* the bug — round 1's, on the `None` arm of `with_tls_fingerprint` —
+still passes (mutation C above). Same defect class as R2-M4, in the authoritative
+document rather than the PR body.

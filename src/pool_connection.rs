@@ -663,6 +663,23 @@ impl PoolConnection {
             msg.get("result").and_then(|r| r.get("job"))
         };
 
+        // A job that will not parse is declined and the previous one stays in
+        // force — which fails safe, but used to fail *silently*. A pool sending
+        // only malformed jobs would pin the miner to a stale job with no
+        // diagnostic at all, and stale work is exactly what looks like a JIT
+        // fault from the share-reject side. Log it once per occurrence.
+        if let Some(job_data) = job_params
+            && parse_job(job_data).is_none()
+        {
+            log::warn!(
+                "Pool sent a job that could not be parsed; keeping the previous job. \
+                 Fields must be even-length hex: blob={:?} target={:?} seed_hash={:?}",
+                job_data.get("blob").and_then(|v| v.as_str()).map(|s| s.len()),
+                job_data.get("target").and_then(|v| v.as_str()).map(|s| s.len()),
+                job_data.get("seed_hash").and_then(|v| v.as_str()).map(|s| s.len()),
+            );
+        }
+
         if let Some(job_data) = job_params
             && let Some(job) = parse_job(job_data)
         {
@@ -868,9 +885,19 @@ mod tls_tests {
 
     /// The reason the `hex_decode` fix matters beyond the CLI. `parse_job` runs
     /// it on three pool-supplied fields, so before the fix a pool could abort
-    /// the miner by putting one non-ASCII byte in a job. A malformed job must be
-    /// *declined* — `None` — leaving the previous job in force, which is how the
-    /// receiver already handles anything it cannot parse.
+    /// the miner by putting one non-ASCII byte in a job, or smuggle a byte past
+    /// it with a `+` sign. A malformed job must be *declined* — `None` — leaving
+    /// the previous job in force, which is how the receiver already handles
+    /// anything it cannot parse.
+    ///
+    /// **Fixture lengths are load-bearing, and the first version got them
+    /// wrong.** `"ff€ff"` is *seven* bytes, so it was caught by the odd-length
+    /// check that every version of `hex_decode` has had — the test was green
+    /// against both unfixed implementations while asserting "must be declined,
+    /// not panic" of an input that never panicked. `"ff€f"` is six: it passes the
+    /// length check, reaches the byte-index slice, and panics on the old code.
+    /// Round 4 caught that; it was one character from being a real regression
+    /// test.
     #[test]
     fn a_malformed_job_from_the_pool_is_declined_not_fatal() {
         let good = serde_json::json!({
@@ -880,11 +907,26 @@ mod tls_tests {
         assert!(parse_job(&good).is_some(), "the control case must parse");
 
         for field in ["blob", "target", "seed_hash"] {
+            // Even length, so it reaches the slicer: this is the panic case.
             let mut hostile = good.clone();
-            hostile[field] = serde_json::json!("ff€ff");
+            hostile[field] = serde_json::json!("ff\u{20AC}f");
+            assert_eq!(
+                hostile[field].as_str().unwrap().len(),
+                6,
+                "fixture must be even-length or it only tests the length check"
+            );
             assert!(
                 parse_job(&hostile).is_none(),
                 "a non-ASCII {field} must be declined, not panic"
+            );
+
+            // The sign defect: even length, all ASCII, and `from_str_radix`
+            // used to decode "+f" as 0x0f. This is its only caller-level cover.
+            let mut signed = good.clone();
+            signed[field] = serde_json::json!("+f+f");
+            assert!(
+                parse_job(&signed).is_none(),
+                "a signed {field} is not hex and must be declined"
             );
 
             let mut odd = good.clone();

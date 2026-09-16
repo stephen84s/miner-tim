@@ -5708,7 +5708,8 @@ recorded at strip time below.
 **A second `hex.rs` defect, found by writing that module's first tests.** Asked
 how the test coverage looked, the honest answer was that `src/hex.rs` had **zero
 tests** — while carrying a panic fix made in this very change, on a function with
-six call sites in `pool_connection.rs`, three of them pool-supplied. Writing
+four call sites in `pool_connection.rs` — the whole crate — three of them
+pool-supplied. Writing
 those tests immediately failed one:
 
 ```
@@ -5725,15 +5726,35 @@ introduced here; it has been reachable from pool-supplied `blob`, `target` and
 
 `hex_decode` now decodes nibble by nibble over `as_bytes()`, which fixes both
 defects at once: no sign is accepted, and there is no byte-index slicing left to
-panic on a multi-byte character. Seven tests cover it — round-trip over all 256
-byte values, case handling, odd length, non-hex, the sign cases, and six
-non-ASCII inputs including one whose length passes the even check and only then
-straddles a character boundary.
+panic on a multi-byte character. **Five** tests cover it — round-trip over all
+256 byte values, case handling, odd length, non-hex, the sign cases, and six
+non-ASCII inputs, **three** of which pass the even-length check and only then
+straddle a character boundary. (An earlier version of this sentence said "seven
+tests" and "one" such input; the first overstated, the second understated, and
+both are corrected here in one edit rather than half of it.)
 
-`parse_job` gained the test that matters more than any of those: a job with a
-non-ASCII or odd-length `blob`, `target` or `seed_hash` must be **declined**,
-leaving the previous job in force, rather than aborting the process. That is the
-path a hostile or broken pool would actually take.
+`parse_job` gained a caller-level test, and **round 4 found its first version
+covered neither defect it claimed.** Both fixtures were odd-length — `"ff€ff"` is
+seven bytes, `"abc"` is three — so they only ever exercised the length check that
+every version of `hex_decode` has had. The test was green against both unfixed
+implementations while its assert message read "must be declined, not panic" of an
+input that never panicked, and this entry called it "the test that matters more
+than any of those". It was one character from being a real regression test.
+
+Corrected: `"ff€f"` is six bytes, so it passes the length check, reaches the
+byte-index slice and panics on the old code — verified by reverting `hex.rs` to
+`main` and watching the test fail with *"end byte index 4 is not a char boundary"*.
+A `"+f+f"` fixture was added alongside it, giving the **sign** defect its only
+caller-level coverage. The property still holds and is now actually tested: a
+malformed job is declined, leaving the previous job in force, rather than
+aborting the process.
+
+**Declined, but no longer silently.** Round 4 traced the decline path and
+confirmed the claim — `*current` is never written, so the previous job stands —
+but nothing was logged, so a pool sending only malformed jobs would pin the miner
+to stale work with no diagnostic. Stale work is precisely what a JIT fault looks
+like from the share-reject side, so the two would be indistinguishable in a log.
+A `warn!` now reports the decline and the offending field lengths.
 
 Worth stating as a process point rather than a code one: this defect had survived
 three review rounds on a PR that *edited the function*, and surfaced within

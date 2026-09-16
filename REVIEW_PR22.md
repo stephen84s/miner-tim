@@ -842,3 +842,247 @@ correct in every case I could construct.
 that *found* the bug — round 1's, on the `None` arm of `with_tls_fingerprint` —
 still passes (mutation C above). Same defect class as R2-M4, in the authoritative
 document rather than the PR body.
+
+---
+
+# Round 3
+
+Fresh reviewer, cold. Scope: `8ff30e3..HEAD` — `b01ab21` (round-2 fixes),
+`014fb63` (rustls bump), `c78fe80` (live-run write-up). Worktree
+`.claude/worktrees/tls-verify`, head `c78fe80`.
+
+**Handed off, nothing in scope:** the diff touches no `src/randomx/jit/`, no
+emitter, no `vm.rs` native-loop path, no `benches/`, no `.github/workflows/`,
+`Makefile`, `scripts/` or `.cargo/config.toml`. Nothing for `jit-reviewer` or
+`ci-reviewer`.
+
+## Coverage ledger
+
+| # | Item | Result |
+|---|---|---|
+| 1 | In-memory handshake tests genuinely discriminate | **PASS** — break-tested at the wiring |
+| 2 | Hoisted refusal guard | **PASS** — fires, runs first, 0.00 s |
+| 3 | Nine parser tests | **PASS** — both named tests break-tested |
+| 4 | Live-run figures re-derived from the log | **PASS** — every figure reproduces |
+| 5 | rustls bump | **PASS** — 0.23.45, audit clean, nothing else moved |
+| 6 | Documentation / audit accuracy | **ONE MAJOR** + minors |
+| 7 | Concurrency / resource use | no change in scope |
+
+Self-run: `cargo test --release` **161 passed, 2 ignored** (49 s);
+`cargo clippy --all-targets --release -- -D warnings` **clean**;
+`cargo audit` **exit 0**. All five CI checks SUCCESS on `c78fe80`; branch has
+nothing behind `origin/main`.
+
+## 1. The handshake tests — genuine (R3-V1)
+
+Break-tested at the **production wiring**, not the helper. Replaced
+`.with_custom_certificate_verifier(server_verifier(fingerprint))` in
+`with_tls_fingerprint` with an `Arc::new(MutAcceptAnything)` that returns
+`ServerCertVerified::assertion()` unconditionally (signature methods delegated so
+the handshake still completes):
+
+```
+test ...a_wrong_pin_fails_a_real_handshake ... FAILED
+test ...by_default_a_self_signed_pool_certificate_is_rejected_in_a_real_handshake ... FAILED
+test result: FAILED. 141 passed; 2 failed
+```
+
+Round 1's and round 2's defect is closed. Confirmed that
+`with_tls_fingerprint` is the **only** production `ClientConfig::builder()` site
+(`pool_connection.rs:279`) and `PoolConnection::new` delegates to it
+(`:248`), so there is no second wiring the mutation could have missed.
+
+Second mutation, pinning disabled (`Some(_) => inner` in `server_verifier`):
+`the_pinned_certificate_completes_a_real_handshake` **FAILED**. The pinned-accept
+test is therefore not vacuous — it requires `Ok(())`, so it also guards the
+byte-pump.
+
+Fixture verified: `subject=C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.pool`,
+self-signed, `notAfter=Aug 22 07:51:30 2126`, SHA-256
+`bd:d5:…:0c:7d` — exactly the value pinned in
+`the_pinned_certificate_completes_a_real_handshake`. Tests need no network and
+no ports.
+
+## R3-MAJOR-1 — `AUDIT.md` SEC-02 contradicts itself; a stale paragraph was welded on, not rewritten
+
+`c78fe80` deleted the heading **"Still not verified, and it matters. No
+connection to a real pool was made with this build."** but left its **body**,
+which is now spliced onto the end of the new hardware-correction paragraph
+(`AUDIT.md:5560-5574`). Mid-sentence, the entry says:
+
+> …which are append-only. The tests exercise the verifier's decision logic with
+> synthetic DER, not a TLS handshake … the TLS path in this codebase has **never
+> been exercised against a pool at all — before or after this change**. That gap
+> predates this work and is not closed by it. A live check against a pinned
+> self-signed pool and against a normally-verifying pool is the remaining
+> verification.
+
+All three clauses are false as of this same commit, and are contradicted ~20
+lines above by **"Verified live, 2026-09-16 — this section previously said the
+opposite"** and by the three in-memory handshake tests. `AUDIT.md` is the
+project's authoritative record; a future session grepping "TLS path … never been
+exercised" will trust it. This is CLAUDE.md item 6 verbatim — *when a premise
+changes, the section is rewritten* — and the same accretion defect PROC-01 round 3
+and CI-03 round 3 both found.
+
+SEC-02 is on an unmerged branch, so this is an in-place edit, permitted. Swept
+the whole entry for other survivors of the splice: **this is the only one**.
+
+**ACTIONABLE.** Delete or rewrite the welded text.
+
+## 2. The hoisted guard (R3-V2)
+
+Now the first statement in `connect()` (`pool_connection.rs:315`), above
+`TcpStream::connect`. Mutation `if false && …`:
+`a_pin_and_a_plaintext_port_is_refused_rather_than_silently_ignored` **FAILED**.
+On clean code the test runs in **0.00 s** and resolves no hostname — hermetic.
+
+**R3-minor-1.** Only the *refusing* direction is covered. Nothing calls
+`connect()` with a pin **and** a TLS port, so inverting the guard to always
+refuse would ship green. It fails closed (no false security), and the 6-hour run
+on `:9999` covers it empirically, so: minor.
+
+**R3-nit-1.** Double blank line left at `pool_connection.rs:326-327` by the hoist.
+
+## 3. The parser tests (R3-V3)
+
+Both named tests break-tested:
+
+- `resolved = parse(v)?.or(resolved)` → `resolved = parse(v)?` →
+  **`an_empty_value_never_erases_a_pin` FAILED**.
+- bare flag made to decline when the next argv item starts with `--` →
+  **`a_bare_flag_followed_by_another_flag_is_an_error_not_a_silent_swallow` FAILED**.
+
+Neither is vacuous. The eight (not nine — see R3-minor-4) cover env-only,
+argv-over-env, last-flag-wins, all three empty forms, bare-flag-at-end,
+malformed-with-recipe, and case/colon survival. The withdrawn `parse_switch_with`
+parity claim is now stated precisely and matches the code.
+
+## 4. The live run — every figure reproduces (R3-V4)
+
+`LIVE6H_TLS_RUN.log` is **byte-identical** to the raw run log still in the
+session scratchpad (`diff` empty), so it was not edited after the fact.
+
+| Claim | Re-derived | Verdict |
+|---|---|---|
+| 354 accepted | `grep -c 'Share accepted by pool'` = **354** | ✓ |
+| 0 rejected | final stats line `0 rejected`; no reject lines | ✓ |
+| 355 found | `grep -c 'SHARE FOUND'` = **355** | ✓ |
+| 0 withheld / 0 errors | `grep -c ERROR` = **0** | ✓ |
+| 10 TLS connections | `Connected to pool (TLS)` = **10** | ✓ |
+| 10 logins | `Login successful` = **10** | ✓ |
+| 9 donation rotations | 9 rotation lines (+1 startup disclosure) | ✓ |
+| 0 plain-TCP fallbacks | `plain TCP` = **0** | ✓ |
+| 0 unplanned disconnects | 10 connects = 1 initial + 9 rotations; no reconnect/fail lines | ✓ |
+| median 2267.4, range 2090.8-2333.1, n=2098 | dropping the first 59 `10m:` samples: **n=2098, median 2267.45, min 2090.8, max 2333.1** | ✓ |
+
+Internal consistency of the negative half's quoted error: verification time
+`1789516258` = 2026-09-15 23:50:58 UTC, 27 s before the positive run started;
+`1786403646` = 2026-08-10 23:14:06 UTC, matching "expired 2026-08-10"; the
+3112612 s delta checks out. Header `commit 014fb63` was authored 93 s before the
+run started — the binary did include the round-2 fixes and the bump.
+
+"0 withheld" is **not** vacuous: all four workers log
+`share verification on` at 23:52:10, so the verifier was effective, and
+withholds log at `error!` with `ERROR` count 0.
+
+Hardware correction verified on this host: `hw.memsize` 34359738368 (**32 GiB**),
+`hw.model` **Mac14,5**, 12 cores, Apple M2 Max. Correct.
+
+**R3-minor-2 — the negative half has no committed artifact.** The entry says
+"tested **both halves** … Full log committed as `LIVE6H_TLS_RUN.log`", but that
+log is the *positive* half only (its own header says so). The negative half
+exists solely as a quoted error string with no log, and none is in the
+scratchpad. It is highly plausible — the timestamps decode correctly — but it is
+the one headline claim resting on a transcription rather than an artifact, and
+the sentence reads as if the log covers both.
+
+**R3-minor-3 — the hashrate figure's filter is unstated.** The log has 2158
+`10m:` samples; n=2098 only follows if the first 59 (the 10-minute window fill)
+are dropped. The rule is nowhere in the entry, the PR body or the log. It does
+reproduce once guessed — but "every number traces to a measurement" means the
+derivation too. (Also 2267.45 is reported as 2267.4.)
+
+**R3-minor-5 — one submission has no recorded response.** 355 found, 354
+accepted, run stopped 9 s after the last find: one share was still outstanding at
+SIGINT. Max concurrent outstanding reached **3** (02:42:53Z), so #17's
+"responses carry no identifier" was live during this run. The arithmetic in the
+table is honest, but "355 found / 354 accepted" is stated without noting the
+unanswered one — and LIVE-01's round 2 was specifically about over-reading this.
+
+## 5. The rustls bump (R3-V5)
+
+`Cargo.lock`: rustls 0.23.37 → **0.23.45**, rustls-webpki 0.103.13 → **0.103.15**.
+RUSTSEC-2026-0285 in the local advisory DB: dated 2026-09-14, `patched = [">= 0.23.45"]`,
+CVSS string yields **5.3** — all three as the entry states. `cargo audit` exit 0.
+`main` does pin 0.23.37, so "not caused by this change" holds. Diff vs `main` in
+`Cargo.lock` is those four lines plus the `ring` dependency edge from the earlier
+commit — **nothing else moved**.
+
+## 6. Documentation accuracy — minors
+
+**R3-minor-4 — orphaned doc comment, and its content is now false.**
+`handshake_against_self_signed` was spliced directly beneath the doc comment
+belonging to `the_default_verifier_rejects_what_it_cannot_validate`
+(`pool_connection.rs:921-948`), so that test is now undocumented and two doc
+blocks are concatenated. This is the named repo failure mode, and it has now
+orphaned three. Worse, the stranded text is *stale*: it says the test "uses input
+WebPKI cannot accept rather than a well-formed self-signed certificate, because
+generating one would mean vendoring a certificate builder" — a well-formed
+self-signed fixture sits twelve lines below it.
+
+**R3-minor-6 — "the exact shape of the real article" is unsupported, and the
+rejection is not the one the write-up attributes.** Printing the error the
+default test actually observes:
+
+```
+InvalidCertificate(Other(OtherError(CaUsedAsEndEntity)))
+```
+
+webpki rejects the fixture for `CA:TRUE` used as an end-entity, **before** it
+reaches trust chain or hostname — the two grounds the PR body's survey table
+names. Both scratchpad certs (`c.pem`, `c2.pem`) are locally generated with
+`openssl req -x509` defaults (hence `CA:TRUE`, no SAN); neither is a captured
+pool certificate, and the real endpoint is unreachable from this host, so
+"the exact shape of the real article" is not established. The test still
+discriminates (mutation A kills it), so this is precision, not coverage.
+
+**R3-minor-7 — `CLAUDE.md`'s SEC-02 row still says "138+10 tests".** The actual
+count is 143 lib + 18 bin. `AUDIT.md` deliberately dropped these figures because
+they went stale twice inside the entry; the task-board row kept the stale pair.
+
+**R3-minor-8 — the PR body says "Twenty-one new tests"; there are 20.**
+`main` had 10 test fns across `pool_connection.rs` (0) and `bin/minertim.rs` (10);
+head has 12 + 18 = 30.
+
+**R3-minor-9 — `LIVE6H_TLS_RUN.log` is not in SEC-02's files-changed list**, and
+neither `AUDIT.md` nor the `CLAUDE.md` row names `REVIEW_PR22.md` or its
+retrieval sha, which LEDGER-01 requires before the ledger is removed at merge.
+
+**Honest about limits — yes, with one gap.** The "What the run still does not
+establish" paragraph names the renewal failure mode, the single pool/certificate,
+the self-signed case being test-only, and 4 threads not 12. All three items the
+brief asked about are stated clearly. The gap is R3-MAJOR-1: that honest
+paragraph is immediately followed by a stale one claiming far more is unverified
+than is true.
+
+## Round 3 verdict
+
+**NOT MERGEABLE. ACTIONABLE — one major.**
+
+The engineering is sound and, for the first time in this PR, the coverage is
+genuine: the accept-anything mutation at the production wiring now kills two
+tests, the guard is hermetic and fires, both named parser tests break-test
+cleanly, and **every one of the eleven live-run figures re-derives exactly from a
+log that is byte-identical to the raw one**. The rustls bump is minimal and
+correct. Said plainly, because it is a legitimate outcome: the record's numbers
+are accurate and the coverage is real.
+
+The single blocker to merge is R3-MAJOR-1 — a deleted heading whose body survived,
+leaving `AUDIT.md` asserting the TLS path "has never been exercised against a pool
+at all" twenty lines after recording six hours of doing exactly that. One edit.
+
+**Could not verify:** the real `pool.supportxmr.com` / `gulf.moneroocean.stream`
+certificates (both unreachable from this host), so the survey table and the
+fixture's fidelity to it rest on the 2026-09-13 survey; and the negative half of
+the live run, which has no committed artifact.

@@ -5503,8 +5503,67 @@ because `try_into()` was doing the real work, so it now sweeps the boundary; the
 label survives colon-stripping; a `Makefile` comment referenced notes that do not
 exist; and the self-signed subject was transcribed wrong in a source comment.
 
-**Still not verified, and it matters.** **No connection to a real pool was made
-with this build.** The tests exercise the verifier's decision logic with synthetic
+**Verified live, 2026-09-16 — this section previously said the opposite.** A
+6-hour run against `monerohash.com:9999` tested **both halves** of the change
+against a real pool, closing the gap every earlier revision of this entry had to
+declare open. Full log committed as `LIVE6H_TLS_RUN.log`.
+
+The pool was chosen deliberately: port 9999 *is* in `TLS_PORTS`, and its
+certificate is genuinely expired (Let's Encrypt, `CN=monerohash.com`, expired
+2026-08-10), so it exercises rejection and pinning on the same endpoint. Note
+that the previous live run (LIVE-01) used `monerohash.com:2222` — **plain TCP,
+not a TLS port** — so it exercised none of this code. Repeating that
+configuration would have proved nothing.
+
+**Negative half — the default rejects a real expired certificate:**
+
+```
+Failed to initialize: Login failed: Write failed: invalid peer certificate:
+certificate expired: verification time 1789516258 (UNIX), but certificate is
+not valid after 1786403646 (3112612 seconds ago)
+```
+
+`NoVerifier` accepted this certificate silently for the project's whole life.
+
+**Positive half — the same certificate, pinned, mined for six hours:**
+
+| | |
+|---|---|
+| Shares | **354 accepted, 0 rejected, 0 withheld** (355 found) |
+| `ERROR` lines | **0** |
+| TLS connections established | **10** |
+| Logins over TLS | **10**, across **9** donation rotations |
+| Handshake / certificate failures | **0** |
+| **Plain-TCP fallbacks** | **0** |
+| Unplanned disconnects | **0** |
+| Hashrate, 10 min avg | median **2267.4 H/s**, range 2090.8-2333.1, n=2098 |
+
+Each donation rotation is a full re-login, so the pin was re-checked **ten
+times** against a certificate standard verification refuses, and accepted the
+right one every time. **Zero plain-TCP fallbacks** is the other number worth
+reading: it confirms nothing quietly downgraded out of TLS over six hours.
+
+Hashrate was marginally *higher* than LIVE-01's plain-TCP run (2267.4 vs 2226.9
+median), so TLS costs nothing measurable at four threads — though the two runs
+differ in pool and difficulty as well as transport, so that is an observation,
+not a controlled comparison.
+
+**What the run still does not establish.** The certificate never changed during
+it, so the documented failure mode — **a pin breaking on renewal** — could not
+occur and remains untested. `0 rejected` is cleaner than LIVE-01's single stale
+share, but that is job-rotation timing rather than evidence about TLS. Only one
+pool, one certificate, and the *self-signed* case (`CN=mining.pool`) was tested
+only in the in-memory handshake tests, never against the real supportxmr
+endpoint, which was unreachable from this host. And the run used 4 threads, not
+the 12-core default.
+
+**A correction to this repository's hardware record, noticed during the run.**
+`AUDIT.md` has described the development machine as a **96 GB** M2 Max in earlier
+entries; `sysctl hw.memsize` reports **32 GB** (Mac14,5, 12 cores). No
+measurement is affected — every memory figure in this file was measured with
+`/usr/bin/time -l` or `ps` rather than derived from the total — but the figure
+itself is wrong and is corrected here rather than in the merged entries that
+carry it, which are append-only. The tests exercise the verifier's decision logic with synthetic
 DER, not a TLS handshake, so what is proven is the policy rather than its
 behaviour on the wire. The live run recorded in LIVE-01 used
 `monerohash.com:2222` over **plain TCP**, so the TLS path in this codebase has

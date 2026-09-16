@@ -5428,6 +5428,7 @@ fingerprint), `src/bin/minertim.rs` (`parse_tls_fingerprint`, help text),
 provider, so no new code enters the dependency graph), `Makefile`
 (`TLS_FINGERPRINT` passthrough), `src/hex.rs` (reject non-ASCII before slicing),
 `tests/fixtures/` (a self-signed certificate and key for the handshake tests),
+`LIVE6H_TLS_RUN.log` and `LIVE6H_TLS_NEGATIVE.log` (the live evidence),
 `mining.conf.example`, `README.md` (a "Connecting securely to a pool" section
 written for operators), `AUDIT.md`.
 
@@ -5506,7 +5507,11 @@ exist; and the self-signed subject was transcribed wrong in a source comment.
 **Verified live, 2026-09-16 — this section previously said the opposite.** A
 6-hour run against `monerohash.com:9999` tested **both halves** of the change
 against a real pool, closing the gap every earlier revision of this entry had to
-declare open. Full log committed as `LIVE6H_TLS_RUN.log`.
+declare open. Both halves have committed artifacts: `LIVE6H_TLS_RUN.log` for the 6-hour
+pinned run, and `LIVE6H_TLS_NEGATIVE.log` for the rejection. An earlier version
+of this paragraph cited only the first while describing both, so the negative
+half — the more important of the two, since it is what `NoVerifier` got wrong —
+rested on a quotation with nothing behind it.
 
 The pool was chosen deliberately: port 9999 *is* in `TLS_PORTS`, and its
 certificate is genuinely expired (Let's Encrypt, `CN=monerohash.com`, expired
@@ -5525,6 +5530,17 @@ not valid after 1786403646 (3112612 seconds ago)
 
 `NoVerifier` accepted this certificate silently for the project's whole life.
 
+Precision about the in-memory tests, since the two rejections differ: the live
+rejection above is on **expiry**. The fixture test's rejection is
+`CaUsedAsEndEntity` — webpki refuses a `CA:TRUE` certificate presented as an
+end-entity *before* it reaches trust chain or hostname, which are the grounds the
+survey table names for the self-signed pools. The fixture is an `openssl req
+-x509` default and was described as having "the exact shape of the real article";
+its subject matches, but that the real supportxmr certificate fails on the same
+ground is **not** established — that host was unreachable from here. The
+mutation test is unaffected (it still fails when the default is loosened), but
+the claim of fidelity is narrower than it was written.
+
 **Positive half — the same certificate, pinned, mined for six hours:**
 
 | | |
@@ -5537,6 +5553,13 @@ not valid after 1786403646 (3112612 seconds ago)
 | **Plain-TCP fallbacks** | **0** |
 | Unplanned disconnects | **0** |
 | Hashrate, 10 min avg | median **2267.4 H/s**, range 2090.8-2333.1, n=2098 |
+
+n=2098 is every `10m:` sample after the first 59, discarded because 59 x 10 s is
+the averaging window still filling — the same convention as LIVE-01, stated here
+because it was not. The 355 found against 354 accepted is one submission
+unanswered when SIGINT arrived, not a rejection; peak concurrent outstanding
+reached 3, so GitHub #17 (responses carry no identifier) was live throughout this
+run too.
 
 Each donation rotation is a full re-login, so the pin was re-checked **ten
 times** against a certificate standard verification refuses, and accepted the
@@ -5563,14 +5586,18 @@ entries; `sysctl hw.memsize` reports **32 GB** (Mac14,5, 12 cores). No
 measurement is affected — every memory figure in this file was measured with
 `/usr/bin/time -l` or `ps` rather than derived from the total — but the figure
 itself is wrong and is corrected here rather than in the merged entries that
-carry it, which are append-only. The tests exercise the verifier's decision logic with synthetic
-DER, not a TLS handshake, so what is proven is the policy rather than its
-behaviour on the wire. The live run recorded in LIVE-01 used
-`monerohash.com:2222` over **plain TCP**, so the TLS path in this codebase has
-never been exercised against a pool at all — before or after this change. That
-gap predates this work and is not closed by it. A live check against a pinned
-self-signed pool and against a normally-verifying pool is the remaining
-verification.
+carry it, which are append-only.
+
+**A self-contradiction this entry carried, and how it got here.** The paragraph
+that used to follow began *"Still not verified, and it matters: no connection to
+a real pool was made with this build"*, and went on to say the TLS path "has
+never been exercised against a pool at all — before or after this change". When
+the live results landed, the **heading was deleted and the body was not** — so
+the entry simultaneously announced "Verified live" twenty lines above and denied
+it here, welded mid-sentence onto the hardware correction. Round 3 found it; it
+is `CLAUDE.md` item 6, the half-corrected claim, which this project has now
+produced at least four times. Removed rather than rewritten, because what it
+said is superseded in full by the run recorded above.
 
 **Round 2 also returned NOT MERGEABLE, four majors, all actioned.** Its sharpest
 finding is that **round 1's major #5 was only half-closed, and this entry said
@@ -5648,3 +5675,32 @@ different failure class from the one this entry is about. Certificate
 verification decides **who** you are talking to; this decides **when** a message
 is legitimate. Having fixed one, it would be easy to assume the other was covered.
 
+**Round 3: one major, and the coverage confirmed genuine.** It break-tested at
+the **production wiring** rather than the helper — the mutation that defeated
+both earlier attempts — and both handshake tests failed. It confirmed
+`with_tls_fingerprint` is the only production `ClientConfig::builder()` site, so
+there is no second wiring the mutation could miss, and that the pinned-accept
+test is not vacuous (disabling pinning kills it). It re-derived **all eleven**
+live-run figures exactly, and confirmed `LIVE6H_TLS_RUN.log` is byte-identical to
+the raw scratchpad log. After three attempts, the coverage holds.
+
+Its major is recorded above: a deleted heading left its body behind, so the entry
+announced "Verified live" and denied it twenty lines later. Minors fixed with it:
+"nine tests" was eight; `CLAUDE.md` still carried the pre-round-2 test counts; the
+PR body said twenty-one new tests when there are twenty; the n=2098 filter was
+unstated; 355 found against 354 accepted is one submission unanswered at SIGINT,
+with peak concurrency 3 — so **GitHub #17 was live during this run too**; the
+live logs were missing from the files-changed list; and the fixture's rejection
+ground is `CaUsedAsEndEntity`, not the chain-and-hostname failure the survey
+table names, so "the exact shape of the real article" was narrowed to what is
+actually established.
+
+One more instance of this repo's signature defect, worth naming because it is now
+at least the fourth: **an orphaned doc comment.** The handshake helper was spliced
+in *under* the doc block belonging to another test, stranding text that described
+a design ("generating one would mean vendoring a certificate builder") twelve
+lines above the fixture that disproves it. Both functions now carry their own.
+
+**Review:** three rounds, `pr-reviewer`, the first two NOT MERGEABLE and the
+third mergeable once its major is closed. Ledger: `REVIEW_PR22.md`, retrieval sha
+recorded at strip time below.

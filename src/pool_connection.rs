@@ -918,34 +918,19 @@ mod tls_tests {
         assert!(parse_cert_fingerprint(&bad).is_none());
     }
 
-    /// The regression review caught: replacing the default arm with an
-    /// accept-anything verifier left all 148 tests green, because every test
-    /// written for this change exercised the *pinning* path. The property that
-    /// matters most — that an unpinned connection rejects a certificate it
-    /// cannot validate — had no coverage.
-    ///
-    /// This asserts a rejection, so it fails if the default is ever loosened.
-    /// It uses input WebPKI cannot accept rather than a well-formed self-signed
-    /// certificate, because generating one would mean vendoring a certificate
-    /// builder; the stronger check — a real `CN=mining.pool` self-signed cert
-    /// rejected inside a live handshake against `openssl s_server` — was run by
-    /// review and is recorded in SEC-02.
     /// Drive a **real TLS handshake** against the config the connection actually
     /// uses, in memory — no sockets, no ports, no network.
     ///
-    /// This exists because two weaker attempts did not hold. Round 1 found that
-    /// swapping the default verifier for accept-anything left the suite green.
-    /// The fix tested `server_verifier(None)` — a helper — and round 2 showed the
-    /// same mutation applied to the *wiring* still passed. Collapsing the two
-    /// call sites into one did not close it either: a mutation at the call site
-    /// simply bypasses the helper the test holds.
+    /// Two weaker attempts did not hold. Round 1 found that swapping the default
+    /// verifier for accept-anything left the suite green. The fix tested
+    /// `server_verifier(None)` — a helper — and round 2 showed the same mutation
+    /// applied to the *wiring* still passed. Collapsing the two call sites into
+    /// one did not close it either: a mutation at the call site simply bypasses
+    /// the helper the test holds.
     ///
     /// No structural trick can close that gap, because nothing can inspect a
     /// built `ClientConfig` to learn what it will accept. Only exercising it
-    /// can. The certificate is a fixture with the exact shape of the real
-    /// article — `C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.pool`, the
-    /// stock pool-daemon certificate — valid for a century so the test cannot
-    /// rot.
+    /// can.
     fn handshake_against_self_signed(fingerprint: Option<CertFingerprint>) -> Result<(), rustls::Error> {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -1022,6 +1007,10 @@ mod tls_tests {
             .expect_err("a certificate that is not the pinned one must be rejected");
     }
 
+    /// A cheap companion to the handshake tests: the default verifier must reject
+    /// input it cannot validate at all. Kept because it fails fast and names the
+    /// property in one line; the handshake tests are what actually prove the
+    /// wiring.
     #[test]
     fn the_default_verifier_rejects_what_it_cannot_validate() {
         let verifier = server_verifier(None);

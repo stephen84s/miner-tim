@@ -1,0 +1,12 @@
+=== MinerTim TLS negative test — default verification against a real pool ===
+date   : 2026-09-16T09:58:38Z UTC
+commit : 38e50e8 (security/tls-verify)
+pool   : monerohash.com:9999   (TLS port; Let's Encrypt cert, expired 2026-08-10)
+pin    : NONE — this is the point. NoVerifier accepted this certificate
+         silently for the project's whole life.
+expect : the connection must FAIL on certificate expiry.
+==============================================================
+[2026-09-16T09:58:38Z INFO  minertim] Connecting to monerohash.com:9999...
+[2026-09-16T09:58:38Z INFO  minertim::pool_connection] Connecting to pool: monerohash.com:9999
+[2026-09-16T09:58:38Z INFO  minertim::pool_connection] Connected to pool (TLS): monerohash.com:9999
+Failed to initialize: Login failed: Write failed: invalid peer certificate: certificate expired: verification time 1789552718 (UNIX), but certificate is not valid after 1786403646 (3149072 seconds ago)

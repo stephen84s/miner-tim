@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use minertim::donate;
+use minertim::pool_connection::{parse_cert_fingerprint, CertFingerprint};
 use minertim::miner::Miner;
 
 fn main() {
@@ -17,10 +18,12 @@ fn main() {
         eprintln!("MinerTim - Monero (XMR) CPU miner (pure Rust, rx/0 full mode)");
         eprintln!();
         eprintln!("Usage: {} <pool:port> <wallet> [threads] [--donate-level N] [--native-loop on|off]", args[0]);
+        eprintln!("       {:width$}  [--verify-shares on|off] [--tls-fingerprint <sha256-hex>]", "", width = args[0].len());
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} pool.supportxmr.com:443 4...address 4", args[0]);
         eprintln!("  {} pool.hashvault.pro:443 4...address --donate-level 1", args[0]);
+        eprintln!("  {} pool.supportxmr.com:443 4...address --tls-fingerprint a1b2...  # self-signed pool", args[0]);
         eprintln!();
         eprintln!("Arguments:");
         eprintln!("  pool:port    Mining pool address with port (TLS auto-detected)");
@@ -33,6 +36,27 @@ fn main() {
         eprintln!("  --donate-level N  Percent of mining time donated (default: {}, min: {}).",
             donate::DEFAULT_DONATE_LEVEL, donate::MIN_DONATE_LEVEL);
         eprintln!("                    Split 50/50 between the MinerTim author and XMRig.");
+        eprintln!("  --tls-fingerprint <sha256-hex>");
+        eprintln!("                    Pin the pool's TLS certificate by its SHA-256 fingerprint,");
+        eprintln!("                    64 hex characters (colons optional). Also settable via");
+        eprintln!("                    MINERTIM_TLS_FINGERPRINT.");
+        eprintln!();
+        eprintln!("                    By DEFAULT, certificates are fully verified: trust chain,");
+        eprintln!("                    hostname and expiry. Use a pin only for pools that cannot");
+        eprintln!("                    satisfy that — several Monero pools ship a self-signed");
+        eprintln!("                    certificate named CN=mining.pool or CN=mining.proxy, which");
+        eprintln!("                    fails on both trust and hostname. A pin still authenticates:");
+        eprintln!("                    it accepts that one certificate and rejects a substitute.");
+        eprintln!();
+        eprintln!("                    Read a pool's fingerprint with:");
+        eprintln!("                      openssl s_client -connect <host>:<port> -servername <host> \\");
+        eprintln!("                        </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256");
+        eprintln!();
+        eprintln!("                    Two caveats. You are trusting whatever you saw the first");
+        eprintln!("                    time, so read it from a network you trust. And a pin breaks");
+        eprintln!("                    when the pool renews — expected for Let's Encrypt pools,");
+        eprintln!("                    which rotate every ~90 days; self-signed pool certs");
+        eprintln!("                    typically never do.");
         eprintln!("  --native-loop on|off  Use the native-loop JIT (default: on). Also settable");
         eprintln!("                    via MINERTIM_NATIVE_LOOP=0/1. This is a fallback switch:");
         eprintln!("                    if shares start being rejected, turn it off and restart to");
@@ -59,6 +83,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(minertim::miner::recommended_thread_count);
     let donate_level = parse_donate_level(&args);
+    let tls_fingerprint = match parse_tls_fingerprint(&args) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     let native_loop = parse_native_loop(&args);
     let verify_shares = parse_verify_shares(&args);
 
@@ -121,7 +152,7 @@ fn main() {
     );
 
     log::info!("Connecting to {}...", pool);
-    if let Err(e) = miner.initialize(pool, wallet, threads, donate_level) {
+    if let Err(e) = miner.initialize(pool, wallet, threads, donate_level, tls_fingerprint) {
         eprintln!("Failed to initialize: {}", e);
         std::process::exit(1);
     }
@@ -240,6 +271,105 @@ fn parse_donate_level(args: &[String]) -> u8 {
         i += 1;
     }
     donate::clamp_level(level)
+}
+
+/// Parse `--tls-fingerprint <hex>`, falling back to `MINERTIM_TLS_FINGERPRINT`.
+///
+/// Returns `Err` on a malformed value rather than ignoring it. A pin is a
+/// security control the operator deliberately asked for: silently dropping an
+/// unparseable one would connect *without* the protection they believe they
+/// configured, which is the worst of both outcomes. An absent value is fine and
+/// means standard verification.
+fn parse_tls_fingerprint(args: &[String]) -> Result<Option<CertFingerprint>, String> {
+    parse_tls_fingerprint_with(args, std::env::var("MINERTIM_TLS_FINGERPRINT").ok().as_deref())
+}
+
+/// The testable half, so the environment variable can be supplied directly.
+///
+/// Empty-value handling follows `parse_switch_with`'s rule — a later source
+/// wins, but an *empty* or absent value declines to have an opinion rather than
+/// erasing one already resolved. It is not identical to that function and the
+/// claim that it "matches" was withdrawn after review: `parse_switch_with`
+/// resolves a bare flag at the end of argv to its fail-safe value, overriding
+/// the environment, whereas a bare flag here declines; and a malformed
+/// environment value aborts startup here before argv could override it. Both
+/// differences are deliberate — a pin has no safe default to fall back to, and a
+/// malformed one must not be silently discarded. Without the `.or(resolved)`
+/// below, `MINERTIM_TLS_FINGERPRINT=<pin> minertim … --tls-fingerprint ""` would
+/// silently drop the pin and connect with ordinary verification — the operator
+/// believing they were pinned. That is R10-F2, the same defect this file already
+/// documents for `--native-loop`, and review found it had been reintroduced here.
+/// Both empty forms warn, because silently ignoring part of a security setting is
+/// exactly what must not happen quietly.
+fn parse_tls_fingerprint_with(
+    args: &[String],
+    env_value: Option<&str>,
+) -> Result<Option<CertFingerprint>, String> {
+    let parse = |v: &str| -> Result<Option<CertFingerprint>, String> {
+        if v.trim().is_empty() {
+            return Ok(None);
+        }
+        parse_cert_fingerprint(v.trim()).map(Some).ok_or_else(|| {
+            format!(
+                "--tls-fingerprint: expected 64 hex characters (SHA-256), got {:?}.\n\
+                 Read a pool's fingerprint with:\n  \
+                 openssl s_client -connect <host>:<port> -servername <host> </dev/null \\\n    \
+                 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n\
+                 Paste only the hex after the '=' — colons are fine, the label is not.",
+                v.trim()
+            )
+        })
+    };
+
+    let mut resolved: Option<CertFingerprint> = match env_value {
+        Some(v) if v.trim().is_empty() => {
+            eprintln!(
+                "WARNING: MINERTIM_TLS_FINGERPRINT is set but empty; ignoring it. \
+                 The pool's certificate will be verified normally."
+            );
+            None
+        }
+        Some(v) => parse(v)?,
+        None => None,
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        let value: Option<&str> = if let Some(v) = args[i].strip_prefix("--tls-fingerprint=") {
+            Some(v)
+        } else if args[i] == "--tls-fingerprint" {
+            i += 1;
+            match args.get(i) {
+                Some(v) => Some(v.as_str()),
+                None => {
+                    eprintln!(
+                        "WARNING: --tls-fingerprint given with no value; ignoring it. Any pin set \
+                         earlier on the command line, or in MINERTIM_TLS_FINGERPRINT, \
+                         still applies; if neither is set the certificate is verified \
+                         normally."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(v) = value {
+            if v.trim().is_empty() {
+                eprintln!(
+                    "WARNING: --tls-fingerprint given an empty value; ignoring it. Any pin set \
+                     earlier on the command line, or in MINERTIM_TLS_FINGERPRINT, still \
+                     applies; if neither is set the certificate is verified normally."
+                );
+            }
+            // `.or(resolved)` is the load-bearing part: an empty value must not
+            // erase a pin resolved from the environment.
+            resolved = parse(v)?.or(resolved);
+        }
+        i += 1;
+    }
+    Ok(resolved)
 }
 
 /// Resolve an `--flag on|off` switch with an environment-variable fallback.
@@ -425,6 +555,96 @@ fn format_duration(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // --- --tls-fingerprint -----------------------------------------------
+    // This function was split from `parse_tls_fingerprint` "so the environment
+    // variable can be supplied directly" — and then had no tests, while
+    // `parse_switch_with`, which solves the identical problem, has ten. Review
+    // verified the behaviour by hand against the built binary; these pin it.
+
+    const FP: &str = "3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420";
+    const FP2: &str = "bdd5fe3031d2729cb79dc027441988f7b4c6a2c0258e0d382f7eb1a308890c7d";
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tls_fingerprint_absent_means_normal_verification() {
+        assert_eq!(parse_tls_fingerprint_with(&argv(&[]), None), Ok(None));
+    }
+
+    #[test]
+    fn tls_fingerprint_env_is_used_when_no_flag_is_given() {
+        let got = parse_tls_fingerprint_with(&argv(&[]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
+    #[test]
+    fn tls_fingerprint_flag_overrides_env_and_the_last_flag_wins() {
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", FP2]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "argv must win over the environment");
+
+        let got = parse_tls_fingerprint_with(
+            &argv(&["--tls-fingerprint", FP, "--tls-fingerprint", FP2]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "the last flag must win");
+    }
+
+    /// R10-F2, the defect this repo has now hit twice: an empty value must
+    /// *decline* rather than erase. Silently dropping a pin connects without the
+    /// protection the operator believes they configured.
+    #[test]
+    fn an_empty_value_never_erases_a_pin() {
+        let got =
+            parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", ""]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP), "empty argv must not erase the env pin");
+
+        let got = parse_tls_fingerprint_with(
+            &argv(&["--tls-fingerprint", FP2, "--tls-fingerprint", ""]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP2), "empty argv must not erase an earlier flag");
+
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint="]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP), "empty --flag= must not erase either");
+    }
+
+    #[test]
+    fn a_bare_flag_at_the_end_declines_rather_than_erasing() {
+        let got =
+            parse_tls_fingerprint_with(&argv(&["--tls-fingerprint"]), Some(FP)).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
+    /// A bare flag must not swallow the argument after it when that argument is
+    /// another flag — otherwise `--tls-fingerprint --donate-level 1` would
+    /// consume `--donate-level` and silently change two settings.
+    #[test]
+    fn a_bare_flag_followed_by_another_flag_is_an_error_not_a_silent_swallow() {
+        let r = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", "--donate-level"]), None);
+        assert!(r.is_err(), "'--donate-level' is not a fingerprint and must be rejected");
+    }
+
+    #[test]
+    fn a_malformed_value_is_an_error_with_the_openssl_recipe() {
+        let e = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", "nope"]), None)
+            .expect_err("must reject");
+        assert!(e.contains("64 hex"), "should say what was expected: {e}");
+        assert!(e.contains("openssl"), "should tell the operator how to read one: {e}");
+    }
+
+    #[test]
+    fn colons_and_case_survive_the_cli_path() {
+        let spaced = FP.to_uppercase();
+        let got = parse_tls_fingerprint_with(&argv(&["--tls-fingerprint", &spaced]), None).unwrap();
+        assert_eq!(got, parse_cert_fingerprint(FP));
+    }
+
     use super::{parse_native_loop, parse_switch_with, parse_verify_shares, startup_state_line};
 
     fn args(extra: &[&str]) -> Vec<String> {

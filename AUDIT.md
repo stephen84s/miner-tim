@@ -5345,3 +5345,426 @@ armed, the receiver cleared, and the log internally consistent 2,877 of 2,877
 recomputed from a running tally. Round 3 verified the resolution of all round 2
 majors and minors. Under LEDGER-01, `REVIEW_PR16.md` is removed before merge; its
 retrieval sha on this branch is `48351c2` (`git show 48351c2:REVIEW_PR16.md`).
+
+### SEC-02 (2026-09-13): TLS pool connections authenticated by default (GitHub #20)
+
+`PoolConnection::new` built its rustls config with
+`.dangerous().with_custom_certificate_verifier(Arc::new(NoVerifier))`, accepting
+every certificate. TLS encrypted the traffic and authenticated nothing, so an
+active network attacker could impersonate a pool and redirect the work.
+
+**Three findings from investigating first, each of which changed the fix.**
+
+**1. XMRig does not verify certificates either — at all.** The whole decision in
+`src/base/net/stratum/Tls.cpp` is
+`return fingerprint == nullptr || strncasecmp(m_fingerprint, fingerprint, 64) == 0;`
+— no `SSL_set_verify`, no `SSL_get_verify_result`, no chain, hostname or expiry
+check. With no fingerprint configured every certificate is accepted. So
+`NoVerifier` was a faithful translation of upstream, not a MinerTim defect. Worth
+stating because it removes "parity with XMRig" as an argument for keeping it.
+
+**2. The issue's premise — pools use expired certificates — is one case in
+five.** Surveyed the advertised TLS ports on 2026-09-13:
+
+| pool | certificate | why standard validation fails |
+|---|---|---|
+| `pool.supportxmr.com:443` | self-signed, CN=mining.pool, valid to 2126 | trust chain **and** hostname |
+| `gulf.moneroocean.stream:20128` | self-signed, CN=mining.proxy, valid to 2117 | trust chain **and** hostname |
+| `xmr.2miners.com:12222` | no TLS on that port | — |
+| `pool.hashvault.pro:443` | no TLS on that port | — |
+| `monerohash.com:9999` | real Let's Encrypt, correct CN, expired 2026-08-10 | expiry only |
+
+The dominant pattern is **self-signed certificates with placeholder hostnames**.
+Both carry the identical subject `C=IT, ST=Pool, L=Daemon, O=Mining Pool` — the
+stock certificate shipped with pool daemon software, never replaced — and are
+valid for a century, so expiry is deliberately a non-issue for them.
+
+This **ruled out the obvious narrow fix**. An "allow expired but otherwise valid"
+exception rescues monerohash and nothing else: the two self-signed pools fail on
+trust *and* hostname regardless of dates. It would have weakened the default for
+every pool to buy one in five.
+
+**3. `webpki-roots` was already a dependency and had never been used.**
+`Cargo.toml:20` pulled it in; `grep -rn webpki_roots src/` returned nothing. The
+machinery for proper validation was already vendored and paid for, and simply
+bypassed.
+
+**What changed.** Default is now `WebPkiServerVerifier` over that root store —
+chain, hostname and expiry all checked, no configuration required. The opt-in is
+SHA-256 certificate pinning via `--tls-fingerprint` / `MINERTIM_TLS_FINGERPRINT` /
+`TLS_FINGERPRINT`, matching XMRig's `tls-fingerprint` so a pinned value is
+portable between the two miners.
+
+**Pinning was chosen over an "insecure mode" toggle because it authenticates.**
+A pin says "accept exactly this certificate", so a substituted certificate fails
+— which is precisely what a blanket bypass cannot detect. It is the only
+mechanism that gives the self-signed pools a real guarantee rather than a waiver.
+
+**A second defect found while reading `NoVerifier`, not mentioned in the issue.**
+It also stubbed `verify_tls12_signature` and `verify_tls13_signature` to
+`assertion()`. That is worse than accepting the certificate: the handshake
+signature went unchecked too, so there was no proof the peer even held the
+private key for the certificate it presented. `PinnedCertVerifier` **delegates
+both to the real WebPKI verifier**, so pinning narrows which certificate is
+acceptable without weakening the handshake.
+
+**Failure modes chosen deliberately.**
+
+- A verifier that cannot be built **panics** rather than falling back. A silent
+  downgrade to "accept anything" on an error is how a security control stops
+  existing without anyone noticing — which is the state this entry is fixing.
+- A malformed `--tls-fingerprint` **exits 2 with the openssl command to read a
+  correct one**, rather than being ignored. Dropping an unparseable pin would
+  connect *without* the protection the operator believes they configured.
+- An empty value is treated as absent, matching how the on/off switches handle
+  `--flag "$UNSET_VAR"`, so an unset shell variable cannot become a hard failure.
+- Pinning logs at `warn!` that chain, hostname and expiry are not checked for
+  that pool, so the narrowing is visible in the log rather than implicit.
+
+**Files changed:** `src/pool_connection.rs` (verifier replaced, constructor,
+`parse_cert_fingerprint`, tests), `src/miner.rs` (`initialize` threads the
+fingerprint), `src/bin/minertim.rs` (`parse_tls_fingerprint`, help text),
+`Cargo.toml` (`ring` named directly — already in the tree via rustls's ring
+provider, so no new code enters the dependency graph), `Makefile`
+(`TLS_FINGERPRINT` passthrough), `src/hex.rs` (reject non-ASCII before slicing),
+`tests/fixtures/` (a self-signed certificate and key for the handshake tests),
+`LIVE6H_TLS_RUN.log` and `LIVE6H_TLS_NEGATIVE.log` (the live evidence),
+`mining.conf.example`, `README.md` (a "Connecting securely to a pool" section
+written for operators), `AUDIT.md`.
+
+**Verification.** `cargo clippy --all-targets --release -- -D warnings` clean.
+Test counts and coverage are described under the review rounds below, which
+superseded them twice; the figures that were here (138 lib + 10 bin, "seven new
+tests") are left out rather than restated, because they went stale inside this
+entry twice. Original coverage: fingerprint parsing
+(plain, colon-separated as openssl prints it, case-insensitive, and rejection of
+truncated/over-long/non-hex values), that the default configuration builds a
+verifier with a non-empty set of signature schemes, and both pinning outcomes —
+a non-matching certificate rejected with an explanatory error, and the pinned
+certificate itself accepted.
+
+**Round 1 review returned NOT MERGEABLE with five majors, all actioned.** It also
+did the thing this entry had listed as unverified: exercised the TLS path inside
+**real handshakes** against a local `openssl s_server` holding a self-signed
+`CN=mining.pool` certificate — default rejected it (`CaUsedAsEndEntity`), the
+correct pin completed the handshake, a wrong pin was rejected with the
+explanatory error. That is the strongest evidence this change has.
+
+- **A pin could be silently inert while the log announced it.** TLS is inferred
+  from the port, and `gulf.moneroocean.stream:20128` — named in this repo's own
+  example config — is *not* in `TLS_PORTS` despite genuinely speaking TLS
+  (confirmed live by review). The observed sequence was
+  `WARN TLS: pinned to certificate X` followed two lines later by
+  `Connected to pool (plain TCP)`. The operator is told they are authenticated
+  while nothing is, which is worse than not offering pinning. `connect` now
+  **refuses** that combination and names both remedies.
+- **An environment pin could be silently erased.** `--tls-fingerprint ""`, and a
+  bare `--tls-fingerprint` at the end of argv, both discarded
+  `MINERTIM_TLS_FINGERPRINT` with no warning. This is **R10-F2 recurring in the
+  file that documents it** — `parse_switch_with` solved exactly this with
+  `.or(value)` plus a warning. Worse, this entry, the PR body and the code
+  comment all claimed the behaviour "matches how the on/off switches handle
+  `--flag "$UNSET_VAR"`", which review disproved side by side against the built
+  binary. Now genuinely mirrored, both empty forms warn, and the false claim is
+  withdrawn.
+- **`README.md` printed monerohash's fingerprint under `POOL=pool.supportxmr.com`.**
+  Review proved it by reading monerohash's certificate live and matching the
+  value byte for byte. An operator copying it would have hit the "treat this as a
+  possible interception" error on first run. The literal is removed rather than
+  corrected: a fingerprint must be read from the pool in hand, never copied from
+  documentation.
+- **The shipped quick-start pointed at a pool this change breaks.**
+  `POOL=pool.supportxmr.com:443` is self-signed per the survey, so the default
+  now rejects it — and neither this entry nor the task board said so. Both
+  `README.md` and `mining.conf.example` now flag it at the point of use.
+  Review could not re-reach that host and stated the finding as a disjunction:
+  either the quick-start is broken, or the survey is wrong and this entry's
+  justification with it. An earlier version of this paragraph resolved that to
+  "the first is true" **with no new measurement**, which is the kind of
+  unsupported promotion three rounds of review have now caught elsewhere in this
+  file. What is actually established: the survey read a self-signed
+  `CN=mining.pool` certificate from that host on 2026-09-13, and round 2 could
+  complete TCP but not a TLS handshake to it. Both are consistent with the
+  quick-start being broken; neither proves it. The documentation flags it either
+  way, which is correct under both branches.
+- **The default verifier had no test coverage at all.** Review replaced the
+  `None` arm with an accept-anything verifier and the whole suite stayed green —
+  all seven new tests exercised the *pinning* path. The verifier choice is now
+  factored into `server_verifier()` so a test can hold the default and assert it
+  rejects. **Break-tested twice**: the first mutation attempted here pinned
+  all-zeros, which rejects everything and therefore proved nothing — the test
+  passed and nearly closed the finding falsely. A true accept-anything mutation
+  fails it.
+
+Minors also fixed: `hex_decode` **panicked** on a non-ASCII fingerprint
+(`hex[i..i+2]` sliced inside a multi-byte character, exit 101 where this entry
+promised exit 2); the length test still passed with `!= 64` loosened to `< 2`,
+because `try_into()` was doing the real work, so it now sweeps the boundary; the
+`openssl` guidance said "paste what it prints" when the `SHA256 Fingerprint=`
+label survives colon-stripping; a `Makefile` comment referenced notes that do not
+exist; and the self-signed subject was transcribed wrong in a source comment.
+
+**Verified live, 2026-09-16 — this section previously said the opposite.** A
+6-hour run against `monerohash.com:9999` tested **both halves** of the change
+against a real pool, closing the gap every earlier revision of this entry had to
+declare open. Both halves have committed artifacts: `LIVE6H_TLS_RUN.log` for the 6-hour
+pinned run, and `LIVE6H_TLS_NEGATIVE.log` for the rejection. An earlier version
+of this paragraph cited only the first while describing both, so the negative
+half — the more important of the two, since it is what `NoVerifier` got wrong —
+rested on a quotation with nothing behind it.
+
+The pool was chosen deliberately: port 9999 *is* in `TLS_PORTS`, and its
+certificate is genuinely expired (Let's Encrypt, `CN=monerohash.com`, expired
+2026-08-10), so it exercises rejection and pinning on the same endpoint. Note
+that the previous live run (LIVE-01) used `monerohash.com:2222` — **plain TCP,
+not a TLS port** — so it exercised none of this code. Repeating that
+configuration would have proved nothing.
+
+**Negative half — the default rejects a real expired certificate:**
+
+```
+Failed to initialize: Login failed: Write failed: invalid peer certificate:
+certificate expired: verification time 1789516258 (UNIX), but certificate is
+not valid after 1786403646 (3112612 seconds ago)
+```
+
+`NoVerifier` accepted this certificate silently for the project's whole life.
+
+Precision about the in-memory tests, since the two rejections differ: the live
+rejection above is on **expiry**. The fixture test's rejection is
+`CaUsedAsEndEntity` — webpki refuses a `CA:TRUE` certificate presented as an
+end-entity *before* it reaches trust chain or hostname, which are the grounds the
+survey table names for the self-signed pools. The fixture is an `openssl req
+-x509` default and was described as having "the exact shape of the real article";
+its subject matches, but that the real supportxmr certificate fails on the same
+ground is **not** established — that host was unreachable from here. The
+mutation test is unaffected (it still fails when the default is loosened), but
+the claim of fidelity is narrower than it was written.
+
+**Positive half — the same certificate, pinned, mined for six hours:**
+
+| | |
+|---|---|
+| Shares | **354 accepted, 0 rejected, 0 withheld** (355 found) |
+| `ERROR` lines | **0** |
+| TLS connections established | **10** |
+| Logins over TLS | **10**, across **9** donation rotations |
+| Handshake / certificate failures | **0** |
+| **Plain-TCP fallbacks** | **0** |
+| Unplanned disconnects | **0** |
+| Hashrate, 10 min avg | median **2267.4 H/s**, range 2090.8-2333.1, n=2098 |
+
+n=2098 is every `10m:` sample after the first 59, discarded because 59 x 10 s is
+the averaging window still filling — the same convention as LIVE-01, stated here
+because it was not. The 355 found against 354 accepted is one submission
+unanswered when SIGINT arrived, not a rejection; peak concurrent outstanding
+reached 3, so GitHub #17 (responses carry no identifier) was live throughout this
+run too.
+
+Each donation rotation is a full re-login, so the pin was re-checked **ten
+times** against a certificate standard verification refuses, and accepted the
+right one every time. **Zero plain-TCP fallbacks** is the other number worth
+reading: it confirms nothing quietly downgraded out of TLS over six hours.
+
+Hashrate was marginally *higher* than LIVE-01's plain-TCP run (2267.4 vs 2226.9
+median), so TLS costs nothing measurable at four threads — though the two runs
+differ in pool and difficulty as well as transport, so that is an observation,
+not a controlled comparison.
+
+**What the run still does not establish.** The certificate never changed during
+it, so the documented failure mode — **a pin breaking on renewal** — could not
+occur and remains untested. `0 rejected` is cleaner than LIVE-01's single stale
+share, but that is job-rotation timing rather than evidence about TLS. Only one
+pool, one certificate, and the *self-signed* case (`CN=mining.pool`) was tested
+only in the in-memory handshake tests, never against the real supportxmr
+endpoint, which was unreachable from this host. And the run used 4 threads, not
+the 12-core default.
+
+**A correction to this repository's hardware record, noticed during the run.**
+`AUDIT.md` has described the development machine as a **96 GB** M2 Max in earlier
+entries; `sysctl hw.memsize` reports **32 GB** (Mac14,5, 12 cores). No
+measurement is affected — every memory figure in this file was measured with
+`/usr/bin/time -l` or `ps` rather than derived from the total — but the figure
+itself is wrong and is corrected here rather than in the merged entries that
+carry it, which are append-only.
+
+**A self-contradiction this entry carried, and how it got here.** The paragraph
+that used to follow began *"Still not verified, and it matters: no connection to
+a real pool was made with this build"*, and went on to say the TLS path "has
+never been exercised against a pool at all — before or after this change". When
+the live results landed, the **heading was deleted and the body was not** — so
+the entry simultaneously announced "Verified live" twenty lines above and denied
+it here, welded mid-sentence onto the hardware correction. Round 3 found it; it
+is `CLAUDE.md` item 6, the half-corrected claim, which this project has now
+produced at least four times. Removed rather than rewritten, because what it
+said is superseded in full by the run recorded above.
+
+**Round 2 also returned NOT MERGEABLE, four majors, all actioned.** Its sharpest
+finding is that **round 1's major #5 was only half-closed, and this entry said
+otherwise.** The fix tested `server_verifier(None)` — a helper — while round 1's
+mutation targeted the *wiring*. Re-applying it left `140 passed; 0 failed`, so
+the exact defect was still shippable green while this entry claimed
+"break-tested twice".
+
+It took **three** attempts to close, and the first two failures are worth
+recording because each looked like success:
+
+1. Testing the helper. The mutation bypasses the helper, so the test never sees
+   it.
+2. Collapsing the `match` to a single `server_verifier(fingerprint)` call site,
+   on the theory that one call site cannot be mutated inconsistently. It can: the
+   mutation simply replaces the argument at that call site, and the test still
+   holds the helper. Verified — the mutation passed again.
+3. **A real TLS handshake, in memory.** Nothing can inspect a built
+   `ClientConfig` to learn what it will accept, so no structural rearrangement
+   could have worked; only exercising it can. `tests/fixtures/` now carries a
+   self-signed certificate with the exact shape of the real article
+   (`C=IT, ST=Pool, L=Daemon, O=Mining Pool, CN=mining.pool`, valid 100 years so
+   it cannot rot), and three tests drive `ClientConnection` against
+   `ServerConnection` over in-memory buffers — no sockets, no ports, no network.
+   The mutation now fails two of them.
+
+That test also gives the change something it never had: **a completed handshake
+in which a pinned self-signed certificate is accepted.** Previously the only
+evidence pinning worked at all was round 1's external `openssl s_server` run,
+which is not reproducible in CI.
+
+- **The refusal guard sat behind `TcpStream::connect`**, so its test needed a
+  live TCP connection to `gulf.moneroocean.stream:20128`. That name has an A
+  record which blackholes, so the test took **75 seconds**, and with no route at
+  all it **fails** rather than skips — a third party's routing deciding a
+  verdict about our own code. The guard reads only `address`; it now runs before
+  the socket is opened, and the test takes 0.00 s.
+- **`parse_tls_fingerprint_with` had no tests**, despite being split out *for
+  testability* — while `parse_switch_with`, which solves the identical R10-F2
+  problem, has ten. Review confirmed all ten precedence cases by hand against the
+  binary; nine tests now pin them, including that a bare flag cannot swallow a
+  following `--donate-level`.
+- **The PR body was never updated**, while this entry claimed the false parity
+  statement had been "withdrawn" from all three places carrying it. It had been
+  withdrawn from two. **Third round-2 in this repo to find an un-updated PR
+  body.**
+
+Minors also fixed: the parity claim was still inexact even after withdrawal
+(`parse_switch_with` resolves a bare trailing flag to its fail-safe value and
+this declines; a malformed env value aborts here before argv can override — both
+deliberate, a pin having no safe default); the empty-value warnings named
+`MINERTIM_TLS_FINGERPRINT` as the survivor when an earlier flag may be; the
+README still said "paste what it prints" six lines above the correction; the
+`SHA256 Fingerprint=` example used the first three bytes of the very fingerprint
+removed as misattributed; the README config block grew inline `#` comments in a
+file the `Makefile` `-include`s; and the `hex_decode` comment credited operator
+paste when `parse_job` runs it on **pool-supplied** `blob`, `target` and
+`seed_hash` — so the panic was remotely reachable, and the fix is worth more than
+the route that found it.
+
+**RUSTSEC-2026-0285, folded in because it blocked the merge and is the same
+subsystem.** Published 2026-09-14, mid-review: *"TLS 1.3 handshake messages
+incorrectly accepted across encryption level boundaries"* in rustls itself,
+severity 5.3, fixed in 0.23.45. The `audit` job went red on this branch.
+
+It is **not caused by this change** — `main` pins the same 0.23.37 and is equally
+affected — but a PR hardening TLS cannot merge with an unpatched TLS advisory in
+its own dependency, so `Cargo.lock` moves to rustls 0.23.45 (and
+rustls-webpki 0.103.15 behind it). `cargo audit` clean, 143 lib + 18 bin tests
+pass, clippy clean.
+
+Worth recording that the advisory describes a flaw in *handshake state
+validation* — accepting messages across encryption-level boundaries — which is a
+different failure class from the one this entry is about. Certificate
+verification decides **who** you are talking to; this decides **when** a message
+is legitimate. Having fixed one, it would be easy to assume the other was covered.
+
+**Round 3: one major, and the coverage confirmed genuine.** It break-tested at
+the **production wiring** rather than the helper — the mutation that defeated
+both earlier attempts — and both handshake tests failed. It confirmed
+`with_tls_fingerprint` is the only production `ClientConfig::builder()` site, so
+there is no second wiring the mutation could miss, and that the pinned-accept
+test is not vacuous (disabling pinning kills it). It re-derived **all eleven**
+live-run figures exactly, and confirmed `LIVE6H_TLS_RUN.log` is byte-identical to
+the raw scratchpad log. After three attempts, the coverage holds.
+
+Its major is recorded above: a deleted heading left its body behind, so the entry
+announced "Verified live" and denied it twenty lines later. Minors fixed with it:
+"nine tests" was eight; `CLAUDE.md` still carried the pre-round-2 test counts; the
+PR body said twenty-one new tests when there are twenty; the n=2098 filter was
+unstated; 355 found against 354 accepted is one submission unanswered at SIGINT,
+with peak concurrency 3 — so **GitHub #17 was live during this run too**; the
+live logs were missing from the files-changed list; and the fixture's rejection
+ground is `CaUsedAsEndEntity`, not the chain-and-hostname failure the survey
+table names, so "the exact shape of the real article" was narrowed to what is
+actually established.
+
+One more instance of this repo's signature defect, worth naming because it is now
+at least the fourth: **an orphaned doc comment.** The handshake helper was spliced
+in *under* the doc block belonging to another test, stranding text that described
+a design ("generating one would mean vendoring a certificate builder") twelve
+lines above the fixture that disproves it. Both functions now carry their own.
+
+**Review:** **four rounds**, `pr-reviewer`, every one of which found something
+real — rounds 1, 2 and 4 returned NOT MERGEABLE, and round 3 mergeable only once
+its major was closed. Round 4 was scoped to a single 20-line pure function and
+still found that its caller-level test covered neither defect it claimed.
+
+**Ledger:** `REVIEW_PR22.md`, removed from the tree per LEDGER-01 and retrievable
+at **`c4fb96c`** — `git show c4fb96c:REVIEW_PR22.md`. That sha is in this branch's
+history, not `main`'s, because the repository squash-merges; it survives while
+the `security/tls-verify` ref does, which is why `delete_branch_on_merge` is
+`false`. This is the rule's first application to a code PR.
+
+**A second `hex.rs` defect, found by writing that module's first tests.** Asked
+how the test coverage looked, the honest answer was that `src/hex.rs` had **zero
+tests** — while carrying a panic fix made in this very change, on a function with
+four call sites in `pool_connection.rs` — the whole crate — three of them
+pool-supplied. Writing
+those tests immediately failed one:
+
+```
+assertion `left == right` failed
+  left: Some([1])      // hex_decode("+1")
+ right: None
+```
+
+`u8::from_str_radix` is a **number** parser and accepts a leading sign:
+`from_str_radix("+1", 16)` is `Ok(1)`. So `hex_decode` decoded `"+1"` as the byte
+`0x01` and `"+f"` as `0x0f` — accepting input that is not hex at all. Not
+introduced here; it has been reachable from pool-supplied `blob`, `target` and
+`seed_hash` for the project's life.
+
+`hex_decode` now decodes nibble by nibble over `as_bytes()`, which fixes both
+defects at once: no sign is accepted, and there is no byte-index slicing left to
+panic on a multi-byte character. **Five** tests cover it — round-trip over all
+256 byte values, case handling, odd length, non-hex, the sign cases, and six
+non-ASCII inputs, **three** of which pass the even-length check and only then
+straddle a character boundary. (An earlier version of this sentence said "seven
+tests" and "one" such input; the first overstated, the second understated, and
+both are corrected here in one edit rather than half of it.)
+
+`parse_job` gained a caller-level test, and **round 4 found its first version
+covered neither defect it claimed.** Both fixtures were odd-length — `"ff€ff"` is
+seven bytes, `"abc"` is three — so they only ever exercised the length check that
+every version of `hex_decode` has had. The test was green against both unfixed
+implementations while its assert message read "must be declined, not panic" of an
+input that never panicked, and this entry called it "the test that matters more
+than any of those". It was one character from being a real regression test.
+
+Corrected: `"ff€f"` is six bytes, so it passes the length check, reaches the
+byte-index slice and panics on the old code — verified by reverting `hex.rs` to
+`main` and watching the test fail with *"end byte index 4 is not a char boundary"*.
+A `"+f+f"` fixture was added alongside it, giving the **sign** defect its only
+caller-level coverage. The property still holds and is now actually tested: a
+malformed job is declined, leaving the previous job in force, rather than
+aborting the process.
+
+**Declined, but no longer silently.** Round 4 traced the decline path and
+confirmed the claim — `*current` is never written, so the previous job stands —
+but nothing was logged, so a pool sending only malformed jobs would pin the miner
+to stale work with no diagnostic. Stale work is precisely what a JIT fault looks
+like from the share-reject side, so the two would be indistinguishable in a log.
+A `warn!` now reports the decline and the offending field lengths.
+
+Worth stating as a process point rather than a code one: this defect had survived
+three review rounds on a PR that *edited the function*, and surfaced within
+minutes of the first test being written for it. The panic fix was reviewed; the
+module's total absence of tests was not remarked on by anyone, including me,
+until it was asked about directly.

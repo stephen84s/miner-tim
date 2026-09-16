@@ -18,6 +18,9 @@ log = "0.4.29"
 env_logger = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "1.0"
+# SHA-256 for TLS certificate pinning. Already in the tree via rustls's ring
+# provider; named here so the fingerprint check does not vendor a second hash.
+ring = "0.17"
 ctrlc = "3.4"
 
 [dev-dependencies]

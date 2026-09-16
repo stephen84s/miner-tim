@@ -164,6 +164,7 @@ impl Miner {
         wallet: &str,
         threads: u32,
         donate_level: u8,
+        tls_fingerprint: Option<crate::pool_connection::CertFingerprint>,
     ) -> Result<(), String> {
         let max_threads = thread::available_parallelism()
             .map(|n| n.get() as u32)
@@ -185,7 +186,10 @@ impl Miner {
             );
         }
 
-        let connection = Arc::new(PoolConnection::new(donate_level));
+        let connection = Arc::new(PoolConnection::with_tls_fingerprint(
+            donate_level,
+            tls_fingerprint,
+        ));
         connection.connect(pool).map_err(|e| format!("Connection failed: {}", e))?;
         connection.login(wallet).map_err(|e| format!("Login failed: {}", e))?;
         connection.start_receiver();

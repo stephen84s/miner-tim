@@ -866,7 +866,7 @@ emitter, no `vm.rs` native-loop path, no `benches/`, no `.github/workflows/`,
 | 4 | Live-run figures re-derived from the log | **PASS** — every figure reproduces |
 | 5 | rustls bump | **PASS** — 0.23.45, audit clean, nothing else moved |
 | 6 | Documentation / audit accuracy | **ONE MAJOR** + minors |
-| 7 | Concurrency / resource use | no change in scope |
+| 7 | Concurrency / resource use | **PASS** — reconnect loop unaffected by the hoist |
 
 Self-run: `cargo test --release` **161 passed, 2 ignored** (49 s);
 `cargo clippy --all-targets --release -- -D warnings` **clean**;
@@ -953,7 +953,7 @@ Both named tests break-tested:
 - bare flag made to decline when the next argv item starts with `--` →
   **`a_bare_flag_followed_by_another_flag_is_an_error_not_a_silent_swallow` FAILED**.
 
-Neither is vacuous. The eight (not nine — see R3-minor-4) cover env-only,
+Neither is vacuous. The eight (not nine — see R3-minor-10) cover env-only,
 argv-over-env, last-flag-wins, all three empty forms, bare-flag-at-end,
 malformed-with-recipe, and case/colon survival. The withdrawn `parse_switch_with`
 parity claim is now stated precisely and matches the code.
@@ -1047,6 +1047,19 @@ pool certificate, and the real endpoint is unreachable from this host, so
 "the exact shape of the real article" is not established. The test still
 discriminates (mutation A kills it), so this is precision, not coverage.
 
+**R3-minor-10 — `AUDIT.md` says "nine tests now pin them"; there are eight.**
+`tls_fingerprint_absent_means_normal_verification`, `…env_is_used…`,
+`…flag_overrides_env_and_the_last_flag_wins`, `an_empty_value_never_erases_a_pin`,
+`a_bare_flag_at_the_end_declines_rather_than_erasing`,
+`a_bare_flag_followed_by_another_flag_is_an_error_not_a_silent_swallow`,
+`a_malformed_value_is_an_error_with_the_openssl_recipe`,
+`colons_and_case_survive_the_cli_path`. Same class as R3-minor-7 and -8. Batch
+this into R3-MAJOR-1's edit so the lead makes one pass over `AUDIT.md`, not two —
+and while there, note that the Verification paragraph says the test counts are
+"left out rather than restated, because they went stale inside this entry twice"
+and the rustls paragraph then restates them as "143 lib + 18 bin" (the figures
+are correct; the entry is arguing with itself).
+
 **R3-minor-7 — `CLAUDE.md`'s SEC-02 row still says "138+10 tests".** The actual
 count is 143 lib + 18 bin. `AUDIT.md` deliberately dropped these figures because
 they went stale twice inside the entry; the task-board row kept the stale pair.
@@ -1065,6 +1078,18 @@ the self-signed case being test-only, and 4 threads not 12. All three items the
 brief asked about are stated clearly. The gap is R3-MAJOR-1: that honest
 paragraph is immediately followed by a stale one claiming far more is unverified
 than is true.
+
+## 7. Concurrency (R3-V6)
+
+The hoist changes `connect()`'s timing profile — a pinned/non-TLS-port failure
+now returns before any syscall rather than after one. Checked the only retry
+path: `reconnect()` (`pool_connection.rs:591`) sleeps `RECONNECT_DELAY` at the
+**top** of each iteration, before `connect`, so it paces itself independently of
+socket latency and the hoist cannot turn it into a hot loop. The case is also
+unreachable there: the address is fixed for the process, so a pin/port mismatch
+fails at startup and `main` exits — the ten connections in the live log are all
+to the same `monerohash.com:9999`. No worker, receiver or nonce behaviour is
+touched by this diff.
 
 ## Round 3 verdict
 

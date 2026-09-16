@@ -4,9 +4,9 @@ Cold `pr-reviewer`, 2026-09-17. Base `origin/main` = `f2abc1e`; head `06e240f`
 (branch contains `origin/main`, linear). Diff: `AUDIT.md`, `CLAUDE.md`,
 `src/pool_connection.rs`, +308 / -9.
 
-**Verdict: MERGEABLE.** No blockers, no majors, seven minors and two nits.
-Something is **ACTIONABLE** — items F1, F2, F6 and F7 are cheap and worth doing
-before merge.
+**Verdict: MERGEABLE.** No blockers, no majors, five minors and three nits.
+Something is **ACTIONABLE** — F1 (a line with no coverage), F2 (a test that
+spins instead of failing), F3/F4/F6 (one sentence each in AUDIT) and F7.
 
 ## Scope — nothing to hand off
 
@@ -88,9 +88,17 @@ red.** `a_newline_free_stream_is_refused_instead_of_buffered` has an uncapped
 O(n²): I measured **>19 min CPU and >3.2 GB RSS** still climbing before killing
 it. Only the socket test fails (at its 30 s timeout) and the run never reports
 a verdict — in CI that is a job timeout, not a failing test, and on the 7 GB
-`macos-14` runner an OOM risk. The PR and AUDIT both say the four mutations are
-"each caught"; true only in the sense that the suite eventually goes red. Cap
-the loop (e.g. `for _ in 0..(MAX_LINE_BYTES / chunk.len() + 2)` then fail).
+`macos-14` runner an OOM risk.
+
+Stated precisely: this is what **my** instantiation of that mutation —
+`const MAX_LINE_BYTES: usize = (1 << 20) * 1000;`, i.e. the 1000× raise as
+literally described — does. I did not reproduce the author's exact mutation and
+cannot say theirs did not go cleanly red (a smaller multiple would). The durable
+half is the test shape, not the arithmetic: `a_newline_free_stream_is_refused…`
+has an uncapped `loop` whose only exit is the production check firing, so any
+future weakening of that check turns the test into a spin rather than a failure.
+Cap the iterations (e.g. `for _ in 0..(MAX_LINE_BYTES / chunk.len() + 2)` then
+fail with a message).
 
 **F3 (minor) — complete lines drained alongside an overflow are silently
 discarded, and only a test doc comment says so.** `take_complete_lines` returns
@@ -103,9 +111,12 @@ job was discarded.
 
 **F4 (minor) — the ceiling is `MAX_LINE_BYTES + 4096`, not `MAX_LINE_BYTES`.**
 Issue #21's acceptance criterion is "no peer can make `pending` grow beyond the
-configured maximum". It can, by up to one read. Harmless, but it is a number in
-the record and it silently tracks `chunk`'s size if anyone grows that buffer.
-One sentence in AUDIT settles it.
+configured maximum". It can, by up to one read. Two conditions hold that ceiling and both are worth
+naming: `chunk` is 4096 bytes, **and** `take_complete_lines` is called after
+every single read — the second is what actually bounds it, since a read that did
+not re-check would let the remainder run on. Harmless today, but it is a number
+in the record and it tracks `chunk`'s size if anyone grows that buffer. One
+sentence in AUDIT settles it.
 
 **F5 (minor) — the two paths share the constant but not the semantics.** The
 doc comment says the value lives in one place "so the two cannot drift apart".
@@ -115,15 +126,18 @@ up to `MAX + 4096` to `handle_pool_message` — which is exactly what
 `a_large_but_terminated_message_is_accepted` asserts. Worth saying, since the
 comment currently reads as if the two paths enforce the same rule.
 
-**F6 (minor) — "`read_line` has **always** rejected input past 1 MiB" is not
-what the history says.** `git log -S "1 << 20" -- src/pool_connection.rs`
-returns exactly one commit, `bd96af3` (NET-01, 2026-07-25). Before it the file
-used std's `BufRead::read_line`, which is unbounded (`bd96af3^` has no such
-helper). So the bounded `read_line` and today's `receiver_loop` were introduced
-**by the same commit**, and only one of them got a cap. The asymmetry claim
-survives — it is arguably sharper this way — but "always" is wrong and this
-repo has been bitten before by a rhetorical adverb hardening into a fact in
-`AUDIT.md`.
+**F6 (nit, and it *strengthens* the entry rather than contradicting it) — the
+"always" claim checks out, and the history says something sharper.** I checked
+it because it is load-bearing: `git log -S "1 << 20" -- src/pool_connection.rs`
+returns exactly one commit, `bd96af3` (NET-01, 2026-07-25), and
+`git show bd96af3^:src/pool_connection.rs | grep "fn read_line"` is empty — the
+free `read_line` helper is *new* in that commit, the file having previously used
+std's `BufRead::read_line` at a different call site. So the helper has carried
+the 1 MiB cap for every commit of its existence: "always" is true of it. What
+the history adds is that the capped helper and today's `receiver_loop` were
+written **in the same commit**, so this was never drift — the asymmetry was
+present from birth. One sentence to that effect would make the AUDIT entry
+stronger. No correction needed.
 
 **F7 (minor) — the AUDIT entry's "Files changed" omits `CLAUDE.md`,** which the
 same commit edits (task-board row). Earlier entries list it explicitly, e.g.
@@ -179,8 +193,10 @@ clears before). No behavioural difference, since `reconnect() == false` returns.
 
 - No end-to-end run against a real pool (the PR says so itself).
 - The wiring test is **plain TCP by construction**, so the bound has never been
-  exercised over TLS. The logic is transport-independent because `read` is
-  capped by the 4096 chunk in both `PoolStream` arms, but rustls's own internal
-  plaintext buffering was not audited and is outside this bound.
+  exercised over TLS. This is *not* a gap in the fix: `PoolStream::read` caps at
+  `buf.len()` in both arms, so the bound on the miner's own `pending` is
+  transport-independent. What is unaudited is memory held **inside** rustls —
+  a different allocation, and not what #21 is about. Recorded so a later round
+  does not re-open it as a hole in this change.
 - I did not run `make verify-jit`: the diff touches no JIT code and both
   `jit-*` CI jobs are green on the PR head.

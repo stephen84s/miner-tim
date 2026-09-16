@@ -1061,6 +1061,104 @@ mod tls_tests {
         let _ = server.join();
     }
 
+    /// F1 from review: `pending.clear()` in the overflow arm had **no coverage**
+    /// — removing it while keeping `reconnect()` shipped green, because the
+    /// wiring test above only needs *a* second accept and `reconnect()` still
+    /// supplies one.
+    ///
+    /// The consequence of losing it is worse than the original defect. The
+    /// oversized remainder survives the reconnect, so the very next read
+    /// re-enters the overflow arm and reconnects again — forever, one cycle per
+    /// `RECONNECT_DELAY`, with the miner never doing any work. This asserts the
+    /// miner **settles**: after dropping the flood it reconnects exactly once and
+    /// stays connected while normal traffic flows.
+    /// F1 from review: `pending.clear()` in the overflow arm had **no coverage**
+    /// — removing it shipped green.
+    ///
+    /// Review predicted the consequence would be an infinite reconnect loop.
+    /// **That is not what happens, and this test was rewritten twice before it
+    /// measured anything.** Without the clear, the stale flood survives the
+    /// reconnect; the next read appends data that *does* contain a newline, so
+    /// `take_complete_lines` drains the whole megabyte-plus-message as a single
+    /// bogus line and the buffer self-clears. No second overflow, no loop.
+    ///
+    /// What is actually lost is that first real message: it arrives concatenated
+    /// onto a megabyte of `x`, cannot parse, and is silently swallowed. So the
+    /// observable is not "does it reconnect again" but **"does the first job
+    /// after a flood survive"** — asserted here through `get_work()`.
+    #[test]
+    fn the_first_job_after_a_flood_is_not_swallowed_by_the_stale_buffer() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+
+            // Flood, holding the socket open so the miner's own bound is the
+            // only thing that can end this connection.
+            let (mut sock, _) = listener.accept().expect("first accept");
+            let _ = tx.send(0);
+            let junk = vec![b'x'; 64 * 1024];
+            for _ in 0..24 {
+                if sock.write_all(&junk).is_err() {
+                    break;
+                }
+            }
+            let _ = sock.flush();
+            held.push(sock);
+
+            // The reconnect: answer the login, then send one real job.
+            let (mut sock, _) = listener.accept().expect("second accept");
+            let _ = tx.send(1);
+            let mut req = [0u8; 4096];
+            let _ = sock.read(&mut req);
+            let _ = sock.write_all(
+                b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"id\":\"sess\",\"status\":\"OK\"}}\n",
+            );
+            let _ = sock.write_all(
+                b"{\"jsonrpc\":\"2.0\",\"method\":\"job\",\"params\":{\"blob\":\"0f0f\",\
+                  \"target\":\"ffffffff\",\"job_id\":\"after-flood\",\"seed_hash\":\"abcd\"}}\n",
+            );
+            let _ = sock.flush();
+            thread::sleep(Duration::from_secs(3));
+            held.push(sock);
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(30)), Ok(1), "the flood is dropped");
+
+        // Give the job time to arrive and be applied.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = None;
+        while Instant::now() < deadline {
+            if let Some(job) = conn.get_work() {
+                seen = Some(job.job_id.clone());
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            seen.as_deref(),
+            Some("after-flood"),
+            "the first job after a flood must arrive intact; if the oversized buffer was not \
+             cleared it is prepended to this message, which then cannot parse and is lost"
+        );
+        let _ = server.join();
+    }
+
     // --- GitHub #21: the receive buffer must be bounded -------------------
 
     #[test]
@@ -1099,19 +1197,22 @@ mod tls_tests {
     fn a_newline_free_stream_is_refused_instead_of_buffered() {
         let mut pending = Vec::new();
         let chunk = vec![b'x'; 4096]; // the real read size
-        let mut fed = 0usize;
-        loop {
+        // Bounded deliberately. An open `loop` here looks harmless but is not:
+        // if a future change raises the limit, this test does not fail — it
+        // spins, rescanning an ever-growing buffer for a newline that never
+        // arrives (O(n^2)), and exhausts memory instead. Review measured >19
+        // minutes of CPU and >3.2 GB RSS still climbing against a 1000x limit,
+        // which on the 7 GB `macos-14` runner is an OOM rather than a verdict.
+        // Capping the feed at twice the limit turns that into a clean failure.
+        let max_iterations = (MAX_LINE_BYTES * 2) / chunk.len();
+        for _ in 0..max_iterations {
             pending.extend_from_slice(&chunk);
-            fed += chunk.len();
             match take_complete_lines(&mut pending) {
-                Ok(_) => {
-                    assert!(
-                        pending.len() <= MAX_LINE_BYTES,
-                        "buffer grew past the limit without being refused: {} bytes",
-                        pending.len()
-                    );
-                    assert!(fed <= MAX_LINE_BYTES + chunk.len(), "should have refused by now");
-                }
+                Ok(_) => assert!(
+                    pending.len() <= MAX_LINE_BYTES,
+                    "buffer grew past the limit without being refused: {} bytes",
+                    pending.len()
+                ),
                 Err(overflow) => {
                     assert!(overflow > MAX_LINE_BYTES);
                     // The caller clears and reconnects; the point is that it is
@@ -1120,6 +1221,10 @@ mod tls_tests {
                 }
             }
         }
+        panic!(
+            "fed {} bytes without being refused; the limit is not being enforced",
+            max_iterations * chunk.len()
+        );
     }
 
     #[test]

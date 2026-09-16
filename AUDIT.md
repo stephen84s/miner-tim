@@ -5701,9 +5701,16 @@ in *under* the doc block belonging to another test, stranding text that describe
 a design ("generating one would mean vendoring a certificate builder") twelve
 lines above the fixture that disproves it. Both functions now carry their own.
 
-**Review:** three rounds, `pr-reviewer`, the first two NOT MERGEABLE and the
-third mergeable once its major is closed. Ledger: `REVIEW_PR22.md`, retrieval sha
-recorded at strip time below.
+**Review:** **four rounds**, `pr-reviewer`, every one of which found something
+real — rounds 1, 2 and 4 returned NOT MERGEABLE, and round 3 mergeable only once
+its major was closed. Round 4 was scoped to a single 20-line pure function and
+still found that its caller-level test covered neither defect it claimed.
+
+**Ledger:** `REVIEW_PR22.md`, removed from the tree per LEDGER-01 and retrievable
+at **`c4fb96c`** — `git show c4fb96c:REVIEW_PR22.md`. That sha is in this branch's
+history, not `main`'s, because the repository squash-merges; it survives while
+the `security/tls-verify` ref does, which is why `delete_branch_on_merge` is
+`false`. This is the rule's first application to a code PR.
 
 **A second `hex.rs` defect, found by writing that module's first tests.** Asked
 how the test coverage looked, the honest answer was that `src/hex.rs` had **zero

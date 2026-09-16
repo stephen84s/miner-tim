@@ -866,6 +866,33 @@ mod tls_tests {
     /// contacts the network.
     const SAMPLE: &str = "3d587c824a6f6032e1767518f0f1db29cdf206ba29bd7cb1647f522f8ae3d420";
 
+    /// The reason the `hex_decode` fix matters beyond the CLI. `parse_job` runs
+    /// it on three pool-supplied fields, so before the fix a pool could abort
+    /// the miner by putting one non-ASCII byte in a job. A malformed job must be
+    /// *declined* — `None` — leaving the previous job in force, which is how the
+    /// receiver already handles anything it cannot parse.
+    #[test]
+    fn a_malformed_job_from_the_pool_is_declined_not_fatal() {
+        let good = serde_json::json!({
+            "blob": "0f0f", "target": "ffffffff",
+            "job_id": "j1", "seed_hash": "abcd",
+        });
+        assert!(parse_job(&good).is_some(), "the control case must parse");
+
+        for field in ["blob", "target", "seed_hash"] {
+            let mut hostile = good.clone();
+            hostile[field] = serde_json::json!("ff€ff");
+            assert!(
+                parse_job(&hostile).is_none(),
+                "a non-ASCII {field} must be declined, not panic"
+            );
+
+            let mut odd = good.clone();
+            odd[field] = serde_json::json!("abc");
+            assert!(parse_job(&odd).is_none(), "an odd-length {field} must be declined");
+        }
+    }
+
     #[test]
     fn parses_a_plain_hex_fingerprint() {
         let fp = parse_cert_fingerprint(SAMPLE).expect("should parse");

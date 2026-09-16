@@ -5704,3 +5704,39 @@ lines above the fixture that disproves it. Both functions now carry their own.
 **Review:** three rounds, `pr-reviewer`, the first two NOT MERGEABLE and the
 third mergeable once its major is closed. Ledger: `REVIEW_PR22.md`, retrieval sha
 recorded at strip time below.
+
+**A second `hex.rs` defect, found by writing that module's first tests.** Asked
+how the test coverage looked, the honest answer was that `src/hex.rs` had **zero
+tests** — while carrying a panic fix made in this very change, on a function with
+six call sites in `pool_connection.rs`, three of them pool-supplied. Writing
+those tests immediately failed one:
+
+```
+assertion `left == right` failed
+  left: Some([1])      // hex_decode("+1")
+ right: None
+```
+
+`u8::from_str_radix` is a **number** parser and accepts a leading sign:
+`from_str_radix("+1", 16)` is `Ok(1)`. So `hex_decode` decoded `"+1"` as the byte
+`0x01` and `"+f"` as `0x0f` — accepting input that is not hex at all. Not
+introduced here; it has been reachable from pool-supplied `blob`, `target` and
+`seed_hash` for the project's life.
+
+`hex_decode` now decodes nibble by nibble over `as_bytes()`, which fixes both
+defects at once: no sign is accepted, and there is no byte-index slicing left to
+panic on a multi-byte character. Seven tests cover it — round-trip over all 256
+byte values, case handling, odd length, non-hex, the sign cases, and six
+non-ASCII inputs including one whose length passes the even check and only then
+straddles a character boundary.
+
+`parse_job` gained the test that matters more than any of those: a job with a
+non-ASCII or odd-length `blob`, `target` or `seed_hash` must be **declined**,
+leaving the previous job in force, rather than aborting the process. That is the
+path a hostile or broken pool would actually take.
+
+Worth stating as a process point rather than a code one: this defect had survived
+three review rounds on a PR that *edited the function*, and surfaced within
+minutes of the first test being written for it. The panic fix was reviewed; the
+module's total absence of tests was not remarked on by anyone, including me,
+until it was asked about directly.

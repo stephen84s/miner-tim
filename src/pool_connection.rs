@@ -202,6 +202,19 @@ impl Write for PoolStream {
     }
 }
 
+/// Largest JSON-RPC line this miner will accept from a pool, in bytes.
+///
+/// Stratum messages are small — a job is a few hundred bytes — so a megabyte is
+/// generous by three orders of magnitude. The point is that it is *bounded*:
+/// without a limit, a peer that never sends a newline makes the receive buffer
+/// grow until the process is killed by memory pressure. No wrong hashes, no
+/// error, the miner simply dies.
+///
+/// `read_line` has always had this limit; the long-lived `receiver_loop` did
+/// not, which is the asymmetry GitHub #21 records. The value lives here so the
+/// two cannot drift apart.
+const MAX_LINE_BYTES: usize = 1 << 20;
+
 /// Well-known TLS ports for mining pools
 const TLS_PORTS: &[u16] = &[443, 993, 995, 3333, 9999, 14433];
 
@@ -538,13 +551,23 @@ impl PoolConnection {
                 }
                 Ok(n) => {
                     pending.extend_from_slice(&chunk[..n]);
-                    while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                        let line: Vec<u8> = pending.drain(..=pos).collect();
-                        let line = String::from_utf8_lossy(&line);
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            log::debug!("Pool recv: {}", line);
-                            self.handle_pool_message(line);
+                    match take_complete_lines(&mut pending) {
+                        Ok(lines) => {
+                            for line in lines {
+                                log::debug!("Pool recv: {}", line);
+                                self.handle_pool_message(&line);
+                            }
+                        }
+                        Err(overflow) => {
+                            log::error!(
+                                "Pool sent {overflow} bytes with no newline (limit \
+                                 {MAX_LINE_BYTES}). This is not a valid Stratum message; \
+                                 discarding the buffer and reconnecting."
+                            );
+                            pending.clear();
+                            if !self.reconnect() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -807,8 +830,10 @@ fn read_line(stream: &mut PoolStream) -> Result<String, String> {
                     break;
                 }
                 line.push(byte[0]);
-                if line.len() > 1 << 20 {
-                    return Err("Pool response line too long".into());
+                if line.len() > MAX_LINE_BYTES {
+                    return Err(format!(
+                        "pool response line exceeded {MAX_LINE_BYTES} bytes without a newline"
+                    ));
                 }
             }
             Err(e) => return Err(format!("Read failed: {}", e)),
@@ -834,6 +859,34 @@ fn boost_current_thread_priority() {
 
 #[cfg(not(target_os = "macos"))]
 fn boost_current_thread_priority() {}
+
+/// Take every complete line out of `pending`, leaving any partial one behind.
+///
+/// `Err(len)` means the remainder — which by construction is a single unfinished
+/// line — is already longer than [`MAX_LINE_BYTES`]. The caller discards the
+/// buffer and reconnects: a peer that has sent a megabyte without a newline is
+/// not speaking Stratum, and continuing to buffer is how an endless newline-free
+/// stream kills the process (GitHub #21).
+///
+/// Splitting messages across reads is normal and must keep working, which is why
+/// the check is on the *remainder after draining* rather than on the buffer as it
+/// arrives. Returning whole lines only is also what keeps a truncated message
+/// from ever reaching `handle_pool_message`, so an oversized message cannot leave
+/// a partial job active.
+fn take_complete_lines(pending: &mut Vec<u8>) -> Result<Vec<String>, usize> {
+    let mut lines = Vec::new();
+    while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+        let raw: Vec<u8> = pending.drain(..=pos).collect();
+        let line = String::from_utf8_lossy(&raw).trim().to_string();
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    if pending.len() > MAX_LINE_BYTES {
+        return Err(pending.len());
+    }
+    Ok(lines)
+}
 
 fn parse_job(data: &Value) -> Option<Job> {
     let blob_hex = data.get("blob")?.as_str()?;
@@ -933,6 +986,183 @@ mod tls_tests {
             odd[field] = serde_json::json!("abc");
             assert!(parse_job(&odd).is_none(), "an odd-length {field} must be declined");
         }
+    }
+
+    /// **The wiring test**, not just the helper. PR #22 taught this repo three
+    /// times that a test holding an extracted function passes happily while the
+    /// production call site is mutated away — so this drives the real
+    /// `receiver_loop` over a real socket.
+    ///
+    /// A local listener accepts, then sends a megabyte and a half with no
+    /// newline. If the buffer is bounded, the loop gives up on the stream and
+    /// calls `reconnect`, which the listener observes as a **second accept**. If
+    /// it is unbounded, the loop simply keeps buffering and no second connection
+    /// ever arrives.
+    ///
+    /// Hermetic: `127.0.0.1` on an ephemeral port — which is not in `TLS_PORTS`,
+    /// so this is plain TCP and no certificate is involved.
+    #[test]
+    fn the_receiver_loop_really_drops_a_newline_free_stream() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new(); // keep sockets alive — see below
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = tx.send(n as u8);
+                if n == 0 {
+                    // Flood: no newline, comfortably past the limit.
+                    let junk = vec![b'x'; 64 * 1024];
+                    for _ in 0..24 {
+                        if sock.write_all(&junk).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = sock.flush();
+                    // CRITICAL: hold this socket open. The first version of this
+                    // test let it drop here, which closed the connection — the
+                    // miner then saw EOF and reconnected, so the second accept
+                    // arrived for a reason with nothing to do with the buffer
+                    // bound. It passed against the unbounded implementation.
+                    // Now the only way a second connection happens is if the
+                    // *miner* gives up on the stream.
+                    held.push(sock);
+                } else {
+                    return;
+                }
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+        // reconnect() needs both recorded, or it bails without retrying.
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(30)),
+            Ok(1),
+            "the loop must drop a newline-free flood and reconnect; no second connection \
+             means it is still buffering, which is the defect this guards"
+        );
+        let _ = server.join();
+    }
+
+    // --- GitHub #21: the receive buffer must be bounded -------------------
+
+    #[test]
+    fn splitting_a_message_across_reads_still_parses() {
+        // The behaviour the limit must not break. Stratum messages routinely
+        // arrive in pieces, so a naive "reject anything without a newline"
+        // would break normal mining.
+        let mut pending = Vec::new();
+        pending.extend_from_slice(b"{\"id\":1,");
+        assert_eq!(take_complete_lines(&mut pending).unwrap(), Vec::<String>::new());
+        pending.extend_from_slice(b"\"x\":2}\n");
+        assert_eq!(
+            take_complete_lines(&mut pending).unwrap(),
+            vec!["{\"id\":1,\"x\":2}".to_string()]
+        );
+        assert!(pending.is_empty(), "a consumed line must leave nothing behind");
+    }
+
+    #[test]
+    fn several_lines_in_one_read_all_come_out_in_order() {
+        let mut pending = b"one\ntwo\nthree\n".to_vec();
+        assert_eq!(take_complete_lines(&mut pending).unwrap(), vec!["one", "two", "three"]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_partial_line_is_kept_for_the_next_read() {
+        let mut pending = b"done\npartial".to_vec();
+        assert_eq!(take_complete_lines(&mut pending).unwrap(), vec!["done"]);
+        assert_eq!(pending, b"partial", "the unfinished line must survive");
+    }
+
+    /// The regression. A peer that never sends a newline must be cut off rather
+    /// than buffered forever.
+    #[test]
+    fn a_newline_free_stream_is_refused_instead_of_buffered() {
+        let mut pending = Vec::new();
+        let chunk = vec![b'x'; 4096]; // the real read size
+        let mut fed = 0usize;
+        loop {
+            pending.extend_from_slice(&chunk);
+            fed += chunk.len();
+            match take_complete_lines(&mut pending) {
+                Ok(_) => {
+                    assert!(
+                        pending.len() <= MAX_LINE_BYTES,
+                        "buffer grew past the limit without being refused: {} bytes",
+                        pending.len()
+                    );
+                    assert!(fed <= MAX_LINE_BYTES + chunk.len(), "should have refused by now");
+                }
+                Err(overflow) => {
+                    assert!(overflow > MAX_LINE_BYTES);
+                    // The caller clears and reconnects; the point is that it is
+                    // told to, rather than the allocation continuing.
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_limit_is_exact_and_not_off_by_one() {
+        // At the limit: still acceptable, because a legitimate message could be
+        // exactly this long and its newline may be in the next read.
+        let mut at = vec![b'x'; MAX_LINE_BYTES];
+        assert!(take_complete_lines(&mut at).is_ok(), "exactly the limit must be allowed");
+        // One byte over: refused.
+        let mut over = vec![b'x'; MAX_LINE_BYTES + 1];
+        assert_eq!(take_complete_lines(&mut over), Err(MAX_LINE_BYTES + 1));
+    }
+
+    /// A huge *complete* message is fine — the limit is on an unfinished line,
+    /// not on throughput. Draining first is what makes this true.
+    #[test]
+    fn a_large_but_terminated_message_is_accepted() {
+        let mut pending = vec![b'x'; MAX_LINE_BYTES];
+        pending.push(b'\n');
+        pending.extend_from_slice(b"next");
+        let lines = take_complete_lines(&mut pending).expect("a terminated line is not an overflow");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), MAX_LINE_BYTES);
+        assert_eq!(pending, b"next");
+    }
+
+    /// What happens to a good line that arrives immediately before a flood: it
+    /// is **dropped**, because the overflow is reported instead of the drained
+    /// lines. That is deliberate — the caller is about to clear the buffer and
+    /// reconnect, so delivering one message from a peer being disconnected for
+    /// protocol abuse buys nothing and complicates the contract.
+    ///
+    /// The property that matters is the one this does guarantee: nothing
+    /// *partial* is ever delivered, so an oversized message cannot leave a
+    /// half-applied job. `handle_pool_message` only ever sees whole lines.
+    #[test]
+    fn a_good_line_before_a_flood_is_dropped_with_the_flood() {
+        let mut pending = b"{\"job_id\":\"real\"}\n".to_vec();
+        pending.extend_from_slice(&vec![b'x'; MAX_LINE_BYTES + 1]);
+        assert!(
+            take_complete_lines(&mut pending).is_err(),
+            "the oversized remainder must be reported even though a good line preceded it"
+        );
     }
 
     #[test]

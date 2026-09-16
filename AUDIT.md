@@ -5769,6 +5769,7 @@ minutes of the first test being written for it. The panic fix was reviewed; the
 module's total absence of tests was not remarked on by anyone, including me,
 until it was asked about directly.
 
+
 ### FIX-01 (2026-09-18): `DonationSchedule::level()` pinned (GitHub #25)
 
 The first real defect mutation testing found, one run after the tooling landed.
@@ -5861,3 +5862,72 @@ effect right, the mechanism as described wrong.
 **Ledger:** `REVIEW_PR26.md`, removed before merge per LEDGER-01 and retrievable
 at **`bbc3dc8`** — `git show bbc3dc8:REVIEW_PR26.md`. That sha is in
 this branch's history, not `main`'s, since the repo squash-merges.
+
+### SEC-03 (2026-09-17): the Stratum receive buffer is bounded (GitHub #21)
+
+`receiver_loop` appended every socket read to `pending` and drained only on a
+newline, with no ceiling. A pool — or anyone able to intercept the connection —
+could send an endless newline-free stream and grow that buffer until the process
+was killed by memory pressure. No wrong hashes, no error, no log: the miner
+simply dies.
+
+The asymmetry is what makes it a defect rather than an oversight. `read_line`
+has **always** rejected input past 1 MiB; the long-lived receiver path, which is
+where a hostile peer actually reaches, never did.
+
+**The fix.** One constant, `MAX_LINE_BYTES` (1 MiB), now used by both paths so
+they cannot drift. The check is on the buffer **after draining every complete
+line**, not on bytes as they arrive — because messages split across reads are
+normal and a naive "reject anything without a newline" would break ordinary
+mining. What remains after draining is by construction a single unfinished line;
+if that alone exceeds the limit, the peer is not speaking Stratum, so the buffer
+is discarded and the connection re-established.
+
+Discarding rather than truncating is deliberate: a truncated JSON line cannot
+parse, and keeping any part of it only risks pairing the tail of one message with
+the head of the next. The issue asked that an oversized message not leave a
+partial job active — it cannot, because `handle_pool_message` only ever receives
+whole lines.
+
+**Testing this properly took two attempts, and the first was worthless.**
+
+The decision was extracted into `take_complete_lines` so it could be tested, and
+seven tests cover it: reassembly across reads, several lines in one read, a
+trailing partial kept for next time, the exact limit boundary (at the limit is
+allowed, one byte over is not), a large *terminated* message still accepted, and
+a 4096-byte-chunk flood refused rather than buffered. Four mutations — removing
+the check, raising the limit 1000x, draining one line instead of all, and an
+off-by-one `>=` — are each caught.
+
+But PR #22 established three times over that **testing an extracted function is
+not testing the wiring**: the helper's tests pass happily while the production
+call site is mutated away. So a socket-level test drives the real `receiver_loop`
+against a local listener that floods 1.5 MB with no newline, and asserts the
+miner drops the stream and reconnects — observed as a **second accept**.
+
+**That test passed against the unbounded implementation.** The server thread let
+the flooding socket drop at the end of its scope, closing the connection; the
+miner saw EOF and reconnected, so the second accept arrived for a reason with
+nothing to do with the buffer bound. Holding the socket open makes a reconnect
+possible *only* if the miner gives up on the stream, and the test then fails
+against the unbounded wiring with the diagnostic it was written to produce.
+
+Recorded because the near-miss is the lesson: the test looked like it exercised
+the path, was green, and proved nothing — the same shape as PR #22's three
+failed attempts, arrived at independently one PR later.
+
+**Files changed:** `src/pool_connection.rs` (the constant, `read_line` using it,
+`take_complete_lines`, the bounded loop, eight tests), `AUDIT.md` (this entry).
+
+**Verification.** 157 lib + 18 bin tests, clippy `-D warnings` clean. Both the
+helper mutations and the wiring mutation are caught. The socket test is hermetic:
+`127.0.0.1` on an ephemeral port, which is not in `TLS_PORTS`, so it is plain TCP
+with no certificate involved; it takes ~5 s, bounded by `RECONNECT_DELAY`.
+
+**Not established.** No hostile pool was exercised end to end — the flood comes
+from a local listener, not a Stratum peer mid-session, so the interaction between
+a mid-job disconnect and the worker threads is unexercised. The 1 MiB value is
+inherited from `read_line` rather than derived from any measurement of real
+Stratum message sizes; it is three orders of magnitude above a job, which is
+generous, but no survey backs the specific number.
+

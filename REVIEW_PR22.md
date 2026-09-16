@@ -1111,3 +1111,183 @@ at all" twenty lines after recording six hours of doing exactly that. One edit.
 certificates (both unreachable from this host), so the survey table and the
 fixture's fidelity to it rest on the 2026-09-13 survey; and the negative half of
 the live run, which has no committed artifact.
+
+---
+
+# Round 4 — scope: commit `83a8d7e` only
+
+Fresh reviewer, cold. Reviewed `git diff 291a739..HEAD` and nothing else; the TLS
+work of rounds 1–3 was not re-reviewed. Nothing in the diff touches
+`src/randomx/jit/`, the emitter, `vm.rs`'s native-loop path, `benches/`,
+`.github/workflows/`, the `Makefile`, `scripts/` or `.cargo/config.toml`, so
+nothing is handed to `jit-reviewer` or `ci-reviewer`.
+
+## Coverage ledger
+
+| # | Item | Done | Outcome |
+|---|---|---|---|
+| 1 | Correctness of the new `hex_decode` | yes | sound — see below |
+| 2 | Do the tests discriminate (mutation) | yes | 7 mutations; `hex.rs`'s five all discriminate, the `parse_job` one does not — **R4-MAJOR-1** |
+| 3 | `parse_job` / `None` handling traced | yes | claim true but silent — R4-minor-4 |
+| 4 | `AUDIT.md` / `CLAUDE.md` / PR-body claims | yes | test counts right, three claims wrong — R4-minor-1/2/3 |
+| 5 | Call sites / behaviour change | yes | no legitimate caller affected |
+| 6 | Silent failure, fail-safe direction | yes | no new fallback; direction of both switches untouched by this commit |
+| 7 | Concurrency, resource use | yes | n/a — pure function, no allocation change of note |
+
+## The implementation is correct, and that was checked exhaustively
+
+Not by reading. A standalone harness built the pre-PR decoder, the `291a739`
+decoder and the new one side by side:
+
+- **All 16 384 two-character ASCII inputs**: exactly **22** differ, and every one
+  is of the form `+<hexdigit>` — old `Some(n)`, new `None`. Nothing else moved.
+- **20 971 520 four-character inputs** (`128³ × 10` over a boundary-focused last
+  character): **0** cases where the new function accepts and the old one either
+  rejected or produced different bytes. New ⊆ old, byte-identical on the
+  intersection. So no input that should decode is now rejected.
+- 300 000 random mixed ASCII/Unicode strings: no panic; on ASCII the only
+  mismatches are `+`-forms (152 of 179 450).
+- All 256 byte values round-trip through `hex_encode`, in lower, upper and mixed
+  case. Boundary characters `/ : \` g @ G` and `\0 \x7f + -` and space all reject
+  in both implementations.
+- `chunks_exact(2)` cannot drop a trailing byte: the `is_multiple_of(2)` guard
+  above it returns `None` first, so the remainder is always empty.
+- `<< 4` cannot overflow: `nibble` returns `0..=15`, so the shift is at most
+  `15u8 << 4 == 240`, and a `u8 << 4` is not a shift-overflow even in debug.
+  Precedence is right — `?` binds tighter than `<<`, `<<` tighter than `|`.
+
+`cargo test --release`: **149 lib + 18 bin, 0 failed, 2 ignored**. That matches
+`CLAUDE.md`'s "167 tests (149 lib + 18 bin)" exactly, and the +6 lib delta from
+the previous 143 is the five new `hex` tests plus the one `parse_job` test.
+`cargo clippy --all-targets --release -- -D warnings` clean.
+
+`scripts/verify-jit.sh` is unaffected: all six `JIT_FILTERS` are `randomx::`
+prefixes, so neither `hex::tests` nor `pool_connection::tls_tests` can be swept
+into the `EXPECTED_PASSES=92` assertion. The gate was not run (nothing in the
+diff is in its scope).
+
+## Mutation results
+
+Each mutation applied to a pristine copy of `src/hex.rs`, run, then restored
+from a backup taken before any edit. `git status` clean at the end.
+
+| Mutation | Result |
+|---|---|
+| A: `<< 4` → `<< 3` | **2 fail** (`round_trips`, `every_byte_round_trips`) |
+| B: nibble accepts `b'g'` | **1 fail** (`rejects_odd_length_and_non_hex`, `"0g"` → `Some([16])`) |
+| C: drop the odd-length check | **2 fail** — `rejects_odd_length_and_non_hex` *and* the `parse_job` test |
+| D: reintroduce `from_str_radix` (the `291a739` body) | **1 fail** (`"+1"` → `Some([1])`); `parse_job` test **green** |
+| E: revert `hex.rs` to `origin/main` (pre-PR, panicking) | **2 fail** — sign case, and `non_ascii_…` **panics at `src/hex.rs:20`**, the slicing line; `parse_job` test **green** |
+| F: uppercase arm off-by-one (`+ 11`) | **1 fail** (`decodes_either_case_and_encodes_lower`) |
+| G: uppercase arm removed | **1 fail** (same test) |
+
+No test passes vacuously. Worth recording for a future editor:
+`decodes_either_case_and_encodes_lower` is the **only** guard on uppercase
+decoding — `hex_encode` emits lowercase, so neither round-trip test touches that
+match arm — and it is the test that fires against both F and G. Do not delete it
+as redundant.
+
+## R4-MAJOR-1 — the `parse_job` test covers neither defect it is said to cover
+
+`a_malformed_job_from_the_pool_is_declined_not_fatal` is green against **both**
+unfixed implementations (mutations D and E above). Its two fixtures only ever
+exercise the odd-length branch, which every version of `hex_decode` ever shipped
+has had:
+
+```
+"ff€ff"  = 7 bytes  → ODD → rejected by the length check, in every version
+"abc"    = 3 bytes  → ODD → same
+```
+
+Measured against the pre-PR decoder: `orig("ff€ff")` returns `None`;
+`orig("ff€f")` (6 bytes, even) **panics**. The fixture is one character away from
+being a real regression test and is not one.
+
+What makes this a major rather than a nit is the claim attached to it. The test's
+own doc comment says *"before the fix a pool could abort the miner by putting one
+non-ASCII byte in a job"* and its assertion message reads *"must be declined, not
+panic"* — of an input that never panicked. `AUDIT.md` goes further: *"`parse_job`
+gained the test that matters more than any of those."* `AUDIT.md` is this
+project's authoritative record, and a wrong claim in it is trusted later rather
+than re-derived.
+
+**Stated fairly, and this differs from the round-2 precedent:** the defect is
+*not* shippable green here. `hex.rs`'s `non_ascii_returns_none_rather_than_panicking`
+genuinely reproduces the panic (mutation E panics inside it), so suite-level
+coverage of the regression exists. The severity rests on the false coverage claim
+plus a non-discriminating fixture, not on absent coverage.
+
+**Closes with two edits:** `"ff€ff"` → `"ff€f"` (verified to panic pre-fix), and
+the `AUDIT.md`/doc-comment sentences adjusted to what the fixtures actually
+demonstrate. Adding a `"+f"`-style fixture would additionally give the *sign*
+defect caller-level coverage, which nothing currently has.
+
+## Minors
+
+**R4-minor-1 — two errors in one `AUDIT.md` sentence.** *"Seven tests cover it —
+… and six non-ASCII inputs including one whose length passes the even check and
+only then straddles a character boundary."* There are **five** `#[test]` fns in
+`hex.rs` (six counting the `parse_job` one), and **three** of the six non-ASCII
+inputs are even-length and reach the slicing: `"a€"` (4), `"€€"` (6), `"😀"` (4) —
+the claim understates its own coverage. Fix both halves in one edit; this repo's
+documented pattern is a correction that introduces a new error into the sentence
+being corrected.
+
+**R4-minor-2 — `hex_decode` has four call sites in `pool_connection.rs`, not
+six.** `AUDIT.md` says six. Actual: `:38` (`parse_cert_fingerprint`) and
+`:827/:828/:829` (`parse_job`). "Three of them pool-supplied" is correct. Four is
+also the whole crate — `src/randomx/tests.rs` has its own private `hex_decode`
+helper, untouched and unrelated.
+
+**R4-minor-3 — the PR body was not updated for this commit.** It still says
+*"143 lib + 18 bin tests pass"* (now 149 + 18) and does not mention the sign
+defect, the rewrite or `hex.rs`'s first tests at all; its "A second defect"
+heading now competes with two other second defects. This is the same finding
+round 2 made on this PR, recurring.
+
+**R4-minor-4 — a declined job is declined silently.** Traced as claimed: in
+`handle_pool_message` the `if let Some(job_data) = … && let Some(job) =
+parse_job(…)` chain simply fails, `*current` is never written, and the previous
+job stays in force. So the claim is literally true and the failure direction is
+the safe one. But **nothing is logged** — a pool sending only malformed jobs
+pins the miner to a stale job with no diagnostic until stale rejects appear.
+Pre-existing and unchanged by this commit; in scope only because the new test and
+the `AUDIT.md` paragraph put this behaviour on the record as correct without
+noting that it is silent. A `log::warn!` on the `None` arm would close it.
+
+## Claims checked and confirmed true
+
+- *"Reachable from pool-supplied `blob`/`target`/`seed_hash` for the project's
+  life."* Verified to the CLI pivot itself (`e78376d`, = `791815f^`): the
+  identical `from_str_radix` decoder sat in `pool_connection.rs:529` and
+  `parse_job` at `:504` ran it on all three fields. `791815f` moved it to
+  `hex.rs` unchanged. Confirmed by execution, not reading: the pre-PR function
+  returns `Some([1])` for `"+1"`.
+- *"Fixes both defects at once."* True. Sign: `new("+1") == None`. Panic: no
+  byte-index slicing remains; every byte ≥ 0x80 fails the nibble match, so the
+  dropped `is_ascii()` guard is fully subsumed.
+- Test counts `149 lib + 18 bin` — reproduced exactly.
+- No legitimate caller relied on the old laxity. The only non-`parse_job` caller
+  is `parse_cert_fingerprint`, which strips colons and requires exactly 64
+  characters; a `+`-bearing fingerprint was never valid input. Rejecting signs is
+  strictly a narrowing, and the 21M-input scan shows the accepted set shrank by
+  exactly the `+` forms.
+
+## Round 4 verdict
+
+**NOT MERGEABLE. ACTIONABLE — one major (R4-MAJOR-1) and four minors.**
+
+Said plainly, because it is the expected outcome and it holds: **the rewritten
+`hex_decode` is correct.** It was verified exhaustively rather than by reading —
+over 21 million inputs, new ⊆ old with byte-identical results on the
+intersection — and its five tests discriminate every mutation put to them,
+including the two this commit fixes. That half of the commit needs nothing.
+
+What blocks it is the one test outside `hex.rs` and the sentences written about
+it: a caller-level regression test that passes against both unfixed
+implementations, described in the authoritative record as the test that matters
+most. Two fixture characters and three sentences.
+
+**Could not verify:** nothing material was left unchecked in this commit's scope.
+Not attempted, and out of scope by instruction: the TLS work of rounds 1–3, the
+live-run logs, and `scripts/verify-jit.sh` (which this diff cannot reach).

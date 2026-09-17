@@ -253,3 +253,53 @@ jobs:
       # committed rather than one resolved on the fly.
       - name: cargo test --release
         run: cargo test --release --locked
+
+  # ---------------------------------------------------------------------------
+  # Mutation testing — ADVISORY, deliberately not a required check
+  # ---------------------------------------------------------------------------
+  #
+  # Answers the question this project keeps getting wrong: does a test actually
+  # fail when the thing it guards is broken? Reviewers caught eight cases where
+  # it did not, several of them recorded in AUDIT.md as "break-tested" at the
+  # time. Hand-picking a mutation means choosing one, and a mutation the test
+  # catches for an unrelated reason proves nothing. This tries them all.
+  #
+  # ADVISORY ON PURPOSE, and this is the part not to quietly change:
+  #
+  #   * It is NOT in the five required contexts, so it cannot block a merge.
+  #     `continue-on-error` keeps a red run from failing the workflow.
+  #   * A MISSED mutant is a question, not a verdict. Some are *equivalent* —
+  #     the mutated program behaves identically and no test can kill it. The
+  #     first run of this tooling found one (`replace | with ^` in `hex_decode`,
+  #     where the nibbles occupy disjoint bits). A gate that fails on those
+  #     trains people to ignore it, which is worse than not having it.
+  #   * Cost: unscoped, one function took 28 minutes because every mutant re-ran
+  #     the 48-second suite. This runs only `hex::`, the fast pure-function
+  #     module, as a standing demonstration that the tooling works — not as
+  #     coverage of the whole crate. Widening it means scoping the tests too;
+  #     see scripts/mutants.sh.
+  #
+  # Promote it to required only after measuring the real cost on a PR-sized
+  # scope and deciding what to do about equivalent mutants. Prose rules are what
+  # failed eight times; a check everyone learns to skip is the same failure with
+  # a green tick.
+  mutants:
+    name: mutation testing (advisory, hex::)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Mutate hex_decode
+        run: ./scripts/mutants.sh hex_decode 'hex::'
+

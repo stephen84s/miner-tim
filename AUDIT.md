@@ -5768,3 +5768,99 @@ three review rounds on a PR that *edited the function*, and surfaced within
 minutes of the first test being written for it. The panic fix was reviewed; the
 module's total absence of tests was not remarked on by anyone, including me,
 until it was asked about directly.
+
+### PROC-06 (2026-09-17): mutation testing, because the break-testing rule never bound the author
+
+User asked for a permanent fix to a defect this session produced repeatedly:
+**tests that look like they cover something and do not.** Reviewers caught eight
+instances, several of them described in this very file as "break-tested" at the
+time the claim was false.
+
+**The diagnosis is structural, not carelessness.** The rule already existed and
+was well written:
+
+> **Break-testing is required, not optional.** If a change adds or relies on a
+> test, mutate the production code that test guards and confirm the test fails.
+
+It lives in `.claude/agents/_shared-context.md`, a file whose first line reads
+*"Shared context for MinerTim **reviewers**"*. So reviewers break-tested, caught
+the author eight times, and `CLAUDE.md`'s Operational Protocol — the file that
+governs the author — said nothing. That is why "try harder" was never going to
+work: nothing in the author's own instructions asked for it.
+
+**The second half of the diagnosis is subtler and matters more.** Hand
+break-testing means *choosing* a mutation, and **a mutation the test catches for
+an unrelated reason proves nothing.** Every miss this session was that, not
+laziness:
+
+- A pinned **all-zeros** fingerprint, which *rejects* everything — so the test
+  went red while the default verifier was wide open. Nearly closed the finding
+  falsely (PR #22).
+- A flooding socket the test server **dropped**, so the miner reconnected on EOF
+  and the "second accept" had nothing to do with the buffer bound (PR #23).
+- A test asserting **no third reconnect**, when the stale buffer self-clears on
+  the next newline arriving (PR #23).
+
+Each looked like a working break test. Each was green for the wrong reason.
+
+**The fix, in three parts, all implemented here.**
+
+1. **The obligation moves to the author.** `CLAUDE.md`'s Operational Protocol now
+   carries the rule, with the specific failure named and the three examples above
+   quoted, so the next session reads *why* rather than just *what*.
+   `_shared-context.md` keeps its copy, sharpened to say "choose the mutation that
+   is the defect the test claims to catch, not merely one it happens to fail on".
+
+2. **`scripts/mutants.sh` — prefer the tool over judgement.** `cargo-mutants`
+   does not choose a mutation; it tries all of them. That removes the exact
+   failure mode above.
+
+3. **An advisory CI job**, deliberately not a required check.
+
+**Cost, measured rather than estimated, because scope is the whole story.**
+
+| | mutants | time |
+|---|---|---|
+| unscoped (`-F take_complete_lines`, full suite per mutant) | 8 | **28 min** |
+| scoped (`-F hex_decode -- --lib hex::`) | 21 | **33 s** |
+
+The full lib suite is 48 s and every mutant pays it; the `hex::` subset is under
+a second. Both arguments to the script are therefore mandatory, and it refuses to
+run without them.
+
+**The first real run found a survivor in code written this session, and it is a
+false alarm — which is the most useful thing it could have taught.**
+`src/hex.rs:42: replace | with ^ in hex_decode` was MISSED. It is an **equivalent
+mutant**: `(hi << 4) | lo` and `(hi << 4) ^ lo` agree on all 256 nibble pairs,
+because the high nibble occupies bits 4-7 and the low nibble bits 0-3 — disjoint,
+so no test can kill it. Verified exhaustively rather than argued.
+
+That is why the CI job is **advisory and must stay advisory until this is
+settled**: a gate that fails on equivalent mutants is a check people learn to
+ignore, which is the same failure as a prose rule with a green tick on top. The
+job is not among the five required contexts (verified against the live branch
+protection) and carries `continue-on-error: true`, so it cannot block a merge by
+either mechanism.
+
+Its scope is deliberately narrow — `hex_decode` only — as a standing
+demonstration that the tooling works, not as coverage of the crate. Widening it
+means scoping the tests per target; `scripts/mutants.sh` exists for exactly that
+and the CI job calls it rather than duplicating the invocation.
+
+**Files changed:** `CLAUDE.md` (the rule, in the author's protocol),
+`.claude/agents/_shared-context.md` (sharpened, cross-referenced),
+`scripts/mutants.sh` (new), `.github/workflows/ci.yml` (advisory job),
+`AUDIT.md` (this entry).
+
+**Verification.** The script runs in 33 s and reports 18 caught / 1 missed / 2
+unviable; the missed mutant is the equivalent one above. `ci.yml` parses and the
+new job is absent from the required contexts, checked against the live API rather
+than assumed.
+
+**Not established.** `cargo-mutants` has **not** been run over the whole crate:
+`pool_connection.rs` alone generates **95** mutants, of which roughly seven were
+ever hand-tested, so what the other 88 would say is unknown and may well be
+unflattering. The 33 s figure is for one small pure function; a PR-sized scope
+across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
+Whether this should ever become a required check is therefore still open, and the
+entry deliberately does not answer it.

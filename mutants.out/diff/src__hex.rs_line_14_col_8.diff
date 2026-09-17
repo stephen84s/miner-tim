@@ -1,0 +1,21 @@
+--- src/hex.rs
++++ delete ! in hex_decode
+@@ -6,17 +6,17 @@
+     for &b in bytes {
+         s.push(HEX[(b >> 4) as usize] as char);
+         s.push(HEX[(b & 0xf) as usize] as char);
+     }
+     s
+ }
+ 
+ pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+-    if !hex.len().is_multiple_of(2) {
++    if  /* ~ changed by cargo-mutants ~ */hex.len().is_multiple_of(2) {
+         return None;
+     }
+ 
+     // Decode nibble by nibble rather than via `u8::from_str_radix`, which is a
+     // *number* parser and accepts a leading sign: `from_str_radix("+1", 16)` is
+     // `Ok(1)`, so the previous implementation decoded "+1" as the byte 0x01 and
+     // "+f" as 0x0f. Hex is not arithmetic and has no sign, so that was simply
+     // wrong — found by writing this module's first tests, having been reachable

@@ -1,0 +1,2 @@
+src/hex.rs:34:42: replace + with * in hex_decode
+src/hex.rs:35:42: replace + with * in hex_decode

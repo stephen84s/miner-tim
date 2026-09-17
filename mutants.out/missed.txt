@@ -1,0 +1,1 @@
+src/hex.rs:42:44: replace | with ^ in hex_decode

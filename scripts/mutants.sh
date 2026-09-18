@@ -21,7 +21,11 @@
 # well as the mutants took 21 mutants to 33 seconds. Always pass both.
 #
 #   ./scripts/mutants.sh hex_decode 'hex::'
-#   ./scripts/mutants.sh take_complete_lines 'pool_connection::'
+#   ./scripts/mutants.sh 'DonationSchedule::level' 'donate::'
+#
+# Note cargo-mutants builds and runs in DEBUG, where this tree's lib suite takes
+# ~192 s — not the 48 s release figure. The default timeout here is 300 s for
+# that reason; override with MUTANTS_TIMEOUT if a scope needs longer.
 #
 # READING THE RESULT
 #
@@ -54,5 +58,41 @@ command -v cargo-mutants >/dev/null || {
     exit 127
 }
 
-echo "mutants: functions matching /$FN/, tested with '$TESTS'"
-cargo mutants -F "$FN" --timeout 120 -- --lib "$TESTS"
+# A filter that matches nothing must FAIL, not pass quietly.
+#
+# `cargo-mutants` prints "No mutants found under the active filters" and exits
+# **0**. That is the repo's signature defect — a check that reports success
+# having verified nothing — shipping inside the fix for it. `verify-jit.sh`, in
+# this same directory, asserts an exact test count for precisely this reason;
+# this script did not, and review found its own second documented example
+# (`take_complete_lines`, which lives on another branch) returned 0 mutants and
+# exited 0.
+#
+# The realistic trigger is a rename: the CI job names one function, someone
+# renames it, and the job flips from red to green. The break would read as an
+# improvement.
+LIST=$(cargo mutants -F "$FN" --list 2>/dev/null | wc -l | tr -d ' ')
+if [ "$LIST" -eq 0 ]; then
+    echo "error: no mutants match /$FN/ — nothing would be tested." >&2
+    echo "  A filter matching nothing exits 0 in cargo-mutants, so this would" >&2
+    echo "  otherwise report success having checked nothing. Has the function" >&2
+    echo "  been renamed, or is it on a different branch?" >&2
+    exit 3
+fi
+
+echo "mutants: $LIST mutant(s) matching /$FN/, tested with '$TESTS'"
+# Known-equivalent mutants are excluded by regex, with the reason recorded here.
+# Without this the run exits 2 on a mutant nothing can ever kill, so the CI job
+# is red on day one and red forever — and a red check that never changes carries
+# no information, which is the very failure this PR argues against while shipping
+# it. A *new* survivor should be the thing that turns it red.
+#
+# Each entry needs a justification, not just a silenced line:
+#
+#   replace | with ^ in hex_decode
+#     `(hi << 4) | lo` and `(hi << 4) ^ lo` agree on all 256 nibble pairs,
+#     because the high nibble occupies bits 4-7 and the low nibble bits 0-3 —
+#     disjoint, so no test can distinguish them. Verified exhaustively.
+EQUIVALENT='replace \| with \^ in hex_decode'
+
+cargo mutants -F "$FN" -E "$EQUIVALENT" --timeout "${MUTANTS_TIMEOUT:-300}" -- --lib "$TESTS"

@@ -40,3 +40,10 @@ mining.conf
 # project. Shared, reviewable settings belong in `.claude/settings.json`, which
 # stays tracked.
 .claude/settings.local.json
+
+# cargo-mutants scratch. Every run writes ~788 KB here and rotates the previous
+# directory to mutants.out.old, so without this a documented invocation dirties
+# dozens of tracked files. PR #24 committed 102 of them before review caught it —
+# the same accretion as LEDGER-01, four days later and in a less durable form.
+mutants.out/
+mutants.out.old/

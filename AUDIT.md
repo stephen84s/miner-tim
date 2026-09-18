@@ -5824,9 +5824,21 @@ Each looked like a working break test. Each was green for the wrong reason.
 | unscoped (`-F take_complete_lines`, full suite per mutant) | 8 | **28 min** |
 | scoped (`-F hex_decode -- --lib hex::`) | 21 | **33 s** |
 
-The full lib suite is 48 s and every mutant pays it; the `hex::` subset is under
-a second. Both arguments to the script are therefore mandatory, and it refuses to
-run without them.
+Both arguments to the script are therefore mandatory, and it refuses to run
+without them.
+
+**The figure explaining that cost was wrong, and review caught it.** This entry
+said "the full lib suite is 48 s and every mutant pays it" — but 48 s is the
+**release** suite, and `cargo-mutants` builds and runs in **debug**, where the
+same suite measures **188 s** here. The arithmetic gives it away: 8 x 48 s is
+6.4 minutes, barely a fifth of the observed 28; 8 x 188 s is 25.1 minutes, which
+reconciles once builds are added. The conclusion was right and the mechanism
+4x out, quoted from the wrong profile — MEM-01's release measurement, reused
+without checking it applied.
+
+The script's default timeout was 120 s for the same reason, i.e. **below this
+tree's own debug baseline**, so an unscoped run aborts on baseline timeout. Now
+300 s, overridable with `MUTANTS_TIMEOUT`.
 
 **The first real run found a survivor in code written this session, and it is a
 false alarm — which is the most useful thing it could have taught.**
@@ -5850,10 +5862,42 @@ and the CI job calls it rather than duplicating the invocation.
 **Files changed:** `CLAUDE.md` (the rule, in the author's protocol),
 `.claude/agents/_shared-context.md` (sharpened, cross-referenced),
 `scripts/mutants.sh` (new), `.github/workflows/ci.yml` (advisory job),
-`AUDIT.md` (this entry).
+`.gitignore` (see below), `AUDIT.md` (this entry).
 
-**Verification.** The script runs in 33 s and reports 18 caught / 1 missed / 2
-unviable; the missed mutant is the equivalent one above. `ci.yml` parses and the
+**Plus 102 files that should never have been there.** An earlier revision of this
+entry listed five files while the diff touched **107**: every run of the tool
+writes ~788 KB to `mutants.out/` and rotates the previous one to
+`mutants.out.old/`, and `.gitignore` was never updated, so the scratch was
+committed. A false files-changed claim in the append-only ledger — inside the
+entry whose entire subject is claims recorded as true when they were not — and it
+survived a commit made specifically to correct a different figure in this same
+entry. Untracked and ignored now. This is LEDGER-01 repeating four days later,
+in a larger and less durable form.
+
+**Two defects review found in the tooling itself, both the failure it exists to
+prevent.**
+
+**The script had a silent-green mode.** `cargo-mutants` prints "No mutants found
+under the active filters" and exits **0**, so a filter matching nothing reported
+success having checked nothing — and this entry's own second documented example,
+`take_complete_lines`, does exactly that here, because that function lives on
+another branch. `verify-jit.sh`, in the same directory, has carried
+`EXPECTED_PASSES=92` against this precise failure for weeks; the lesson was
+sitting next to the new file and was not applied. The script now counts the
+mutants first and exits 3 if there are none. Break-tested: a nonsense filter
+fails loudly, a real one still runs.
+
+**The advisory job was red on day one and red forever.** `cargo-mutants` exits 2
+on any survivor, and the only survivor is the equivalent mutant this entry proves
+is unkillable — so the check could never go green and could never distinguish a
+new survivor from the permanent one. This entry argues that "a gate failing on
+equivalent mutants is a check people learn to ignore" and then shipped exactly
+that, one severity down. Known-equivalent mutants are now excluded by regex, each
+requiring a written justification rather than a silenced line; the run is green
+with **20 mutants still tested**, so a *new* survivor is what turns it red.
+
+**Verification.** The script runs in 33 s; excluding the equivalent mutant, 20
+mutants, 18 caught, 2 unviable, exit 0. `ci.yml` parses and the
 new job is absent from the required contexts, checked against the live API rather
 than assumed.
 

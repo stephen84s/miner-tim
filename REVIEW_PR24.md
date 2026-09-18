@@ -129,3 +129,76 @@ required checks were all green on head `e358581`, including both `jit-*` jobs.
   read-only; adding a job to the group changes nothing for the other five.
 * CI-03 respected: no new trigger — `pull_request` + `workflow_dispatch` only.
 
+### F5 (MAJOR) — "a permanent fix" is claimed for a mechanism that is out of
+scope of every defect it cites
+
+The PR opens "A permanent fix for the defect this session produced repeatedly";
+PROC-06 says "Fixed three ways". Inventory what actually lands:
+
+| Part | What it is | Enforces anything? |
+|---|---|---|
+| `CLAUDE.md` bullet | prose | no |
+| `_shared-context.md` sharpening | prose | no |
+| `scripts/mutants.sh` | opt-in, run only by an author who remembers | no |
+| CI job | runs `hex::` only | see below |
+
+**The advisory job's scope excludes all three named motivating defects.** Every
+one is in `pool_connection.rs` / TLS-verifier territory — the all-zeros
+fingerprint (verifier wiring), the flooding socket the test server dropped, the
+third-reconnect assertion. The job mutates `hex_decode` and nothing else. It
+could not, even in principle, have caught any of them.
+
+So the new mechanism is: two prose rules, plus a script nobody is obliged to
+run, plus a check that is permanently red on one 30-line pure function. Issue
+**#19** — open, filed by this same repo — names exactly this pattern:
+
+> The new rule describes an intention with nothing enforcing it — **the
+> recurrence being fixed came from a rule followed exactly as written.**
+
+The PR's defence is that the tool is the enforcement and the prose only the
+pointer. That does not hold on this configuration: nothing makes a missing
+break-test visible. Declaring the defect permanently fixed in the append-only
+ledger is the same false-completion pattern the entry is about.
+
+The prose itself is good — `CLAUDE.md`'s new bullet is specific, names the
+failure mode, and quotes three real examples. As documentation it is an
+improvement. As a *fix* it is the thing #19 says does not work, and the entry
+should say so rather than claim closure.
+
+### F6 (MINOR) — script exit 2 collides with cargo-mutants' own exit 2
+
+`scripts/mutants.sh` exits 2 for a usage error, and `cargo-mutants` exits 2 for
+"mutants survived" (measured: `./scripts/mutants.sh hex_decode 'hex::'` exits
+**2**). A typo'd argument and a genuine survivor are indistinguishable by exit
+code. Harmless while advisory; not harmless if the job is ever promoted, which
+the entry explicitly leaves open. `$# -lt 2` also silently ignores extra
+arguments (`./scripts/mutants.sh --help` prints usage, which is fine by
+accident).
+
+### F8 (MINOR) — `cargo install cargo-mutants --locked` is unpinned
+
+ci.yml:299. It resolved to 27.1.0 and rebuilt from source in 1m06s with no
+cache. A future release can change the generated mutant set, or raise its MSRV
+above the deliberately pinned `RUST_VERSION: 1.97.1`. The ci.yml comment calls
+the job "a standing demonstration that the tooling works"; an unpinned installer
+undercuts that, and every other toolchain input in this workflow is pinned on
+purpose. `timeout-minutes: 20` against a ~2 min observed run is ample headroom.
+
+### F9 (MINOR) — no `make mutants` target
+
+Every other verification tool in the repo is reachable from the `Makefile`
+(`verify-jit`, `verify-jit-linux`, `audit`, `test`, `bench`). `mutants.sh` is
+not, and is absent from `README.md`. Its only pointer is the `CLAUDE.md` prose
+the PR argues is insufficient on its own.
+
+### F10 (NIT) — 3,196 is an aarch64 figure quoted without its platform
+
+Reproduced exactly on this Mac (`arm64`): **3,196** total, `randomx/vm.rs`
+**855**, `randomx/jit/aarch64.rs` **710**, `src/pool_connection.rs` **88**. All
+four quoted figures check out, including the corrected 88.
+
+Caveat the entry does not give: 967 of those 3,196 (30%) are in `jit/aarch64.rs`
++ `jit/compiler.rs`, which are `cfg`'d out on x86_64 — so the `ubuntu-24.04`
+runner could never test them even if the job were widened crate-wide. The scale
+figure is right; what it would cost to act on it is platform-split.
+

@@ -228,3 +228,51 @@ open.
 **Not verified:** the JIT gate (`make verify-jit`) — not run, and not implicated:
 the diff contains no `aarch64`, no `jit/`, no `vm.rs`. CI's five checks were not
 observed; this is a local verification only.
+
+---
+
+## Addendum — F3 verified against #24's actual script (not inferred)
+
+The paragraph above said the raw invocation is "what the script wraps". That was
+an inference from the PR body's usage, so I checked it — `git show
+origin/chore/mutation-testing:scripts/mutants.sh`:
+
+```bash
+cargo mutants -F "$FN" --timeout 120 -- --lib "$TESTS"
+```
+
+It takes `<function-regex> <test-filter>`, so
+`./scripts/mutants.sh 'DonationSchedule::level' 'donate::'` expands to the above
+with `FN=DonationSchedule::level`, `TESTS=donate::`. **It differs from what I ran
+in two ways**: it omits `--file` (immaterial — `DonationSchedule::level` exists
+only in `donate.rs`, so the mutant set is identical at 2) and it sets
+`--timeout 120` where mine auto-set 20 s (immaterial — both mutants die in
+well under a second).
+
+I then ran the script's exact command line:
+
+```
+$ cargo mutants -F 'DonationSchedule::level' --timeout 120 -- --lib 'donate::'
+2 mutants tested in 11s: 2 caught
+```
+
+**FIX-01's "2 mutants, 2 caught, 12 s" reproduces** (11 s here, 12.3 s wall;
+my `--file` variant reported exactly 12 s). The figure is sound.
+
+F3 therefore stands **unchanged in severity and gains its evidence**: #24's
+branch really does add `scripts/mutants.sh`, and its `CLAUDE.md` really does add
+the `PROC-06` row (`grep -c PROC-06` → 1 there, 0 here). So "merge #24 first" is
+a verified remedy, not a guess, and the alternative reword can quote the exact
+expansion above.
+
+Unrelated hand-off, for whoever reviews #24: `.gitignore` on that branch has no
+entry for `mutants.out/`, which `cargo mutants` creates in the repo root on every
+run. Not this PR's problem.
+
+## Hand-off to the lead
+
+Record this ledger's final commit sha in the FIX-01 `AUDIT.md` entry before the
+file is stripped (`CLAUDE.md` step 0 / `_shared-context.md` rule 3) — the branch
+squash-merges, so this commit never enters `main`'s ancestry and the sha is the
+only way back to it. FIX-01 is unmerged, so that line may be added in place,
+alongside the F1/F2 corrections.

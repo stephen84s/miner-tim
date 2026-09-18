@@ -218,15 +218,23 @@ path, `benches/`, `.github/workflows/`, `Makefile`, `scripts/` or
 | # | Item | State |
 |---|---|---|
 | 1 | Does the new test discriminate? flaky? | done — discriminates, deterministic; R2-F9 |
-| 2 | Is the author's correction of round 1's prediction right? | done — half right; **R2-F3** |
+| 2 | Is the author's correction of round 1's prediction right? | done — **substantively yes**; R2-F3 is only about its absolute phrasing |
 | 3 | The capped flood test — clean failure on a raised limit? | done — **no**; **R2-F2** |
 | 4 | Round-1 minors F3/F4/F5/F7 closed? | done — F3/F4 yes, F5 half, F7 **no**; R2-F4, R2-F5 |
 | 5 | `read_line`'s uncovered limit — scope call | done — still uncovered; R2-F7 |
 | 6 | Doc / AUDIT / PR-body accuracy | done — **R2-F1**, R2-F5, R2-F6 |
 | 7 | `cargo test --release`, clippy | done — 158 lib + 18 bin + 0 doc, 2 ignored, 0 failed; clippy exit 0 |
 
-**Verdict: MERGEABLE.** No blockers, no majors. Six minors and three nits.
-Something is **ACTIONABLE**: R2-F1, R2-F2, R2-F3, R2-F4, R2-F5, R2-F6.
+**Verdict: MERGEABLE** on content, subject to the standing merge conditions
+below. No blockers, no majors. **Five minors and four nits.** Something is
+**ACTIONABLE**: R2-F1, R2-F2, R2-F4, R2-F5, R2-F6.
+
+Merge conditions, checked: branch **contains `origin/main`** (`git log HEAD..origin/main`
+empty), and **all five checks pass on the current head** — `lint` 23 s, `audit`
+14 s, `test` 4 m 1 s, `jit-macos` 14 m 21 s, `jit-linux-arm` 11 m 42 s. No
+rebase needed. `scripts/verify-jit.sh`'s six `JIT_FILTERS` are all
+`randomx::`-prefixed, so none matches `pool_connection::` and `EXPECTED_PASSES=92`
+is untouched by the ninth test — the two `jit-*` jobs above confirm it.
 
 ## What I ran
 
@@ -257,7 +265,9 @@ itself, and its first half **claims an assertion the test does not make** (there
 is no settle/third-accept assertion anywhere in the body). Exactly the repo's
 named "a stale claim contradicts a new one" pattern. Delete block one.
 
-**R2-F2 (minor, and the most important item in the round) — round 1's F2 is
+**R2-F2 (minor, and the most important item in the round; deliberately *not*
+major — unlike SEC-02's half-closed major, the mutation is still caught, by the
+socket test, so the suite is not blind and nothing is shippable-green) — round 1's F2 is
 recorded as closed and is not. The cap scales with the constant it defends
 against, so the raise-the-limit mutation now passes instead of spinning.**
 
@@ -288,22 +298,27 @@ either — at 16× `the_receiver_loop_really_drops_a_newline_free_stream` **fail
 absolute iteration cap (`min(derived, 1024)`), or correct the AUDIT sentence to
 say the socket test is what catches a raised limit.
 
-**R2-F3 (minor) — the refutation of round 1's prediction is over-stated; round 1
-described a reachable sub-case, not an error.** Demonstrated with a throwaway
-helper test (run, then removed), simulating a surviving >MAX stale buffer:
+**R2-F3 (nit — downgraded from minor after re-deriving it; see the correction
+note at the end) — "No second overflow, no loop" is false as an absolute, but
+the author's conclusion is right.** Demonstrated with a throwaway helper test
+(run, then removed), simulating a surviving >MAX stale buffer:
 
 - next read **contains** a newline → `Ok`, buffer self-clears, one bogus
   `MAX+`-byte line, the real message lost. The author's account — confirmed.
 - next read is **newline-free** (4096 bytes of `y`) → `Err(> MAX)`, buffer still
-  oversized → `reconnect()` → repeat. Round 1's loop — also confirmed.
+  oversized → `reconnect()` → repeat.
 
-Sub-case two is what a *hostile peer* does, which is the entire threat model of
-#21: after the reconnect it simply keeps flooding, the very first read re-enters
-the `Err` arm, and the miner reconnects every `RECONNECT_DELAY` forever. The
-commit message (*"It is not … No second overflow, no loop"*), the `AUDIT.md`
-append (*"It does not happen"*) and the new doc comment all state it as a flat
-refutation. It is a refutation of the **cooperative-pool** case only. One
-sentence; the test is unaffected and still measures the right thing.
+So a second overflow *can* occur and the phrasing overstates. What it does **not**
+establish is round 1's F1 framing that losing the clear "inverts the fix into a
+reconnect storm". Against a peer that keeps flooding, the storm is there either
+way: **with** the clear the cycle is 1 MiB + `RECONNECT_DELAY`, **without** it
+4 KiB + `RECONNECT_DELAY`, and on any link where a megabyte arrives in
+milliseconds both are dominated by the same 5 s sleep. The clear changes the
+per-cycle byte cost, not whether the loop exists or how fast an operator sees
+it. The author's substantive conclusion — that what the clear actually buys is
+the first real message after a flood — stands, and the test measures exactly
+that. One word in the commit message and the `AUDIT.md` append ("no loop" →
+"no loop against a pool that resumes normal traffic").
 
 **R2-F4 (minor) — round 1's F5 was answered in `AUDIT.md` but the inaccurate
 sentence is still shipping in the code.** `pool_connection.rs:213-215` still
@@ -380,3 +395,14 @@ but the number in the code overstates the margin by 67%.
   extrapolation from three measured points (1×, 4×, 16×), **not** a measurement
   at 1000×; I stopped at 16× deliberately.
 - I did not run `make verify-jit`; the diff touches no JIT code.
+
+## Correction to this round's own first pass
+
+R2-F3 was first written as a minor claiming the author's refutation was scoped
+to a cooperative pool and that round 1's reconnect loop is what a hostile peer
+produces. That over-reached on my own evidence: **with** `pending.clear()` a
+peer that keeps flooding also loops, one cycle per `RECONNECT_DELAY`, so the
+clear never averted the storm and round 1's F1 framing does not survive either.
+Only the absolute phrasing is wrong. Downgraded to a nit and rewritten above.
+The first ledger commit (`78fc74d`) still carries the over-claim in its message;
+this commit is the correction, not an amend (shared-context rule 3).

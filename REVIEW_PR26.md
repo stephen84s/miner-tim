@@ -55,3 +55,35 @@ slightly resizes the "2 mutants" framing (see item 6).
 `level.clamp(1, 100)`; every array element is inside `[1, 100]`, so
 `MAX_DONATE_LEVEL` (100) round-trips and that assertion is not asserting the
 wrong thing. The specific worry in the brief does not materialise.
+
+### Item 4b — neighbour sweep (`cargo-mutants` over the whole file)
+
+`scripts/mutants.sh` does **not** exist on this branch (see F3), so I ran the raw
+tool. I did not run the command the PR quotes; I ran its underlying equivalent.
+
+```
+# pre-PR (src/donate.rs from origin/main, test module and all)
+cargo mutants --file src/donate.rs -- --lib 'donate::'
+  25 mutants tested in 41s: 1 missed, 23 caught, 1 unviable
+  MISSED  src/donate.rs:62:9: replace DonationSchedule::level -> u8 with 1
+
+# this branch
+cargo mutants --file src/donate.rs -- --lib 'donate::'
+  25 mutants tested in 39s: 24 caught, 1 unviable
+```
+
+**Exactly one mutant was missed before, exactly the one the issue names, and it
+is now caught. No other mutant in `donate.rs` survives** — `clamp_level`,
+`beneficiary_at`, `new` and the constants are all covered. The fix does not close
+one gap and leave a neighbour open. (The single `unviable` is a compile failure
+of the mutated form, not a survivor; it is present identically on both sides.)
+
+The PR's own figure reproduces **exactly**, including the wall clock:
+```
+cargo mutants --file src/donate.rs --re 'DonationSchedule::level' -- --lib 'donate::'
+  2 mutants tested in 12s: 2 caught
+```
+and pre-PR the same filter is 1 missed / 1 caught — so of the "2 mutants" only
+one was ever the gap; the `-> 0` sibling was already killed by `floor_enforced`.
+The entry's separate "found it in 38 seconds" is consistent with the 39-41 s
+whole-file sweeps.

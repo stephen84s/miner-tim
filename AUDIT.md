@@ -5857,10 +5857,18 @@ unviable; the missed mutant is the equivalent one above. `ci.yml` parses and the
 new job is absent from the required contexts, checked against the live API rather
 than assumed.
 
-**Not established.** `cargo-mutants` has **not** been run over the whole crate:
-`pool_connection.rs` alone generates **95** mutants, of which roughly seven were
-ever hand-tested, so what the other 88 would say is unknown and may well be
-unflattering. The 33 s figure is for one small pure function; a PR-sized scope
+**Not established.** `cargo-mutants` has **not** been run over the whole crate,
+which generates **3,196** mutants — `randomx/vm.rs` 855 and `randomx/jit/aarch64.rs`
+710 between them account for half. `pool_connection.rs` generates **88** on
+`main`, and **95** on the `security/bound-recv-buffer` branch, whose new code adds
+seven. Roughly seven mutants in total were ever hand-tested anywhere, so what the
+remaining ~3,190 would say is unknown and, on this week's evidence, probably
+unflattering.
+
+(An earlier version of this paragraph gave the figure as "95" without naming the
+tree it was measured in, sitting next to "roughly seven were ever hand-tested" —
+so it read as a fact about `main`, where it is wrong by seven. The counting
+method was sound; the omission was the branch.) The 33 s figure is for one small pure function; a PR-sized scope
 across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
 Whether this should ever become a required check is therefore still open, and the
 entry deliberately does not answer it.

@@ -112,8 +112,11 @@ mod tests {
     /// how someone confirms `--donate-level` took effect, and a miner that
     /// misreports the one financial setting it has is worth a test.
     ///
-    /// Values chosen to avoid both the clamp floor and the default, so neither a
-    /// stuck `1` nor a stuck `5` can pass.
+    /// The list deliberately **includes** the clamp floor and the default, and
+    /// spans them: an accessor stuck at any single constant fails on every other
+    /// element. An earlier version of this comment said the values were "chosen
+    /// to avoid" those two, which is the opposite of what the array does — the
+    /// effect was right, the stated mechanism was not.
     #[test]
     fn level_reports_what_was_configured() {
         for n in [MIN_DONATE_LEVEL, 2, 3, 5, 10, 50, MAX_DONATE_LEVEL] {

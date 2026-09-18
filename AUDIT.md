@@ -5814,9 +5814,50 @@ for n in [MIN_DONATE_LEVEL, 2, 3, 5, 10, 50, MAX_DONATE_LEVEL] {
 }
 ```
 
-**Files changed:** `src/donate.rs` (one test), `AUDIT.md` (this entry).
+**Files changed:** `src/donate.rs` (one test), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
 
-**Verification.** `./scripts/mutants.sh 'DonationSchedule::level' 'donate::'` —
-2 mutants, **2 caught**, 12 s. The mutant is dead, confirmed by the tool that
-found it rather than by a hand-picked mutation, which is the whole point of
-PROC-06. Full suite green.
+**Verification.** 2 mutants, **2 caught**, 12 s, via
+
+```
+cargo mutants --file src/donate.rs -F 'DonationSchedule::level' --timeout 120 -- --lib 'donate::'
+```
+
+The command is written out rather than cited as `./scripts/mutants.sh`, because
+that script and the PROC-06 entry it belongs to land in a **different, still-open
+PR (#24)**. Citing them from here would leave `AUDIT.md` — which is append-only
+once merged — pointing at a path and a process ID that do not exist, if this
+lands first. Review caught that ordering dependency; the safer fix is to depend
+on nothing. The mutant is dead, confirmed by the tool that found it rather than by a
+hand-picked mutation.
+
+Two points of precision from review. "2 caught" is the post-fix figure; before
+the fix the same filter gave **1 missed, 1 caught** — the `-> 0` sibling was
+already killed by `floor_enforced`, so this closed **one** mutant, not two. And
+the full suite is **168 passed** (150 lib + 18 bin), not the 150 quoted
+elsewhere, which was the `--lib` count alone.
+
+Review also swept the whole file both ways: `origin/main`'s `donate.rs` gives
+25 mutants with **1 missed** — this one — and this branch gives 25 with **zero
+survivors**, so `clamp_level`, `beneficiary_at`, `new` and the constants are all
+covered and no neighbouring gap was left open.
+
+**Review:** one round, `pr-reviewer`, mergeable with no blockers and no majors.
+It verified the gap by running rather than reading — stubbing `level()` to `1`
+with the new test removed leaves `3 passed`, so the mutant really was invisible
+before — and confirmed the new test kills a stub at **all nine** constants tried,
+not just the two the comment names. It also checked the impact claim by grepping
+the whole tree: `.level()` has exactly one non-test caller, the `log::info!` at
+`pool_connection.rs:500`, so "reporting defect, not financial" holds.
+
+Its findings are actioned above: an `AUDIT.md` citation of `scripts/mutants.sh`
+and PROC-06, neither of which exists on `main` yet — they land in the still-open
+#24, and `AUDIT.md` is append-only once merged, so this entry would have carried
+a dangling path if it landed first; a files-changed list omitting `CLAUDE.md`; a
+"150 passed" figure that was the `--lib` count rather than the full 168; the
+one-versus-two mutant precision; and an in-code comment claiming the value list
+"avoids" the clamp floor and the default when it plainly **contains** both — the
+effect right, the mechanism as described wrong.
+
+**Ledger:** `REVIEW_PR26.md`, removed before merge per LEDGER-01 and retrievable
+at **`bbc3dc8`** — `git show bbc3dc8:REVIEW_PR26.md`. That sha is in
+this branch's history, not `main`'s, since the repo squash-merges.

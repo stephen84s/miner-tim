@@ -8,13 +8,13 @@ Base `main` (`f2abc1e`), head `e358581`. Reviewer spawned cold.
 | # | Item | State |
 |---|---|---|
 | 1 | Advisory job cannot block a merge | DONE |
-| 2 | `scripts/mutants.sh` works as documented | in progress |
-| 3 | Cost claim honest / like-for-like | in progress |
+| 2 | `scripts/mutants.sh` works as documented | DONE |
+| 3 | Cost claim honest / like-for-like | DONE |
 | 4 | Equivalent-mutant claim + the reasoning from it | DONE |
 | 5 | Rule text — behaviour change or intention | DONE |
 | 6 | AUDIT PROC-06 / CLAUDE.md row vs the diff | DONE |
 | 7 | Nothing else broken (`verify-jit.sh`) | DONE |
-| 8 | clippy + test suite | pending |
+| 8 | clippy + test suite | DONE |
 
 ---
 
@@ -58,6 +58,13 @@ entire subject is claims recorded as true at the moment they were false. Per
 `CLAUDE.md` step 0 an entry on an unmerged branch may still be edited in place,
 so this is correctable without an appended note.
 
+It also survived a deliberate accuracy pass. Both artifact directories landed in
+`fc35c12` (107 files, 15,808 insertions). The branch's second commit, `e358581`
+"docs: name the tree the mutant count was measured in", exists *only* to correct
+a figure in this very entry — and touched `AUDIT.md` and `CLAUDE.md` alone. So
+the author re-read the entry for accuracy and the 1.5 MB of scratch beside it
+was invisible.
+
 ### F3 (MAJOR) — the advisory job is red today and is red forever, and its
 redness carries no information
 
@@ -86,6 +93,13 @@ Nobody can distinguish "a new survivor appeared in a future change" from "the
 usual `|`/`^`" without opening the log. The stated purpose of the job — to make
 a missing break-test visible — cannot be discharged by a signal that is
 constant.
+
+**The job's scope also excludes every defect it was created for.** All three
+motivating examples are in `pool_connection.rs` / TLS-verifier territory — the
+all-zeros fingerprint, the flooding socket the test server dropped, the
+third-reconnect assertion. The job mutates `hex_decode` and nothing else, so it
+could not in principle have caught any of them. Combined with the constant
+redness, the job as configured reports nothing about anything it was built for.
 
 Nothing in the PR body, `AUDIT.md` PROC-06, or the `ci.yml` comment says the job
 is red. PROC-06's Verification paragraph says only "reports 18 caught / 1 missed
@@ -129,8 +143,11 @@ required checks were all green on head `e358581`, including both `jit-*` jobs.
   read-only; adding a job to the group changes nothing for the other five.
 * CI-03 respected: no new trigger — `pull_request` + `workflow_dispatch` only.
 
-### F5 (MAJOR) — "a permanent fix" is claimed for a mechanism that is out of
-scope of every defect it cites
+### F5 (MINOR) — "a permanent fix" overstates what was built
+
+*(The substantive half of this finding — that the job's scope excludes every
+defect it cites — is folded into F3, where it belongs. What is left here is a
+claim-accuracy problem of the same class as F12.)*
 
 The PR opens "A permanent fix for the defect this session produced repeatedly";
 PROC-06 says "Fixed three ways". Inventory what actually lands:
@@ -239,9 +256,12 @@ branch. So the header's worked example, and the 28-minute row of the cost table,
 both refer to a function that is not in this tree — and running the example as
 written reports success in 0.39 s having tested nothing.
 
-Interaction with F3 that makes it worse: the job is red *today* because of the
-equivalent mutant. If `hex_decode` is renamed or moved, the job flips to
-**green**. A break would read as an improvement.
+Interaction with F3 that makes it worse. The CI job hardcodes `hex_decode`, so
+the realistic trigger is not a typo in the workflow but a **rename or move of
+the function** — and `src/hex.rs` is 60 lines that were rewritten from scratch
+this same session. The job is red *today* because of the equivalent mutant; the
+moment `hex_decode` is renamed it flips to **green**. A break would read as an
+improvement.
 
 The other direction fails loudly, which is correct: a test filter matching
 nothing (`'hexXX::'`) gives `19 missed, 2 unviable` and exit 2.
@@ -362,22 +382,24 @@ Three independent proofs it cannot block a merge:
 ## Verdict
 
 **NOT MERGEABLE.** No blockers — nothing here can produce a wrong hash, and the
-five required checks are green and untouched. But six majors, and two of them
+five required checks are green and untouched. But five majors, and two of them
 reproduce the exact defect class this PR was written to eliminate.
 
 | | |
 |---|---|
 | **Blockers** | none |
-| **Majors** | F1 (102 files / 1.5 MB of tool scratch committed, `.gitignore` not updated), F2 (PROC-06 "Files changed" names 5, diff touches 107), F3 (advisory job permanently red; redness carries no information), F5 ("permanent fix" for a mechanism out of scope of every defect cited), F11 (silent-green mode; the script's own example already hits it), F12 ("48 s" is a release figure, 4× out) |
-| **Minors** | F6 (exit-code collision), F8 (unpinned installer), F9 (no `make mutants`), F13 (`--timeout 120` below the tree's baseline) |
+| **Majors** | F1 (102 files / 1.5 MB of tool scratch committed, `.gitignore` not updated), F2 (PROC-06 "Files changed" names 5, diff touches 107, and survived a correction commit), F3 (advisory job permanently red, redness carries no information, and its scope excludes all three defects it cites), F11 (silent-green mode; the script's own example already hits it), F12 ("48 s" is a release figure, 4× out) |
+| **Minors** | F5 ("permanent fix" overstates it), F6 (exit-code collision), F8 (unpinned installer), F9 (no `make mutants`), F13 (`--timeout 120` below the tree's baseline) |
 | **Nits** | F10 (3,196 is aarch64-only) |
 | **Verified sound** | F4 (equivalent-mutant claim, checked exhaustively), F7 (`verify-jit.sh` untouched, `EXPECTED_PASSES=92` intact), all four mutant counts (3196/855/710/88), the 33 s scoped figure, priority-1 non-blocking |
 
 **ACTIONABLE — yes.** In order:
 
-1. **F11** — add a minimum-mutant-count assertion to `scripts/mutants.sh`, the
-   way `verify-jit.sh` asserts `EXPECTED_PASSES=92`, and fix or remove the
-   `take_complete_lines` example that finds nothing on this branch. This is the
+1. **F11** — assert the mutant **count** in `scripts/mutants.sh` (a minimum, or
+   exact as `verify-jit.sh` does with `EXPECTED_PASSES=92`); a count is the only
+   thing that distinguishes "found nothing" from "found everything and killed
+   it". Fix or remove the `take_complete_lines` example, which finds nothing on
+   this branch. This is the
    repo's signature failure mode shipping inside the fix for it.
 2. **F1 / F2** — `git rm -r mutants.out mutants.out.old`, add `mutants.out*` to
    `.gitignore`, and correct PROC-06's "Files changed". The entry is still on an
@@ -387,8 +409,9 @@ reproduce the exact defect class this PR was written to eliminate.
 4. **F3** — either suppress the known-equivalent mutant (`.cargo/mutants.toml`
    `exclude_re`, or `-E`) so a red job means something, or state plainly in
    `ci.yml`, PROC-06 and the PR body that the job is red now and stays red.
-5. **F5** — soften "permanent fix" to what was actually built, and note the
-   job's scope excludes all three cited defects. Relates to open issue #19.
+5. **F5 / F3** — soften "permanent fix" to what was actually built, and state
+   that the job's scope excludes all three cited defects. Relates to open
+   issue #19.
 
 Reviewer note: the tree was dirtied twice by running `mutants.sh` as documented
 and restored both times with `git checkout -- mutants.out mutants.out.old &&

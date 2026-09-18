@@ -202,3 +202,101 @@ Caveat the entry does not give: 967 of those 3,196 (30%) are in `jit/aarch64.rs`
 runner could never test them even if the job were widened crate-wide. The scale
 figure is right; what it would cost to act on it is platform-split.
 
+### F11 (MAJOR, most actionable) — the advisory gate has a silent-green mode, and
+the script's own second documented example already hits it
+
+`scripts/mutants.sh` asserts nothing about how many mutants it found.
+**Break-tested, twice:**
+
+```
+$ ./scripts/mutants.sh hex_decodeX 'hex::'        # simulates a rename
+mutants: functions matching /hex_decodeX/, tested with 'hex::'
+Found 0 mutants to test
+ WARN No mutants found under the active filters
+EXIT=0                                            # <-- green
+```
+
+A function regex that matches nothing exits **0**. In CI that is a green job
+that checked nothing — the exact defect `_shared-context.md` lists
+("A test's `#[ignore]`/filter matched nothing, so libtest reported success") and
+the exact reason `scripts/verify-jit.sh`, in this same directory, carries
+`EXPECTED_PASSES=92` and fails on an unexpected count. The new script was
+written without that lesson applied.
+
+This is not hypothetical. **The script's own second documented example is
+already in that state on this branch:**
+
+```
+$ ./scripts/mutants.sh take_complete_lines 'pool_connection::'
+Found 0 mutants to test
+ WARN No mutants found under the active filters
+real 0.39
+```
+
+`take_complete_lines` does not exist in `src/pool_connection.rs` on `main` or on
+this branch (`grep -c` → 0); it is on the in-flight `security/bound-recv-buffer`
+branch. So the header's worked example, and the 28-minute row of the cost table,
+both refer to a function that is not in this tree — and running the example as
+written reports success in 0.39 s having tested nothing.
+
+Interaction with F3 that makes it worse: the job is red *today* because of the
+equivalent mutant. If `hex_decode` is renamed or moved, the job flips to
+**green**. A break would read as an improvement.
+
+The other direction fails loudly, which is correct: a test filter matching
+nothing (`'hexXX::'`) gives `19 missed, 2 unviable` and exit 2.
+
+### F12 (MAJOR) — "The full lib suite is 48 s" does not reproduce; it is a
+release figure explaining a debug cost
+
+`cargo-mutants` builds and tests in the **debug** profile. Measured on this Mac,
+in this worktree:
+
+```
+$ cargo test --lib
+test result: ok. 149 passed; 0 failed; 2 ignored ... finished in 191.87s
+real 192.40
+```
+
+**192 s, not 48 s** — 4× out. 48 s matches MEM-01's *release* `--lib` figure
+(94 s → 50 s), a different profile from the one the tool uses.
+
+The consequence for the headline table: the entry explains 28 min for 8 mutants
+as "every mutant pays the 48-second suite", which is 8 × 48 s = **6.4 min** —
+it accounts for under a quarter of the number it is offered to explain. At the
+measured 192 s it is 8 × 192 s ≈ 25.6 min, which does reconcile with 28 min once
+builds are added.
+
+So the *conclusion* — scope dominates, pass both arguments — survives and is
+independently supported by my measurement. The stated mechanism is wrong by 4×,
+and quoted from the wrong profile. Same shape as the retracted "~8 minutes"
+`jit-macos` claim and the 2.7× RSS overstatement.
+
+Two further caveats on the table, which is presented as though scope were the
+only variable:
+
+* the rows are **different functions in different modules** (8 mutants in
+  `pool_connection.rs` vs 21 in `hex.rs`), so it is not a controlled comparison;
+* `-- --lib <filter>` narrows the **build** as well as the tests (no bins, no
+  `benches/`, which here is criterion plus the A/B harness), so part of the win
+  is build scope, not test scope.
+
+**The scoped figure does reproduce exactly:** `./scripts/mutants.sh hex_decode
+'hex::'` → `21 mutants tested in 32s: 1 missed, 18 caught, 2 unviable`,
+`real 33.29`. 33 s confirmed.
+
+### F13 (MINOR) — the hardcoded `--timeout 120` is below the tree's own baseline
+
+`mutants.sh` hardcodes `--timeout 120`, undocumented in its header. Measured:
+an unscoped `cargo mutants -F hex_decode --timeout 120` aborts with
+
+```
+TIMEOUT  Unmutated baseline in 10s build + 120s test
+ERROR cargo test failed in an unmutated tree, so no mutants were tested
+```
+
+because the debug suite needs 192 s. The entry anticipates widening scope to
+`miner.rs` or `vm.rs`, "modules with slow tests" — at which point this constant
+aborts the run rather than scaling. It fails loudly, which is the right
+direction, but the value is already wrong for this repo's baseline.
+

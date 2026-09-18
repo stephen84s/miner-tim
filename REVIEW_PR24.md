@@ -300,3 +300,98 @@ because the debug suite needs 192 s. The entry anticipates widening scope to
 aborts the run rather than scaling. It fails loudly, which is the right
 direction, but the value is already wrong for this repo's baseline.
 
+
+---
+
+## Priority 2 — does `scripts/mutants.sh` work as documented?
+
+Mode `100755`, trailing newline present, `set -euo pipefail` set before any
+logic. Argument handling verified by running it:
+
+| Invocation | Result |
+|---|---|
+| no args | usage to stderr, exit **2** |
+| one arg | usage to stderr, exit **2** |
+| `PATH` without `cargo-mutants` | clear message, exit **127** |
+| `hex_decode 'hex::'` | 21 mutants / 32 s, exit **2** (survivor) |
+| `hex_decodeX 'hex::'` | **0 mutants, exit 0** — F11 |
+| `take_complete_lines 'pool_connection::'` (its own example) | **0 mutants, exit 0** — F11 |
+
+Quoting is correct: `"$FN"` and `"$TESTS"` are both quoted, so a regex with
+spaces survives. `command -v ... || { ...; exit 127; }` is not defeated by
+`set -e`. The generated invocation
+`cargo mutants -F "$FN" --timeout 120 -- --lib "$TESTS"` is valid — `--lib` and
+the positional filter reach `cargo test` correctly, proven by 18 caught mutants.
+
+## Priority 8 — clippy and tests, run here
+
+```
+cargo clippy --all-targets --release -- -D warnings   # clean
+cargo test --release --locked                          # 149 lib + 18 bin, 0 failed, 2 ignored
+```
+
+No `src/` file is touched by this PR, so this is a regression check only. (Side
+note for F12: release `--lib` took **101.5 s** on this machine, so 48 s does not
+reproduce in either profile here.)
+
+## Workflow structure (priority 1, mechanical)
+
+`ci.yml` parses. `jobs` = `lint, audit, test, mutants`. Triggers unchanged:
+`pull_request` + `workflow_dispatch` (CI-03 respected). The `mutants` job has no
+`needs:`, no step-level `if:`, and **no `actions/cache` step at all** — so no
+cache key can collide with `target-lint` / `target-test` / `cargo-*`. It reads
+workflow-level `env` and `concurrency` read-only. It cannot affect the other
+five.
+
+Three independent proofs it cannot block a merge:
+1. absent from the five required contexts on the live protection API;
+2. `continue-on-error: true` — the CI workflow run concluded **success** with
+   the job red;
+3. `gh api .../pulls/24` → `mergeable: true, mergeable_state: "unstable"` —
+   "unstable" is the state meaning a non-required check is red and the PR is
+   still mergeable. Empirical, not inferred.
+
+## What I could not verify
+
+* The **28-minute** figure was not reproduced directly (F12 reconciles it
+  arithmetically from the measured 192 s debug suite, which is indirect).
+* Behaviour of `cargo install cargo-mutants --locked` against a future release.
+* Whether `cargo mutants --list` would enumerate the 967 JIT mutants on x86_64;
+  the 3,196 figure was reproduced on aarch64 only.
+
+## Verdict
+
+**NOT MERGEABLE.** No blockers — nothing here can produce a wrong hash, and the
+five required checks are green and untouched. But six majors, and two of them
+reproduce the exact defect class this PR was written to eliminate.
+
+| | |
+|---|---|
+| **Blockers** | none |
+| **Majors** | F1 (102 files / 1.5 MB of tool scratch committed, `.gitignore` not updated), F2 (PROC-06 "Files changed" names 5, diff touches 107), F3 (advisory job permanently red; redness carries no information), F5 ("permanent fix" for a mechanism out of scope of every defect cited), F11 (silent-green mode; the script's own example already hits it), F12 ("48 s" is a release figure, 4× out) |
+| **Minors** | F6 (exit-code collision), F8 (unpinned installer), F9 (no `make mutants`), F13 (`--timeout 120` below the tree's baseline) |
+| **Nits** | F10 (3,196 is aarch64-only) |
+| **Verified sound** | F4 (equivalent-mutant claim, checked exhaustively), F7 (`verify-jit.sh` untouched, `EXPECTED_PASSES=92` intact), all four mutant counts (3196/855/710/88), the 33 s scoped figure, priority-1 non-blocking |
+
+**ACTIONABLE — yes.** In order:
+
+1. **F11** — add a minimum-mutant-count assertion to `scripts/mutants.sh`, the
+   way `verify-jit.sh` asserts `EXPECTED_PASSES=92`, and fix or remove the
+   `take_complete_lines` example that finds nothing on this branch. This is the
+   repo's signature failure mode shipping inside the fix for it.
+2. **F1 / F2** — `git rm -r mutants.out mutants.out.old`, add `mutants.out*` to
+   `.gitignore`, and correct PROC-06's "Files changed". The entry is still on an
+   unmerged branch, so it may be edited in place.
+3. **F12** — replace 48 s with the measured debug figure, or drop the mechanism
+   sentence; label the table's two rows as different functions.
+4. **F3** — either suppress the known-equivalent mutant (`.cargo/mutants.toml`
+   `exclude_re`, or `-E`) so a red job means something, or state plainly in
+   `ci.yml`, PROC-06 and the PR body that the job is red now and stays red.
+5. **F5** — soften "permanent fix" to what was actually built, and note the
+   job's scope excludes all three cited defects. Relates to open issue #19.
+
+Reviewer note: the tree was dirtied twice by running `mutants.sh` as documented
+and restored both times with `git checkout -- mutants.out mutants.out.old &&
+git clean -fd` those two paths; `git status` clean apart from this ledger. No
+production file was mutated — the break tests in F11 used filter arguments, not
+source edits.

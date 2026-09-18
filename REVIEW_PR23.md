@@ -200,3 +200,183 @@ clears before). No behavioural difference, since `reconnect() == false` returns.
   does not re-open it as a hole in this change.
 - I did not run `make verify-jit`: the diff touches no JIT code and both
   `jit-*` CI jobs are green on the PR head.
+
+---
+
+# Round 2 — review of the fixes (`298696b`)
+
+Cold reviewer, 2026-09-19. Base for this round: `3cf9394` (end of round 1);
+head `298696b`. Diff: `AUDIT.md` (+55), `CLAUDE.md` (1 row), `src/pool_connection.rs`
+(+127/−12). Nothing in `src/randomx/jit/`, the emitter, `vm.rs`'s native-loop
+path, `benches/`, `.github/workflows/`, `Makefile`, `scripts/` or
+`.cargo/config.toml` — **nothing to hand off to `jit-reviewer` or `ci-reviewer`.**
+
+`mutants.out/` is untracked in this worktree and is not mine; left alone.
+
+## Coverage ledger (round 2)
+
+| # | Item | State |
+|---|---|---|
+| 1 | Does the new test discriminate? flaky? | done — discriminates, deterministic; R2-F9 |
+| 2 | Is the author's correction of round 1's prediction right? | done — half right; **R2-F3** |
+| 3 | The capped flood test — clean failure on a raised limit? | done — **no**; **R2-F2** |
+| 4 | Round-1 minors F3/F4/F5/F7 closed? | done — F3/F4 yes, F5 half, F7 **no**; R2-F4, R2-F5 |
+| 5 | `read_line`'s uncovered limit — scope call | done — still uncovered; R2-F7 |
+| 6 | Doc / AUDIT / PR-body accuracy | done — **R2-F1**, R2-F5, R2-F6 |
+| 7 | `cargo test --release`, clippy | done — 158 lib + 18 bin + 0 doc, 2 ignored, 0 failed; clippy exit 0 |
+
+**Verdict: MERGEABLE.** No blockers, no majors. Six minors and three nits.
+Something is **ACTIONABLE**: R2-F1, R2-F2, R2-F3, R2-F4, R2-F5, R2-F6.
+
+## What I ran
+
+All mutations taken against a scratchpad copy of `src/pool_connection.rs` and
+restored from it; `git diff --quiet -- src/pool_connection.rs` clean at the end.
+
+| Mutation / run | Result |
+|---|---|
+| Delete `pending.clear()` from the overflow arm (`:567`), keep `reconnect()` | `the_first_job_after_a_flood_…` **FAILS**, `left: None / right: Some("after-flood")`. **4/4 runs**, 10.1 s each. Full lib suite under the mutation: **157 passed, 1 failed** — that test and nothing else. |
+| Unmutated, same test, 5 consecutive runs | 5/5 pass, **8.07 s every time** (5 s `RECONNECT_DELAY` + the server's 3 s sleep + ~0.07 s of actual work) |
+| `MAX_LINE_BYTES` × 4 and × 16 | see R2-F2 |
+| `read_line`'s `>` → `>=` (`:833`) | **survives** — 158 passed |
+| `read_line`'s `>` → `<` (`:833`) | killed, by the *new* test (login's `read_line` errors, so the job never arrives) |
+| `cargo test --release` / `cargo clippy --all-targets --release -- -D warnings` | 176 passed, 2 ignored / exit 0 |
+
+`mutants.out/` is untracked in this worktree and is not mine; left alone.
+
+## Findings
+
+**R2-F1 (minor) — the new test carries two stacked doc-comment blocks, and the
+first states the claim the commit exists to retract.** `pool_connection.rs:1064-1088`.
+Block one: *"the very next read re-enters the overflow arm and reconnects again —
+forever … This asserts the miner **settles**: after dropping the flood it
+reconnects exactly once and stays connected while normal traffic flows."* Block
+two, immediately below, says that is *"not what happens"*. Both bind to the same
+`fn`, so this is not an orphaned comment — it is a doc comment that argues with
+itself, and its first half **claims an assertion the test does not make** (there
+is no settle/third-accept assertion anywhere in the body). Exactly the repo's
+named "a stale claim contradicts a new one" pattern. Delete block one.
+
+**R2-F2 (minor, and the most important item in the round) — round 1's F2 is
+recorded as closed and is not. The cap scales with the constant it defends
+against, so the raise-the-limit mutation now passes instead of spinning.**
+
+`let max_iterations = (MAX_LINE_BYTES * 2) / chunk.len();` — derived from the
+quantity the mutation moves, so the feed always outruns whatever the limit is
+and the terminal `panic!` is unreachable under any pure change to
+`MAX_LINE_BYTES`. Measured on this Mac, single test, release:
+
+| `MAX_LINE_BYTES` | `a_newline_free_stream_is_refused…` |
+|---|---|
+| `1 << 20` (shipping) | **pass**, 0.05 s |
+| × 4 | **pass**, 0.82 s |
+| × 16 | **pass**, 18.29 s |
+
+0.05 → 0.82 → 18.29 is ~16× and ~22× per 4× of limit, i.e. still O(n²).
+Extrapolated to round 1's stated 1000× mutation that is ~20 h and a 2 GiB feed —
+round 1's OOM, merely given a termination proof nobody will wait for.
+
+`AUDIT.md`: *"Now bounded at twice the limit, so that mutation fails cleanly."*
+**False on both clauses** — it does not fail, and at 16× it is already 350×
+slower than baseline. A number in the authoritative record that does not
+reproduce.
+
+What the cap *did* fix: with the bound check deleted the test now fails in
+**0.04 s** instead of spinning. That is worth keeping. Not blind overall,
+either — at 16× `the_receiver_loop_really_drops_a_newline_free_stream` **fails**
+(30 s). So the mutation is caught, just not by this test. Fix is one of: an
+absolute iteration cap (`min(derived, 1024)`), or correct the AUDIT sentence to
+say the socket test is what catches a raised limit.
+
+**R2-F3 (minor) — the refutation of round 1's prediction is over-stated; round 1
+described a reachable sub-case, not an error.** Demonstrated with a throwaway
+helper test (run, then removed), simulating a surviving >MAX stale buffer:
+
+- next read **contains** a newline → `Ok`, buffer self-clears, one bogus
+  `MAX+`-byte line, the real message lost. The author's account — confirmed.
+- next read is **newline-free** (4096 bytes of `y`) → `Err(> MAX)`, buffer still
+  oversized → `reconnect()` → repeat. Round 1's loop — also confirmed.
+
+Sub-case two is what a *hostile peer* does, which is the entire threat model of
+#21: after the reconnect it simply keeps flooding, the very first read re-enters
+the `Err` arm, and the miner reconnects every `RECONNECT_DELAY` forever. The
+commit message (*"It is not … No second overflow, no loop"*), the `AUDIT.md`
+append (*"It does not happen"*) and the new doc comment all state it as a flat
+refutation. It is a refutation of the **cooperative-pool** case only. One
+sentence; the test is unaffected and still measures the right thing.
+
+**R2-F4 (minor) — round 1's F5 was answered in `AUDIT.md` but the inaccurate
+sentence is still shipping in the code.** `pool_connection.rs:213-215` still
+reads *"`read_line` has always had this limit … The value lives here so the two
+cannot drift apart."* Round 1's point was that the *number* cannot drift but the
+*behaviour* already differs (`read_line` rejects `MAX+1`; `receiver_loop`
+delivers a complete line of up to `MAX+4096`). The correction is in the ledger
+and not in the file a reader of `MAX_LINE_BYTES` will actually see.
+
+**R2-F5 (minor) — round 1's F7 is still open, and the same entry now carries two
+further stale numbers.** `AUDIT.md:5825` *"Files changed: `src/pool_connection.rs`
+(… eight tests), `AUDIT.md` (this entry)"* — still omits `CLAUDE.md`, which both
+commits edit, and "eight tests" is now nine. The entry's Verification block
+still says "157 lib + 18 bin"; the real figure is **158 + 18** (measured). The
+`CLAUDE.md` row updated in `298696b` says "Nine tests" but kept "157+18". The
+round-2 append corrects none of the three. The entry is unmerged, so it may be
+edited in place.
+
+**R2-F6 (minor) — the PR body was not updated.** It still says "Testing it took
+**two** attempts", "**Seven** tests", "157 lib + 18 bin", and does not mention
+`pending.clear()`, the third attempt, the cap, or the three claim corrections.
+The **fourth** round 2 in this repo to find an un-updated PR body.
+
+**R2-F7 (nit) — `read_line`'s limit still has no test, and this PR edits that
+line.** The diff changes `1 << 20` → `MAX_LINE_BYTES` at `:833` and rewrites its
+error string; `>` → `>=` there survives the whole suite (verified: 158 passed).
+Pre-existing on `main`, and the PR's framing ("`read_line` has *always* rejected
+past 1 MiB") is a claim about code nothing guards. I judge it **out of scope to
+fix here** — but not for the usual reason: `PoolStream::Plain(TcpStream)` is
+trivially constructible against a local listener, so coverage is ~15 lines of the
+pattern already in this file. The honest minimum is that `AUDIT.md` names the
+gap, since Files changed lists "`read_line` using it" while Verification claims
+the mutations are caught. File a follow-up issue.
+
+**R2-F8 (nit) — round 1's F8 (leaked reconnect thread) is now doubled.** Both
+socket tests end with the server dropping its listener while the miner sits in
+`reconnect()`'s infinite retry loop, so two threads now retry released ephemeral
+ports every 5 s for the life of the test binary. Two leakers and two
+`127.0.0.1:0` binds is a (low-probability) cross-test port-reuse vector that did
+not exist before.
+
+**R2-F9 (nit) — the new test's real deadline is 3 s, not the 5 s it writes
+down.** The server sleeps `Duration::from_secs(3)` then returns, dropping both
+sockets *and* the listener; the miner then sees EOF, `reconnect()` fires and
+**clears `current_job`**, so the remaining 2 s of polling can only return `None`.
+Measured slack is ~0.07 s, i.e. ~40× margin — not flaky on any plausible runner,
+but the number in the code overstates the margin by 67%.
+
+## Checked and clean
+
+- **The test cannot pass spuriously.** The assertion is on the exact `job_id`
+  `"after-flood"`, which has one source; `get_work()` returns `None` until that
+  message parses. Confirmed by the mutated runs: `left: None`, never a wrong id.
+- **No deadlock between the flooding server and the miner.** `reconnect()`
+  (`:603-605`) sets `*self.stream.lock() = None` **before** the
+  `RECONNECT_DELAY` sleep, so the server's blocked `write_all` errors, `break`s,
+  and reaches the second `accept()`. This is why the three-attempt history's
+  hang does not recur.
+- **The login response cannot be over-read into `pending`.** `send_request`
+  consumes it through `read_line`, which reads **one byte at a time** and stops
+  at the newline, so the job line is genuinely the first thing `receiver_loop`
+  sees after the reconnect. That is what makes R2's break test deterministic
+  rather than segmentation-dependent.
+- **Scope**: no `src/randomx/jit/`, emitter, `vm.rs` native-loop path,
+  `benches/`, `.github/workflows/`, `Makefile`, `scripts/` or
+  `.cargo/config.toml`. Nothing to hand to `jit-reviewer` or `ci-reviewer`.
+- **Append-only**: the round-2 `AUDIT.md` text is appended at end of file; the
+  `CLAUDE.md` row is the task board, which is maintained in place by design.
+
+## Could not verify
+
+- No end-to-end run against a real pool (unchanged from round 1).
+- The 20 h / 2 GiB extrapolation for the 1000× mutation in R2-F2 is quadratic
+  extrapolation from three measured points (1×, 4×, 16×), **not** a measurement
+  at 1000×; I stopped at 16× deliberately.
+- I did not run `make verify-jit`; the diff touches no JIT code.

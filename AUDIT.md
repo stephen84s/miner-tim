@@ -5768,3 +5768,55 @@ three review rounds on a PR that *edited the function*, and surfaced within
 minutes of the first test being written for it. The panic fix was reviewed; the
 module's total absence of tests was not remarked on by anyone, including me,
 until it was asked about directly.
+
+### FIX-01 (2026-09-18): `DonationSchedule::level()` pinned (GitHub #25)
+
+The first real defect mutation testing found, one run after the tooling landed.
+
+```
+src/donate.rs:62:9: replace DonationSchedule::level -> u8 with 1   [MISSED]
+```
+
+`level()` had exactly one assertion, inside `floor_enforced`:
+
+```rust
+assert_eq!(DonationSchedule::new(0).level(), MIN_DONATE_LEVEL);   // == 1
+```
+
+That test exists to check a level of 0 is clamped **up** to the minimum — and
+because the minimum *is* 1, a `level()` that ignored its field and always
+returned 1 satisfied it for entirely the wrong reason. Nothing anywhere asserted
+`DonationSchedule::new(5).level() == 5`.
+
+**This is precisely the failure mode PROC-06 exists for**, and it is worth
+noticing that it appeared in code nobody was editing: a test that passes for the
+wrong reason does not announce itself, and no amount of reading the test would
+have shown it. The tool found it in 38 seconds.
+
+**Impact, stated at its real size rather than its scariest.** `level()` is used
+in one place — `pool_connection.rs`'s `"donate-level {}%"` log line.
+`beneficiary_at` computes the schedule from `self.level`, the **field**, so the
+donation itself was never at risk. What a stuck accessor would corrupt is the
+figure reported to the operator.
+
+That is still worth fixing: the donation level is the one financial setting this
+miner has, `--donate-level` is documented as adjustable, and that log line is how
+someone confirms their setting took effect. A miner that donates 5% while
+reporting 1% is lying to its operator about money. But it is a reporting defect,
+not a financial one, and this entry should not be read as the latter.
+
+**The fix** is a test pinning the accessor across values chosen to defeat both
+plausible constants — neither the clamp floor (1) nor the default (5) can pass:
+
+```rust
+for n in [MIN_DONATE_LEVEL, 2, 3, 5, 10, 50, MAX_DONATE_LEVEL] {
+    assert_eq!(DonationSchedule::new(n).level(), n);
+}
+```
+
+**Files changed:** `src/donate.rs` (one test), `AUDIT.md` (this entry).
+
+**Verification.** `./scripts/mutants.sh 'DonationSchedule::level' 'donate::'` —
+2 mutants, **2 caught**, 12 s. The mutant is dead, confirmed by the tool that
+found it rather than by a hand-picked mutation, which is the whole point of
+PROC-06. Full suite green.

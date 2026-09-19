@@ -581,9 +581,26 @@ edit to that line is a literal-to-constant substitution with no behaviour change
 Deferring is defensible and the disclosure is sufficient — apart from R3-F7, the
 missing number.
 
+## Two checks the brief names, closed explicitly
+
+- **`AUDIT.md` append-only.** Cleared. `e3b339f` edits the SEC-03 entry in
+  place, which `CLAUDE.md` step 0 permits — *"an entry added on an unmerged
+  branch may still be edited in place"*. SEC-03 is unmerged. The entry does not
+  claim to append while editing.
+- **The tip commit contains no production-code change.** Both
+  `src/pool_connection.rs` hunks in `e3b339f` are inside `mod tls_tests` — the
+  deleted doc block and the cap. Its entire risk surface is tests, docs and the
+  committed artifacts; nothing in it can affect a hash. That is also why the two
+  majors are the change's risk rather than a sideshow.
+
 ## What I could not verify
 
 - No end-to-end run against a real pool (unchanged from rounds 1-2).
+- **I did not re-run the four helper mutations AUDIT names** (removing the
+  check, raising the limit 1000×, draining one line instead of all, off-by-one
+  `>=`). The 1000× one I covered incidentally at `1 << 30`; the other three I
+  took from the record. Note the committed `mutants.out/caught.txt` is a
+  *different* set — cargo-mutants' own eight — generated 2026-09-16 and stale.
 - I did not run `make verify-jit` — the diff touches no JIT code, no emitter,
   no `vm.rs`. Nothing here is in `jit-reviewer`'s scope.
 - CI: I ran `cargo test --release` and clippy locally on this head, not the

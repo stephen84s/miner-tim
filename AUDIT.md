@@ -6011,3 +6011,20 @@ across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
 Whether this should ever become a required check is therefore still open, and the
 entry deliberately does not answer it.
 
+**Brought up to date with `main` by a merge, not a rebase, and that was not the
+first choice.** The rebase was attempted twice and had to be aborted both times:
+the interactive backend produced a todo list with the same commit listed as both
+done and pending, and the apply backend reported "all conflicts fixed" while
+silently leaving `scripts/mutants.sh` absent, the advisory CI job gone from
+`ci.yml`, and the `CLAUDE.md` rule stripped — with nothing staged to signal it.
+Both aborts restored the branch exactly and the remote was never touched.
+
+`CLAUDE.md`'s own protocol prefers a rebase, and the reason stands: it keeps the
+branch reviewable and the tested tree identical to the landed one. But the branch
+was one commit behind, the conflicts were a pure append in two documents, and a
+merge resolves that without a history rewrite that had already twice produced a
+tree missing the change under review. The cost is one merge commit in a branch
+that squash-merges anyway, so nothing reaches `main` either way.
+
+Recorded because the failure mode is worth knowing: a rebase that reports success
+while dropping the files under review is not a conflict you get asked about.

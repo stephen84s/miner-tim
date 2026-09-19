@@ -6420,6 +6420,22 @@ delegated this session:
   `audit-writer` rather than writing the `AUDIT.md` entry itself, which keeps
   the scribe's "record, do not re-derive" boundary intact.
 
+  **Escalation ladder, added on the user's instruction: Haiku → Sonnet → Opus,
+  raised as the component warrants.** The definitions default to Haiku and the
+  `model` argument overrides per call, so each escalation is deliberate. The
+  trigger recorded in the rule is **not difficulty but whether a defect would
+  be silent** — work whose failure announces itself (red test, broken build,
+  errored connection) is safe to delegate cheaply, while work where a defect
+  *passes* is expensive to get wrong however small the diff. That is the
+  through-line of this file's whole failure history: wrong hashes the pool
+  quietly rejects, a verifier that accepted every certificate, a gate that
+  reported success having tested nothing. Sonnet covers real logic with a
+  visible blast radius (Stratum, the miner loop, argument parsing, harnesses);
+  Opus covers the silent-failure surface — JIT, emitter, native-loop path,
+  hashing, TLS, concurrency — **and every independent review regardless of what
+  the diff touched**, since review is the mechanism that caught every class of
+  defect recorded here.
+
   **It is barred by default from `src/randomx/jit/`, the emitter and `vm.rs`'s
   native-loop path.** This is the one carve-out where the token saving would be
   a false economy: a defect there does not crash, it silently produces wrong

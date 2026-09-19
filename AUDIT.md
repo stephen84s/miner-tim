@@ -5917,12 +5917,24 @@ the path, was green, and proved nothing — the same shape as PR #22's three
 failed attempts, arrived at independently one PR later.
 
 **Files changed:** `src/pool_connection.rs` (the constant, `read_line` using it,
-`take_complete_lines`, the bounded loop, eight tests), `AUDIT.md` (this entry).
+`take_complete_lines`, the bounded loop, **nine** tests), `CLAUDE.md` (task
+board), `AUDIT.md` (this entry).
 
-**Verification.** 157 lib + 18 bin tests, clippy `-D warnings` clean. Both the
+**Verification.** 159 lib + 18 bin tests, clippy `-D warnings` clean. (Review
+measured 158 before this branch was rebased onto `main`; #26's donate test landed
+in between. Recorded because a test count is exactly the kind of figure that goes
+stale between a review and its fix, and this file has carried several.) Both the
 helper mutations and the wiring mutation are caught. The socket test is hermetic:
 `127.0.0.1` on an ephemeral port, which is not in `TLS_PORTS`, so it is plain TCP
 with no certificate involved; it takes ~5 s, bounded by `RECONNECT_DELAY`.
+
+**`read_line`'s own limit is still untested, and this entry should say so.**
+Mutation testing over `main` shows `> MAX_LINE_BYTES` there survives `> → >=`
+(confirmed still surviving on this branch). This change edits that line — swapping
+the `1 << 20` literal for the shared constant — and the Files-changed list says so,
+while Verification claims the mutations are caught. That is true of
+`take_complete_lines`, not of `read_line`. The precedent this entry argues from
+is itself uncovered; filed rather than widened into this change.
 
 **Not established.** No hostile pool was exercised end to end — the flood comes
 from a local listener, not a Stratum peer mid-session, so the interaction between
@@ -5964,11 +5976,27 @@ Two dead ends recorded because each looked like a working test:
   also keeps the listener alive — dropping it would have made a third accept
   unobservable and the assertion vacuous.
 
-Also fixed from review: the flood test's `loop` was **uncapped**, so raising the
-limit would make it spin O(n²) rather than fail — review measured >19 minutes of
-CPU and >3.2 GB RSS still climbing, which on the 7 GB `macos-14` runner is an OOM
-instead of a verdict. Now bounded at twice the limit, so that mutation fails
-cleanly.
+Also from review: the flood test's `loop` was **uncapped**, so raising the limit
+would make it spin O(n²) rather than fail — measured at >19 minutes of CPU and
+>3.2 GB RSS still climbing, which on the 7 GB `macos-14` runner is an OOM instead
+of a verdict.
+
+**The first cap did not fix it, and this entry said it did.** It was
+`(MAX_LINE_BYTES * 2) / chunk.len()` — derived from the very quantity the "raise
+the limit" mutation moves, so the cap scaled with the mutation, the terminal
+`panic!` became unreachable, and the test *passed* instead of failing. Round 2
+measured it: 1x passes in 0.05 s, 4x in 0.82 s, 16x in 18.3 s, still quadratic.
+The claim "now bounded at twice the limit, so that mutation fails cleanly" was
+false on both clauses, and is withdrawn.
+
+Now bounded by an **absolute** 4 MiB, independent of `MAX_LINE_BYTES`. Verified
+by raising the limit 16x: the test fails in 42 s with *"fed 4194304 bytes without
+being refused; the limit is not being enforced"*, where the old cap passed in
+18 s having proved nothing.
+
+Kept as a minor rather than a major by review, and rightly: the *socket* test
+still caught the mutation throughout, so nothing was shippable-green — what was
+wrong was the record, not the protection.
 
 **Three corrections to this entry's own claims**, from review:
 

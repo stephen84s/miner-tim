@@ -1062,17 +1062,6 @@ mod tls_tests {
     }
 
     /// F1 from review: `pending.clear()` in the overflow arm had **no coverage**
-    /// — removing it while keeping `reconnect()` shipped green, because the
-    /// wiring test above only needs *a* second accept and `reconnect()` still
-    /// supplies one.
-    ///
-    /// The consequence of losing it is worse than the original defect. The
-    /// oversized remainder survives the reconnect, so the very next read
-    /// re-enters the overflow arm and reconnects again — forever, one cycle per
-    /// `RECONNECT_DELAY`, with the miner never doing any work. This asserts the
-    /// miner **settles**: after dropping the flood it reconnects exactly once and
-    /// stays connected while normal traffic flows.
-    /// F1 from review: `pending.clear()` in the overflow arm had **no coverage**
     /// — removing it shipped green.
     ///
     /// Review predicted the consequence would be an infinite reconnect loop.
@@ -1197,14 +1186,24 @@ mod tls_tests {
     fn a_newline_free_stream_is_refused_instead_of_buffered() {
         let mut pending = Vec::new();
         let chunk = vec![b'x'; 4096]; // the real read size
-        // Bounded deliberately. An open `loop` here looks harmless but is not:
-        // if a future change raises the limit, this test does not fail — it
-        // spins, rescanning an ever-growing buffer for a newline that never
-        // arrives (O(n^2)), and exhausts memory instead. Review measured >19
-        // minutes of CPU and >3.2 GB RSS still climbing against a 1000x limit,
-        // which on the 7 GB `macos-14` runner is an OOM rather than a verdict.
-        // Capping the feed at twice the limit turns that into a clean failure.
-        let max_iterations = (MAX_LINE_BYTES * 2) / chunk.len();
+        // Bounded by an ABSOLUTE byte count, not by `MAX_LINE_BYTES`.
+        //
+        // The first attempt at this cap was `(MAX_LINE_BYTES * 2) / chunk.len()`,
+        // which is derived from the very quantity a "raise the limit" mutation
+        // moves — so the cap scaled with the mutation, the `panic!` below became
+        // unreachable, and the test *passed* rather than failing. Measured at
+        // 16x: passes in 18.3 s, still O(n^2). The audit entry recorded that cap
+        // as fixing the problem; it did not, and round 2 caught it.
+        //
+        // Why it needs bounding at all: with an open `loop`, raising the limit
+        // makes this spin, rescanning an ever-growing buffer for a newline that
+        // never comes, and exhaust memory instead of failing. On the 7 GB
+        // `macos-14` runner that is an OOM rather than a verdict.
+        //
+        // 4 MiB is four times the real limit and independent of it, so a raised
+        // limit runs out of iterations and fails cleanly here.
+        const FEED_CEILING_BYTES: usize = 4 * 1024 * 1024;
+        let max_iterations = FEED_CEILING_BYTES / chunk.len();
         for _ in 0..max_iterations {
             pending.extend_from_slice(&chunk);
             match take_complete_lines(&mut pending) {

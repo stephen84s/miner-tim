@@ -1,0 +1,564 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 8.674254125000001,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 188.066293042,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec![])",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 877,
+              "column": 5
+            },
+            "end": {
+              "line": 888,
+              "column": 14
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_877_col_5.log",
+      "diff_path": "diff/src__pool_connection.rs_line_877_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.005425958,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 188.330266125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec![String::new()])",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 877,
+              "column": 5
+            },
+            "end": {
+              "line": 888,
+              "column": 14
+            }
+          },
+          "replacement": "Ok(vec![String::new()])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_877_col_5_001.log",
+      "diff_path": "diff/src__pool_connection.rs_line_877_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.647615625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 187.959015542,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec![\"xyzzy\".into()])",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 877,
+              "column": 5
+            },
+            "end": {
+              "line": 888,
+              "column": 14
+            }
+          },
+          "replacement": "Ok(vec![\"xyzzy\".into()])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_877_col_5_002.log",
+      "diff_path": "diff/src__pool_connection.rs_line_877_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.617677709,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 187.340989333,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:878:58: replace == with != in take_complete_lines",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 878,
+              "column": 58
+            },
+            "end": {
+              "line": 878,
+              "column": 60
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_878_col_58.log",
+      "diff_path": "diff/src__pool_connection.rs_line_878_col_58.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.677214917,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 189.652302875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:881:12: delete ! in take_complete_lines",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 881,
+              "column": 12
+            },
+            "end": {
+              "line": 881,
+              "column": 13
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_881_col_12.log",
+      "diff_path": "diff/src__pool_connection.rs_line_881_col_12.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.653891625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 188.564954375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:885:22: replace > with == in take_complete_lines",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 885,
+              "column": 22
+            },
+            "end": {
+              "line": 885,
+              "column": 23
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_885_col_22.log",
+      "diff_path": "diff/src__pool_connection.rs_line_885_col_22.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.658475417,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 186.577810125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:885:22: replace > with < in take_complete_lines",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 885,
+              "column": 22
+            },
+            "end": {
+              "line": 885,
+              "column": 23
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_885_col_22_001.log",
+      "diff_path": "diff/src__pool_connection.rs_line_885_col_22_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.677049834,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 188.448481875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/pool_connection.rs:885:22: replace > with >= in take_complete_lines",
+          "package": "minertim",
+          "file": "src/pool_connection.rs",
+          "function": {
+            "function_name": "take_complete_lines",
+            "return_type": "-> Result<Vec<String>, usize>",
+            "span": {
+              "start": {
+                "line": 863,
+                "column": 1
+              },
+              "end": {
+                "line": 889,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 885,
+              "column": 22
+            },
+            "end": {
+              "line": 885,
+              "column": 23
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__pool_connection.rs_line_885_col_22_002.log",
+      "diff_path": "diff/src__pool_connection.rs_line_885_col_22_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.625093917,
+          "process_status": "Success",
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 188.346984542,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/stephen/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=minertim@0.1.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 8,
+  "missed": 0,
+  "caught": 8,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-09-16T21:43:05.497636Z",
+  "end_time": "2026-09-16T22:11:33.409263Z",
+  "cargo_mutants_version": "27.1.0"
+}

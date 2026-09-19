@@ -1,0 +1,21 @@
+--- src/pool_connection.rs
++++ delete ! in take_complete_lines
+@@ -873,17 +873,17 @@
+ /// arrives. Returning whole lines only is also what keeps a truncated message
+ /// from ever reaching `handle_pool_message`, so an oversized message cannot leave
+ /// a partial job active.
+ fn take_complete_lines(pending: &mut Vec<u8>) -> Result<Vec<String>, usize> {
+     let mut lines = Vec::new();
+     while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+         let raw: Vec<u8> = pending.drain(..=pos).collect();
+         let line = String::from_utf8_lossy(&raw).trim().to_string();
+-        if !line.is_empty() {
++        if  /* ~ changed by cargo-mutants ~ */line.is_empty() {
+             lines.push(line);
+         }
+     }
+     if pending.len() > MAX_LINE_BYTES {
+         return Err(pending.len());
+     }
+     Ok(lines)
+ }

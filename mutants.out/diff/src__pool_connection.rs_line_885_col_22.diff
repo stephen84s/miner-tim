@@ -1,0 +1,21 @@
+--- src/pool_connection.rs
++++ replace > with == in take_complete_lines
+@@ -877,17 +877,17 @@
+     let mut lines = Vec::new();
+     while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+         let raw: Vec<u8> = pending.drain(..=pos).collect();
+         let line = String::from_utf8_lossy(&raw).trim().to_string();
+         if !line.is_empty() {
+             lines.push(line);
+         }
+     }
+-    if pending.len() > MAX_LINE_BYTES {
++    if pending.len() == /* ~ changed by cargo-mutants ~ */ MAX_LINE_BYTES {
+         return Err(pending.len());
+     }
+     Ok(lines)
+ }
+ 
+ fn parse_job(data: &Value) -> Option<Job> {
+     let blob_hex = data.get("blob")?.as_str()?;
+     let target_hex = data.get("target")?.as_str()?;

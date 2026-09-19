@@ -6343,145 +6343,82 @@ direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
 `_shared-context.md` are identical to their sources. The damage was purely
 additive.
 
-## 2026-09-19 - Verify GitHub issue #4 (debug_assert! coverage)
+### TEST-01 (2026-09-20): issue #4's `debug_assert!` guards are exercised — proven, not asserted
 
-### Request
-Investigate and close GitHub issue #4: "make test runs debug but the AUDIT's verification ran release, so the debug_asserts were never exercised (R5-F2)". The issue reported that three `debug_assert!` guards in the JIT code were cited as evidence in AUDIT.md, but the verification runs were in release mode where they are compiled out.
+**Issue #4.** Three `debug_assert!` guards were cited in `AUDIT.md` as safety
+nets while the verification runs quoted were done in **release**, where
+`debug_assert!` is compiled out — so the evidence never exercised them, and
+`make test` (debug) was a different profile from the one verified.
 
-### Investigation
+**Verdict: FULLY CLOSED.** All four guards the issue names are reached by
+`scripts/verify-jit.sh`, which runs its 92-test set in **both** debug and
+release and is run by `jit-macos` and `jit-linux-arm` on every pull request.
+PLAT-02 closed this when it added the two-profile gate; the issue was never
+updated to say so.
 
-**All debug_assert! statements enumerated (23 total):**
+**Proven by breaking each guard and watching the gate fail**, one at a time,
+each restored from a `/tmp` copy and confirmed `cmp` byte-identical:
 
-| File | Count | Assert Types |
-|------|-------|--------------|
-| `src/randomx/vm.rs` | 1 | program_size bounds |
-| `src/randomx/jit/compiler.rs` | 5 | bytecode length, CBRANCH forward-target, others |
-| `src/randomx/jit/memory.rs` | 1 | type size equality |
-| `src/randomx/jit/aarch64.rs` | 16 | imm7/imm12 ranges, byte-offset multiples, FP stack checks |
+| Guard | Location | Broken -> gate result |
+| :--- | :--- | :--- |
+| `stp_fp_imm` imm7 range | `jit/aarch64.rs:190` | 4 tests fail, debug profile |
+| `ldp_fp_imm` imm7 range | `jit/aarch64.rs:203` | 1 test fails, debug profile |
+| `subs_imm` imm12 | `jit/aarch64.rs:158` | 3 tests fail, debug profile |
+| CBRANCH forward-target | `jit/compiler.rs:637` | **8 tests fail, debug profile** |
 
-**Three asserts specifically named in the issue:**
-1. `stp_fp_imm`/`ldp_fp_imm` imm7 range checks (lines 190-193, 203-206 in `aarch64.rs`)
-2. `subs_imm` imm12 check (line 158 in `aarch64.rs`)
-3. CBRANCH forward-target check (lines 637-640 in `compiler.rs`)
+Unmutated: `verify-jit: GATE PASSED on Darwin arm64 - 92 tests, debug + release`, exit 0.
 
-### Profile Coverage Story
+**Two corrections to this entry's own drafts, recorded because neither error was
+caught by its author and the second is the more interesting.**
 
-Verified by reading and observation, not inference:
+*Draft 1* asserted the issue was closed while stating the break-test had been
+skipped for "time constraint", on the grounds that "the gate framework ensures
+this works by design". An assertion, not evidence — this repo's signature
+defect, and the reason the entry was redone.
 
-**`make test`** — `cargo test` (debug profile)
-- Whole suite: 131 lib + 10 bin tests, debug profile
-- `debug_assert!` **executes**
-- Scope: regression suite, not the JIT-specific gate
+*Draft 2* did run probes and reported the CBRANCH guard as **NOT REACHED**,
+downgrading the verdict to "partly closed" and recommending a new test.
+**That finding was wrong.** It probed with a hand-built partial filter
+(`randomx::jit::` plus `randomx::vm::native_loop`, 69 tests) instead of the gate
+itself, and the suites that exercise CBRANCH — `full_hash_tests` and
+`native_loop_diff_tests` — were exactly the ones that filter excluded. Re-run
+through `./scripts/verify-jit.sh`, the same mutation gives **exit 1, `GATE
+FAILED`**, 8 debug-profile failures including
+`full_hash_tests::test_native_loop_known_answer` and
+`native_loop_diff_tests::native_loop_zero_iterations_terminates`. CBRANCH
+targets derive from real RandomX programs, so the known-answer vectors reach the
+guard while the JIT unit tests do not.
 
-**CI `ci.yml` — `test` job** — `cargo test --release --locked` (x86_64 Linux)
-- Whole suite: 131 lib + 10 bin tests, release profile
-- `debug_assert!` compiled out
-- Target: x86_64 Linux (JIT cfg'd out entirely — no ARM64 emitted)
-- Cannot exercise JIT debug_asserts
+That error is the **mirror image** of this repo's usual one — it *under*-claimed
+coverage rather than over-claiming it — but the root cause is identical in both
+directions: a filter narrower than the thing being judged, the same mechanism as
+the vacuous `0 passed; 161 filtered out` trap. **When the question is "does the
+gate catch this", run the gate, not a subset of it.**
 
-**CI `jit.yml` — `jit-macos` job** — `make verify-jit` → `scripts/verify-jit.sh`
-- Runs 92 filtered tests (via `JIT_FILTERS`) in **BOTH** debug **AND** release profiles
-- Debug: `debug_assert!` executes
-- Release: `debug_assert!` compiled out
-- Target: macOS aarch64 (Apple Silicon)
-- Hard gate: non-zero exit on failure or unexpected test count
+**Profile story**, read from the files and confirmed by the runs above:
 
-**CI `jit.yml` — `jit-linux-arm` job** — `scripts/verify-jit.sh` directly
-- Runs 92 filtered tests (via `JIT_FILTERS`) in **BOTH** debug **AND** release profiles
-- Debug: `debug_assert!` executes
-- Release: `debug_assert!` compiled out
-- Target: Linux aarch64
-- Hard gate: non-zero exit on failure or unexpected test count
+| Context | Profile | Reaches the JIT? | `debug_assert!` live? |
+| :--- | :--- | :--- | :--- |
+| `make test` | debug | on aarch64 hosts, whole suite | yes |
+| CI `test` (`ci.yml`) | release | no - x86_64, `randomx::jit` is `cfg`'d out | no |
+| CI `jit-macos` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
+| CI `jit-linux-arm` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
 
-**`scripts/verify-jit.sh` structure:**
-- Explicitly documents (lines 122-136): "the only profile in which `debug_assert!` executes"
-- Runs full test suite in debug mode (line 137: `run_group "debug profile (debug_assert! live)" ""`)
-- Runs same suite in release mode (line 157: `run_group "release profile (shipping profile)" "--release"`)
-- Validates exact test count: 92 expected, fail if different (lines 110-117)
-- Load-bearing test: `full_mode_v1_vm_reports_the_native_loop_effective` requires successful JIT allocation
+The x86_64 jobs are not evidence about these guards at all; they compile no JIT.
 
-### Verification Performed
+**Inventory.** 23 `debug_assert!` invocations across 24 matching lines (one is a
+comment): `jit/aarch64.rs` 16, `jit/compiler.rs` 5, `jit/memory.rs` 1, `vm.rs` 1.
+Counted as invocations rather than matching lines, because multi-line
+invocations make the two differ.
 
-**By reading and code inspection (established):**
-1. All 23 debug_asserts are present in source, listed by file and line
-2. `scripts/verify-jit.sh` explicitly runs both debug and release profiles on aarch64
-3. CI workflows call verify-jit.sh on every PR (`jit-macos` and `jit-linux-arm` are required checks)
-4. x86_64 CI jobs (`lint`, `test`, `audit`) run release mode and JIT is cfg'd out entirely — correctly not cited as JIT evidence
-5. PLAT-02 entry (merged 2026-08-23) records: "92 tests — JIT unit + native-loop differential + known-answer vectors — in **both** debug and release, so the native loop's `debug_assert!` guards finally execute (GitLab #6 — now GitHub #4)"
+**Files changed:** `AUDIT.md` (this entry), `CLAUDE.md` (task-board row). No
+`.rs` file is modified — every mutation was reverted and `cmp`-verified.
 
-**By break-testing each guard (the core verification):**
+**Verification.** `cargo clippy --all-targets --release -- -D warnings` clean;
+`git status` shows no modified `.rs` files.
 
-Break-testing procedure: modify the guard's condition to `false`, run debug test suite, confirm failure, restore file byte-for-byte. Using `rtk proxy cargo` to bypass shell hook.
-
-1. **Guard 1: `stp_fp_imm` imm7 range check (line 190 in aarch64.rs)**
-   - Condition: `(-512..=504).contains(&byte_offset)`
-   - Changed to: `false`
-   - Result: **REACHED** — 4 tests failed with panic "STP/LDP (FP) imm7 out of range — PROBE" at line 190
-   - Failing tests: `test_stp_ldp_fp_imm`, `native_loop_emitted_instruction_accounting`, `compile_native_loop_accepts_the_maximum_real_dataset_offset`, `get_fn_rejects_native_loop_code`
-   - File restored: byte-identical after `cmp`
-
-2. **Guard 2: `ldp_fp_imm` imm7 range check (line 203 in aarch64.rs)**
-   - Condition: `(-512..=504).contains(&byte_offset)`
-   - Changed to: `false`
-   - Result: **REACHED** — 1 test failed with panic "STP/LDP (FP) imm7 out of range — PROBE" at line 203
-   - Failing test: `test_stp_ldp_fp_imm`
-   - File restored: byte-identical after `cmp`
-
-3. **Guard 3: `subs_imm` imm12 check (line 158 in aarch64.rs)**
-   - Condition: `imm12 < 4096`
-   - Changed to: `false`
-   - Result: **REACHED** — 3 tests failed with panic "subs_imm imm12 check — PROBE" at line 158
-   - Failing tests: `test_subs_imm_sets_flags`, `compile_native_loop_accepts_the_maximum_real_dataset_offset`, `get_fn_rejects_native_loop_code`
-   - File restored: byte-identical after `cmp`
-
-4. **Guard 4: CBRANCH forward-target check (lines 637-640 in compiler.rs)**
-   - Condition: `(ibc.target as i32) < _pc as i32`
-   - Changed to: `false`
-   - Result: **NOT REACHED** — All 69 tests passed (92 filtered tests - 23 that call the guards 1-3)
-   - No test failure; guard is not exercised by the debug test suite
-   - File restored: byte-identical after `cmp`
-
-**Unmutated gate run:**
-- Ran `./scripts/verify-jit.sh` without modification on this worktree
-- Result: **GATE PASSED** — "92 tests, debug + release" (exit code 0)
-- Final line: "verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug + release"
-
-**Not established by this session:**
-- The CBRANCH forward-target guard (Guard 4) is not reached by the test suite, so its correctness cannot be confirmed empirically
-- Whether x86_64 jobs carry JIT-relevant code paths (they do not — the JIT module is gated on aarch64)
-
-### Verdict on Issue #4
-
-**PARTLY CLOSED.** The gap described in issue #4 (release-mode verification missing debug_assert coverage) has been fixed by PLAT-02 (merged 2026-08-23). However, not all four guards are reached by the gate:
-
-**Verified closed (break-test confirmed):**
-1. `stp_fp_imm` imm7 range check — **REACHED** — 4 tests fail on probe
-2. `ldp_fp_imm` imm7 range check — **REACHED** — 1 test fails on probe
-3. `subs_imm` imm12 check — **REACHED** — 3 tests fail on probe
-
-**Not established (break-test shows unexercised):**
-4. CBRANCH forward-target check (`compiler.rs` line 637-640) — **NOT REACHED** — 0 tests fail when guard is broken; all 69/69 tests pass
-
-**What PLAT-02 fixed:**
-- `scripts/verify-jit.sh` now runs the full suite in **both** debug and release profiles
-- CI enforces this via `jit-macos` and `jit-linux-arm` (required checks on every PR)
-- 92 tests run in debug mode where `debug_assert!` executes
-
-**What remains open:**
-- The CBRANCH forward-target guard (issue #4 line 637-640 in `compiler.rs`) is not exercised by the 92-test gate
-- Issue #4 **named this guard specifically** ("CBRANCH forward-target rule") so leaving it unverified is incomplete
-- The guard may be unreachable in the current test set, or may require a specific bytecode pattern not generated by the tests
-- A test that triggers a forward branch from a position >= pc would exercise this guard; none of the 92 tests currently generate such a pattern
-
-**Recommendation:**
-- Add a test case that generates a CBRANCH instruction with a forward target to complete verification, or
-- Justify in code why a forward target cannot occur in practice (the comment at line 633 says "compile_program only ever derives targets from a prior write, so target+1 <= pc always" — if this invariant is guaranteed, the guard could be a sanity check rather than load-bearing)
-
-### Files Changed
-- None (this is a verification task, not a code change)
-
-### Assumptions & Notes
-- PLAT-02 was the fix; this task confirms it worked
-- The JIT is gated on `#[cfg(target_arch = "aarch64")]` so x86_64 CI jobs are correctly not cited as JIT evidence
-- `make test` is not the JIT gate (broader regression suite); the dedicated gate is `verify-jit.sh`
-- Test filters (`JIT_FILTERS`) in verify-jit.sh match: 66 JIT unit + 4 differential + 15 known-answer/guards + 2 v2 + 2 v2-jit + 3 vm = 92 tests exactly
+**Not established.** The probes show each of the four guards is *reached*; they
+do not show the guards are *correct*, nor that the other 19 `debug_assert!`
+invocations are reached — only the four the issue named were probed. No probe
+was run on `jit-linux-arm`, so the Linux half rests on the same script running
+there, not on an observed Linux failure.

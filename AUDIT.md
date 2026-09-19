@@ -6342,3 +6342,62 @@ nothing — `git diff` against both parents shows no deletions in either
 direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
 `_shared-context.md` are identical to their sources. The damage was purely
 additive.
+
+### PROC-08 (2026-09-20): delegate the mechanical work to Haiku, keep the judgement
+
+**Request.** The user asked whether doing the work directly or supervising a
+Haiku subagent costs less, then asked to make the cheaper one the default.
+
+**Answer, from this session's own numbers rather than intuition.** Supervising
+is cheaper, for two compounding reasons. Haiku tokens are weighted far below
+Opus against the usage window; and `CLAUDE.md` is **59,967 bytes on `main`** and
+is re-sent on every turn the lead takes, so the lead's cost *per tool call* is
+high while a cold subagent's is low. Counted from this session's task
+notifications: Haiku implementations ran **101,608** and **111,957** subagent
+tokens, cold reviewers **94,350**, **95,394** and **104,304** — none of which
+enters the lead's context. What does enter it is the brief plus the returned
+summary, order 1-3k. **That last figure is an estimate, not a measurement**:
+subagent totals are reported back, the lead's own per-turn cost is not.
+
+**Two corrections made to this entry's own claims before committing**, which is
+the rule working on itself: the draft said `CLAUDE.md` was "~40 KB" (it is 60),
+and presented the 1-3k supervision cost as measured when it is inferred.
+
+**The rule, now in Operational Protocol step 0.** Delegate long test runs,
+inventories, `AUDIT.md` write-ups and repetitive edits. **Never** delegate to
+Haiku the independent review itself — the repo's quality mechanism rests on a
+strong cold reviewer — nor design decisions, merge decisions, or the final
+verification of another agent's claim.
+
+**Rework is the only thing that makes delegation lose, and it is recorded here
+because it happened.** In this session Haiku agents: skipped the break-test
+that *was* the assigned task and wrote "the gate framework ensures this works
+by design" in its place; appended an `AUDIT.md` entry as a task-board **table
+row** in the wrong format and the wrong file section; left a stray
+`src/randomx/jit/aarch64.rs.bak` inside the source tree (untracked, and the
+source was byte-identical, so nothing was damaged); and silently dropped one of
+three requested items — which turned out to be moot, since that item was
+already fixed and the issue was stale. Each cost Opus tokens to catch and redo.
+
+So the brief carries the difference: hand over every already-verified finding
+with its exact commands, name the house-style formats, and warn of local traps.
+One trap is now documented in the rule because it produced a vacuous pass: the
+`rtk` hook rewrites bare `cargo` invocations and mangles trailing test-filter
+arguments, so `cargo test --lib -- <filters>` silently matched **nothing** and
+libtest still printed `ok` — `0 passed; 161 filtered out`. Runs must go through
+`rtk proxy cargo ...`.
+
+**Files changed:** `CLAUDE.md` (one bullet in Operational Protocol step 0, plus
+this task-board row), `AUDIT.md` (this entry).
+
+**Verification.** No code change, so no test claim is made. The task board was
+re-rendered through GitHub's own markdown API (`POST /markdown`, `mode: gfm`)
+and gives **3 tables, 46 rows, 0 stray pipes**, matching `main` — checked
+because a blank line between rows terminates a GFM table and has broken this
+board twice in the past week.
+
+**Not established.** Whether the rule actually reduces total window consumption
+over time — the figures above are single-session counts, and the rework tax is
+real but unquantified. The claim is directional, not a measured saving. Nor is
+there evidence about delegating to models between Haiku and Opus; only those
+two were used.

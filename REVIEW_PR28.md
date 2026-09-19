@@ -162,8 +162,9 @@ useless. `ls -d` would fix it. Not worth a push on its own.
 Committing this ledger **arms the gate**. The PR is `CLEAN` right now only
 because no `REVIEW_*.md` is present at the head. The next push of this branch
 with this file in the tree turns `lint` red — correctly, by design. Strip the
-ledger (`git rm REVIEW_PR28.md`) *before* pushing, and record `70afde2`'s
-successor sha — this file's commit sha — in the `AUDIT.md` entry per LEDGER-01.
+ledger (`git rm REVIEW_PR28.md`) *before* pushing, and record this ledger's
+commit sha in the `AUDIT.md` entry per LEDGER-01. (`70afde2` above was a
+throwaway crash-recovery test commit, since reset away — not this ledger.)
 
 ## What I did not verify
 

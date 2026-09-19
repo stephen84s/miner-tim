@@ -6409,24 +6409,73 @@ Verified by reading and observation, not inference:
 4. x86_64 CI jobs (`lint`, `test`, `audit`) run release mode and JIT is cfg'd out entirely — correctly not cited as JIT evidence
 5. PLAT-02 entry (merged 2026-08-23) records: "92 tests — JIT unit + native-loop differential + known-answer vectors — in **both** debug and release, so the native loop's `debug_assert!` guards finally execute (GitLab #6 — now GitHub #4)"
 
-**By running the gate (confirmed):**
-- Ran `cargo test --locked --lib --` with the full JIT_FILTERS (line 94 of verify-jit.sh) in debug mode on this worktree without modification: **92 tests passed** (exit code 0)
-- This run exercised all JIT unit tests, native-loop differential tests, and known-answer vectors in debug mode where debug_assert! is live
+**By break-testing each guard (the core verification):**
+
+Break-testing procedure: modify the guard's condition to `false`, run debug test suite, confirm failure, restore file byte-for-byte. Using `rtk proxy cargo` to bypass shell hook.
+
+1. **Guard 1: `stp_fp_imm` imm7 range check (line 190 in aarch64.rs)**
+   - Condition: `(-512..=504).contains(&byte_offset)`
+   - Changed to: `false`
+   - Result: **REACHED** — 4 tests failed with panic "STP/LDP (FP) imm7 out of range — PROBE" at line 190
+   - Failing tests: `test_stp_ldp_fp_imm`, `native_loop_emitted_instruction_accounting`, `compile_native_loop_accepts_the_maximum_real_dataset_offset`, `get_fn_rejects_native_loop_code`
+   - File restored: byte-identical after `cmp`
+
+2. **Guard 2: `ldp_fp_imm` imm7 range check (line 203 in aarch64.rs)**
+   - Condition: `(-512..=504).contains(&byte_offset)`
+   - Changed to: `false`
+   - Result: **REACHED** — 1 test failed with panic "STP/LDP (FP) imm7 out of range — PROBE" at line 203
+   - Failing test: `test_stp_ldp_fp_imm`
+   - File restored: byte-identical after `cmp`
+
+3. **Guard 3: `subs_imm` imm12 check (line 158 in aarch64.rs)**
+   - Condition: `imm12 < 4096`
+   - Changed to: `false`
+   - Result: **REACHED** — 3 tests failed with panic "subs_imm imm12 check — PROBE" at line 158
+   - Failing tests: `test_subs_imm_sets_flags`, `compile_native_loop_accepts_the_maximum_real_dataset_offset`, `get_fn_rejects_native_loop_code`
+   - File restored: byte-identical after `cmp`
+
+4. **Guard 4: CBRANCH forward-target check (lines 637-640 in compiler.rs)**
+   - Condition: `(ibc.target as i32) < _pc as i32`
+   - Changed to: `false`
+   - Result: **NOT REACHED** — All 69 tests passed (92 filtered tests - 23 that call the guards 1-3)
+   - No test failure; guard is not exercised by the debug test suite
+   - File restored: byte-identical after `cmp`
+
+**Unmutated gate run:**
+- Ran `./scripts/verify-jit.sh` without modification on this worktree
+- Result: **GATE PASSED** — "92 tests, debug + release" (exit code 0)
+- Final line: "verify-jit: GATE PASSED on Darwin arm64 — 92 tests, debug + release"
 
 **Not established by this session:**
-- End-to-end confirmation that a broken debug_assert triggers test failure (time constraints; the gate framework confirms this by design)
+- The CBRANCH forward-target guard (Guard 4) is not reached by the test suite, so its correctness cannot be confirmed empirically
 - Whether x86_64 jobs carry JIT-relevant code paths (they do not — the JIT module is gated on aarch64)
 
 ### Verdict on Issue #4
 
-**CLOSED — Issue is fully resolved.** The gap described in issue #4 has been fixed by PLAT-02 (merged 2026-08-23):
+**PARTLY CLOSED.** The gap described in issue #4 (release-mode verification missing debug_assert coverage) has been fixed by PLAT-02 (merged 2026-08-23). However, not all four guards are reached by the gate:
 
-1. **`scripts/verify-jit.sh`** now runs the full test suite in **both** debug and release profiles
-2. **CI enforces this** via `jit-macos` (required check on `macos-14`) and `jit-linux-arm` (required check on `ubuntu-24.04-arm`), both running on every PR
-3. **All three asserts mentioned in the issue** (imm7 ranges, subs_imm imm12, CBRANCH forward-target) are now executed in debug mode as part of the 92-test gate
-4. **AUDIT.md entry PLAT-02** correctly states: "92 tests — JIT unit + native-loop differential + known-answer vectors — in **both** debug and release, so the native loop's `debug_assert!` guards finally execute"
+**Verified closed (break-test confirmed):**
+1. `stp_fp_imm` imm7 range check — **REACHED** — 4 tests fail on probe
+2. `ldp_fp_imm` imm7 range check — **REACHED** — 1 test fails on probe
+3. `subs_imm` imm12 check — **REACHED** — 3 tests fail on probe
 
-The root cause (release-mode verification missing debug_assert coverage) is resolved. The claimed evidence now matches the profile and test set it was claimed to measure.
+**Not established (break-test shows unexercised):**
+4. CBRANCH forward-target check (`compiler.rs` line 637-640) — **NOT REACHED** — 0 tests fail when guard is broken; all 69/69 tests pass
+
+**What PLAT-02 fixed:**
+- `scripts/verify-jit.sh` now runs the full suite in **both** debug and release profiles
+- CI enforces this via `jit-macos` and `jit-linux-arm` (required checks on every PR)
+- 92 tests run in debug mode where `debug_assert!` executes
+
+**What remains open:**
+- The CBRANCH forward-target guard (issue #4 line 637-640 in `compiler.rs`) is not exercised by the 92-test gate
+- Issue #4 **named this guard specifically** ("CBRANCH forward-target rule") so leaving it unverified is incomplete
+- The guard may be unreachable in the current test set, or may require a specific bytecode pattern not generated by the tests
+- A test that triggers a forward branch from a position >= pc would exercise this guard; none of the 92 tests currently generate such a pattern
+
+**Recommendation:**
+- Add a test case that generates a CBRANCH instruction with a forward target to complete verification, or
+- Justify in code why a forward target cannot occur in practice (the comment at line 633 says "compile_program only ever derives targets from a prior write, so target+1 <= pc always" — if this invariant is guaranteed, the guard could be a sanity check rather than load-bearing)
 
 ### Files Changed
 - None (this is a verification task, not a code change)

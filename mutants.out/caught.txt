@@ -1,8 +1,0 @@
-src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec![])
-src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec![String::new()])
-src/pool_connection.rs:877:5: replace take_complete_lines -> Result<Vec<String>, usize> with Ok(vec!["xyzzy".into()])
-src/pool_connection.rs:878:58: replace == with != in take_complete_lines
-src/pool_connection.rs:881:12: delete ! in take_complete_lines
-src/pool_connection.rs:885:22: replace > with == in take_complete_lines
-src/pool_connection.rs:885:22: replace > with < in take_complete_lines
-src/pool_connection.rs:885:22: replace > with >= in take_complete_lines

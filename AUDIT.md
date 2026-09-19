@@ -5917,8 +5917,27 @@ the path, was green, and proved nothing — the same shape as PR #22's three
 failed attempts, arrived at independently one PR later.
 
 **Files changed:** `src/pool_connection.rs` (the constant, `read_line` using it,
-`take_complete_lines`, the bounded loop, **nine** tests), `CLAUDE.md` (task
-board), `AUDIT.md` (this entry).
+`take_complete_lines`, the bounded loop, **nine** tests), `.gitignore`
+(`mutants.out/`), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
+
+**Review ledger (LEDGER-01).** `REVIEW_PR23.md` carried rounds 1-3 and is
+removed from the tree in this commit; retrieve it with
+`git show 6ca8420:REVIEW_PR23.md` (round 3 appended over `394d8b3`).
+
+**`mutants.out/` was committed by `e3b339f` and is now removed (R3-F1).** A
+`git add -A` swept in 25 files and 5.7 MB of cargo-mutants scratch — build logs
+and per-mutant diffs — and `lock.json` carried this operator's hostname,
+username and absolute home paths into a **public** repository. Rounds 1 and 2
+had both recorded the directory as untracked; the commit that fixed round 2's
+finding pulled it in, and it was missing from the Files-changed list above —
+the very list that commit was editing. Untracked with `git rm -r --cached` and
+added to `.gitignore`. Scope stated precisely rather than comfortably: because
+this repo squash-merges, the tip tree is what lands, so `main` never receives
+these objects; but the branch was pushed, so they remain reachable on the public
+remote through `refs/pull/23/head` until that ref is gone. Nothing secret was in
+them — a hostname and a username that already appear in this repo's commit
+metadata — so they are being removed as hygiene, not treated as a credential
+leak.
 
 **Verification.** 159 lib + 18 bin tests, clippy `-D warnings` clean. (Review
 measured 158 before this branch was rebased onto `main`; #26's donate test landed
@@ -5934,7 +5953,7 @@ Mutation testing over `main` shows `> MAX_LINE_BYTES` there survives `> → >=`
 the `1 << 20` literal for the shared constant — and the Files-changed list says so,
 while Verification claims the mutations are caught. That is true of
 `take_complete_lines`, not of `read_line`. The precedent this entry argues from
-is itself uncovered; filed rather than widened into this change.
+is itself uncovered; filed as **#27** rather than widened into this change.
 
 **Not established.** No hostile pool was exercised end to end — the flood comes
 from a local listener, not a Stratum peer mid-session, so the interaction between
@@ -5989,10 +6008,18 @@ measured it: 1x passes in 0.05 s, 4x in 0.82 s, 16x in 18.3 s, still quadratic.
 The claim "now bounded at twice the limit, so that mutation fails cleanly" was
 false on both clauses, and is withdrawn.
 
-Now bounded by an **absolute** 4 MiB, independent of `MAX_LINE_BYTES`. Verified
-by raising the limit 16x: the test fails in 42 s with *"fed 4194304 bytes without
-being refused; the limit is not being enforced"*, where the old cap passed in
-18 s having proved nothing.
+Now bounded by an **absolute** 4 MiB, independent of `MAX_LINE_BYTES`. Measured
+in release, this one test alone, restoring the source byte-identical after each
+mutation: **1x passes in 0.06 s, 2x passes in 0.18 s, 4x fails in 0.66 s, 16x
+and 1024x fail in 0.66 s** with *"fed 4194304 bytes without being refused; the
+limit is not being enforced"*. Two things follow, and the first version of this
+paragraph got both wrong. **The detection threshold is 4x, not "a raised
+limit"**: at 2x the buffer still overflows inside the 1024 iterations, so this
+test passes and the two socket tests are what catch that mutation. And the new
+cap is **~27x faster** than the broken one at the same 16x mutation (0.66 s
+against round 2's 18.3 s), not slower — the withdrawn "42 s" was a whole-suite
+figure quoted against a single-test one, a non-reproducing number inside the
+paragraph whose job was to withdraw a non-reproducing number (R3-F3).
 
 Kept as a minor rather than a major by review, and rightly: the *socket* test
 still caught the mutation throughout, so nothing was shippable-green — what was

@@ -211,8 +211,13 @@ impl Write for PoolStream {
 /// error, the miner simply dies.
 ///
 /// `read_line` has always had this limit; the long-lived `receiver_loop` did
-/// not, which is the asymmetry GitHub #21 records. The value lives here so the
-/// two cannot drift apart.
+/// not, which is the asymmetry GitHub #21 records. Sharing the constant means
+/// the two cannot disagree about *the number* — it says nothing about their
+/// behaviour, which still differs: `read_line` refuses a single over-long line,
+/// while `receiver_loop` checks what remains after draining complete ones, so
+/// it tolerates a buffer up to `MAX_LINE_BYTES + 4096` mid-read. An earlier
+/// version of this comment claimed the two "cannot drift apart" outright, which
+/// overstated what one shared constant buys (PR #23 round 3, R3-F6).
 const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// Well-known TLS ports for mining pools
@@ -1200,8 +1205,13 @@ mod tls_tests {
         // never comes, and exhaust memory instead of failing. On the 7 GB
         // `macos-14` runner that is an OOM rather than a verdict.
         //
-        // 4 MiB is four times the real limit and independent of it, so a raised
-        // limit runs out of iterations and fails cleanly here.
+        // 4 MiB is four times the real limit and independent of it, so a
+        // sufficiently raised limit runs out of iterations and fails cleanly.
+        // "Sufficiently" is the honest word: measured in release, 1x passes in
+        // 0.06 s and 2x still *passes* in 0.18 s (the buffer overflows within
+        // the 1024 iterations), while 4x, 16x and 1024x all fail in 0.66 s. So
+        // this test's detection threshold is 4x, and the mutation at 2x is
+        // caught by the two socket tests instead, not here.
         const FEED_CEILING_BYTES: usize = 4 * 1024 * 1024;
         let max_iterations = FEED_CEILING_BYTES / chunk.len();
         for _ in 0..max_iterations {

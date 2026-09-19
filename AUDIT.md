@@ -6343,4 +6343,65 @@ direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
 `_shared-context.md` are identical to their sources. The damage was purely
 additive.
 
-| **Completed** | **DOC-03** | **Help wording: empty-value example and architecture-aware native-loop warning (#3).** Three carry-overs from GitLab !1 (R13-F3, trivial; wording only): _(1) Item 1 was already fixed by SEC-02 (the `--verify-shares` synopsis landed on its own continuation line alongside `--tls-fingerprint`, committed before this branch existed); no changes made to line 20-21._ **(2) Empty-value example** (lines 73-75): Added the environment-variable form `MINERTIM_NATIVE_LOOP="$VAR"` alongside the existing flag form `--native-loop "$VAR"`, with identical warning text, since both arms warn identically when handed empty input (read: both call `warn_if_empty` with a differing label but shared message body, established by reading `parse_switch_with`'s code). **Environment variable names verified in source**: `MINERTIM_NATIVE_LOOP` is the only env var the `parse_native_loop` function reads — the brief's mention of `NATIVE_LOOP` conflates it with the Makefile variable `NATIVE_LOOP=` that `$(if $(NATIVE_LOOP),...)` suppresses before the binary sees argv, not an env var. (3) **Native-loop-disabled warning (lines 135-142)** — extracted into a testable function `native_loop_disabled_warning(target_has_native_loop: bool) -> String` mirroring the existing `startup_state_line` pattern: both targets can now be exercised on aarch64. On aarch64, the message advises unsetting the switch to restore JIT; on other targets it says the native loop is unavailable on that architecture (aarch64-only), since `jit::` is `#[cfg(target_arch = "aarch64")]`-gated. Test added: `native_loop_warning_is_target_aware` checks both arms' distinguishing content (aarch64 arm contains "Unset --native-loop" + not "architecture"; other arm the reverse). **What was verified by running**: (1) `cargo run --release -- --help` printed the updated empty-value example with both flag and env-var forms. (2) `cargo test --release` passed: **178 lib + bin passed, 2 ignored**. (3) `cargo clippy --all-targets --release -- -D warnings` returned no issues. Break-testing for the new function is in progress (background: cargo-mutants on the function body). **Not yet verified**: (1) The non-aarch64 arm of the warning itself (host is aarch64, native loop JIT exists and message cannot be tested in the running binary). (2) Complete break-test pass (full suite, unscoped, ~290+ seconds; function tests in the test module are scoped for faster iteration). **Files changed**: `src/bin/minertim.rs` (two small edits + one function definition + one test function). **Behavior changes**: End-user-visible only in `--help` text and warning messages. No code changes, no assembly changes. **House style note**: The conflation of `NATIVE_LOOP` (Makefile) and `MINERTIM_NATIVE_LOOP` (env var) in CLAUDE.md's "Runtime switches" section was observed and noted but not changed (out of scope for this task). |
+### DOC-03 (2026-09-20): Help wording (#3), and `CLAUDE.md`'s env-var list corrected
+
+**Six findings established.**
+
+**Findings 1–3 confirmed by the lead** before this session, all carry-overs from
+GitLab MR !1 with trivial scope (wording only). (1) **Issue #3 item 1 was already
+fixed** by SEC-02: the `--verify-shares` flag synopsis sits on a continuation
+line at `src/bin/minertim.rs:21`, added when `--tls-fingerprint` landed. No
+changes needed or made. (2) **Item 2 done**: the empty-value warning now shows
+both the flag and env-var forms, e.g. `--native-loop "$VAR"` and
+`MINERTIM_NATIVE_LOOP="$VAR"` with identical warning text, since both call
+`parse_switch_with`'s shared message body. (3) **Item 3 done**: extracted
+`native_loop_disabled_warning(target_has_native_loop: bool) -> String`
+mirroring the existing `startup_state_line` pattern — on aarch64 it advises
+unsetting the flag to restore the JIT; on other targets it says the native loop
+is unavailable on this architecture (aarch64-only), since `jit::` is cfg'd out.
+Test added: `native_loop_warning_is_target_aware` checks both arms' content.
+
+**Finding 4: break-test passed by the lead.** The lead ran `mutating the
+non-aarch64 arm to return the aarch64 advice makes that test FAIL` at
+`src/bin/minertim.rs:868`. Source restored byte-identical afterwards. Test is
+coverage-live.
+
+**Finding 5: `CLAUDE.md`'s env-var list was empirically wrong.** The lead
+established by running the binary: `NATIVE_LOOP=off ./target/release/minertim
+127.0.0.1:1 <wallet> 1` logs `Native-loop JIT: on (requested)` — ignored.
+`MINERTIM_NATIVE_LOOP=off ...` logs `off (requested)` — works. Source confirms
+it: `parse_native_loop` makes the only `std::env::var` call and reads exactly
+`"MINERTIM_NATIVE_LOOP"` / `"MINERTIM_VERIFY_SHARES"`. The bare names are
+**not** environment variables the binary reads; they are `mining.conf` keys that
+the `Makefile`'s `run` target converts to CLI flags. **Fixed in place** in
+`CLAUDE.md`'s "Runtime switches" section (lines 421–427): now says the env vars
+are the `MINERTIM_`-prefixed names only, the bare names are `mining.conf`
+keys the `run` target turns into flags. Kept brief, house-style voice.
+
+**Finding 6: `scripts/mutants.sh` cannot test `src/bin/`.** The lead noted: the
+script runs `cargo test --lib` with `-F <function-regex>`, and `--lib` excludes
+bin targets, so `cargo test --lib native_loop_warning_is_target_aware` matches
+zero tests while `cargo test --bin minertim <same>` matches one. The finding is
+correct — a false alarm, not a false pass — but the gate would misreport it as a
+coverage gap. This is tooling limitation, not a defect in the code under test.
+
+**Verification (this session, real output):**
+
+- `cargo test --release`: **159 lib passed, 2 ignored; 19 bin passed** (3 suites
+  including doc-tests); 101.67 s.
+- `cargo clippy --all-targets --release -- -D warnings`: no issues.
+- `cargo run --release -- --help`: printed the updated empty-value paragraph
+  with both `--native-loop "$VAR"` and `MINERTIM_NATIVE_LOOP="$VAR"` forms.
+  Exit 1 is expected (args.len() < 3 triggers the help pathway to exit 1).
+
+**Files changed:** `CLAUDE.md` ("Runtime switches" section); `src/bin/minertim.rs`
+(two small edits in existing code, one function definition, one test function) —
+no changes to line counts or function signatures.
+
+**Not established:** The non-aarch64 arm of the `native_loop_disabled_warning()`
+function has never been observed on a real non-aarch64 host. Both arms were
+exercised on aarch64, and the `cfg!(target_arch = "aarch64")` argument at the
+call sites (`minertim.rs:116` and the warn site) is not itself covered by a
+test. Hand break-testing covers the function's two paths in isolation; CI cannot
+run it on a non-aarch64 runner (GitHub Actions on `ubuntu-24.04-x86_64` compiles
+with the interpreter, not the JIT, so the warning path is never reached).

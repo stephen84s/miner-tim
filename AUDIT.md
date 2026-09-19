@@ -6579,3 +6579,38 @@ do not show the guards are *correct*, nor that the other 19 `debug_assert!`
 invocations are reached — only the four the issue named were probed. No probe
 was run on `jit-linux-arm`, so the Linux half rests on the same script running
 there, not on an observed Linux failure.
+
+## 2026-09-19 — PROC-07: No-ledgers-on-main rule enforced with a CI gate (issue #19)
+
+**Request.** Review ledgers (`REVIEW_*.md`) are deliberately committed during review for crash recovery (LEDGER-01, rules 1-3), then `git rm`'d before merge — a prose rule with nothing enforcing it. On this repo that rule has been followed exactly as written; the 13 ledgers that accumulated to 530 KB did so because reviewers obeyed it. Replacing one prose rule with another prose rule (`git rm` before merge) leaves the same failure mode available: the next lead forgets, or a reviewer's ledger reaches `main` via a path nobody anticipated. Nothing would notice until the repository filled again.
+
+**Design tension, resolved by the maintainer.** A CI check that fires on every push — while reviewers are actively committing ledgers — trains people to ignore it. The check would sit red for most of a PR's life and only go green at the final strip commit, the exact failure mode the repo has hit before (PROC-01, PROC-05). The maintainer decided to implement it anyway, adding a second layer first to close the accidental path.
+
+**Two-layer approach.**
+
+1. **`.gitignore` gets `REVIEW_*.md`.** This closes the accidental route — a `git add -A` can then never sweep a ledger in. (That command put `mutants.out/` directories into two branches this week alone.) Committing one is still *possible* and still *intended* with `git add -f`, and the comment above the rule in `.gitignore` explains both facts.
+
+2. **A CI check** in the existing `lint` job that fails if any `REVIEW_*.md` exists at the repo root. This closes the deliberate path — a `git add -f` that never gets stripped. Placed **before** the slow clippy step so it fails fast.
+
+**Files changed:** `.gitignore` (new `REVIEW_*.md` rule with explanatory comment), `.github/workflows/ci.yml` (new step in `lint` job, before clippy), `.claude/agents/_shared-context.md` (rules 1-3 updated to specify `git add -f` and cite PROC-07), `AUDIT.md` (this entry), `CLAUDE.md` (new row in Current Task Board).
+
+**Critical update to `.claude/agents/_shared-context.md`.** Once `REVIEW_*.md` is gitignored, a plain `git add REVIEW_PR24.md` fails — this is the intended behaviour. But the rules at 1-3 told reviewer agents to commit the ledger, which now requires `git add -f`. Not updating them meant crash recovery would silently stop working on the next review — the exact class of defect this repo keeps hitting. Updated to specify `git add -f` with a cross-reference to this entry (PROC-07), and added a note that force-add is required and intended.
+
+**Verification — Gitignore behavior.** Created `REVIEW_PRTEST.md`, confirmed:
+- `git status --short` shows nothing (file is ignored)
+- `git add REVIEW_PRTEST.md` fails: "The following paths are ignored by one of your .gitignore files: ... hint: Use -f if you really want to add them."
+- `git add -f REVIEW_PRTEST.md` succeeds and stages the file
+- Unstaging and deleting left no traces
+
+**Verification — CI shell logic, both states.** Ran the step's shell block directly:
+- With no `REVIEW_*.md` files present: exits 0, prints "Check passed: no ledgers found"
+- With a `REVIEW_PR99.md` file present: exits 1, prints "Review ledgers must be stripped before merge (LEDGER-01):" followed by the filename list
+- Logic is exact to the issue's suggested snippet
+
+**Verification — YAML validity.** The step is properly indented, integrated into the existing `lint` job before the clippy step. Job structure confirmed: `lint`, `audit`, `test`, `mutants` jobs all present. The `lint` job now contains 5 steps (was 4: Checkout, Install Rust, Cache cargo registry, Cache target/, cargo clippy — now has the new ledger-check step first).
+
+**Not verified.** The CI check cannot be run on GitHub without pushing; this is noted explicitly rather than claimed. The workflow file parses and the step structure is syntactically correct.
+
+**Design decision recorded.** The tension the issue raised was that a check running on every push (red throughout review) teaches people to ignore it — which is the failure mode being prevented. The maintainer's choice to implement it anyway, with the gitignore layer closing the accidental path first, reverses the priority: the gitignore *closes* the accidental path, and the CI check gates the deliberate one. Both layers are necessary; neither is sufficient alone. The issue's suggested shell snippet is used verbatim.
+
+**Not established.** Whether a future lead will actually run `git rm` before merge instead of pushing the PR unstripped. The two-layer approach adds consequences (CI failure) to forgetting, but prose rules at the point of merge are the only enforcement available to this system. The accidental path is now closed; the deliberate path is gated and will be visible in CI if it is not stripped.

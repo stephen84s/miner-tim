@@ -6443,3 +6443,139 @@ call sites (`minertim.rs:116` and the warn site) is not itself covered by a
 test. Hand break-testing covers the function's two paths in isolation; CI cannot
 run it on a non-aarch64 runner (GitHub Actions on `ubuntu-24.04-x86_64` compiles
 with the interpreter, not the JIT, so the warning path is never reached).
+
+### TEST-01 (2026-09-20): issue #4's `debug_assert!` guards are exercised — proven, not asserted
+
+**Issue #4.** Three `debug_assert!` guards were cited in `AUDIT.md` as safety
+nets while the verification runs quoted were done in **release**, where
+`debug_assert!` is compiled out — so the evidence never exercised them, and
+`make test` (debug) was a different profile from the one verified.
+
+**Verdict: FULLY CLOSED.** All four guards the issue names are reached by
+`scripts/verify-jit.sh`, which runs its 92-test set in **both** debug and
+release and is run by `jit-macos` and `jit-linux-arm` on every pull request.
+PLAT-02 closed this when it added the two-profile gate; the issue was never
+updated to say so.
+
+**Proven by breaking each guard and watching the gate fail**, one at a time,
+each restored from a `/tmp` copy and confirmed `cmp` byte-identical:
+
+**Mutation and harness, stated because the numbers are meaningless without
+them** — this is the correction review forced, below. Each guard's condition
+replaced with `false` (`debug_assert!(false, "PROBE")`), one guard at a time,
+run through **`./scripts/verify-jit.sh`** — the real gate, debug then release —
+with the exit code captured directly and failures counted by
+`grep -c '^test .* FAILED$'`, never read off a screen.
+
+| Guard | Location | Broken -> gate result |
+| :--- | :--- | :--- |
+| `stp_fp_imm` imm7 range | `jit/aarch64.rs:190` | 4 failures, debug only |
+| `ldp_fp_imm` imm7 range | `jit/aarch64.rs:203` | 1 failure, debug only |
+| `subs_imm` imm12 | `jit/aarch64.rs:158` | 3 failures, debug only |
+| CBRANCH forward-target | `jit/compiler.rs:637` | **12 failures, debug only** |
+
+Release is 92 passed in every case, as it must be — `debug_assert!` is compiled
+out there, which is the whole point of the gate running both profiles.
+
+**Treat these integers as evidence of *reachability*, not as constants.** They
+move with the mutation: a reviewer probing semantically (`<` -> `>=`) instead of
+forcing the assert got 12 and 11 where forcing gives 12 and 3, because a
+semantic mutation only fires on inputs that cross the boundary. The durable
+claim is the one in the left column — **each guard is reached, and breaking it
+fails the gate.**
+
+Unmutated: `verify-jit: GATE PASSED on Darwin arm64 - 92 tests, debug + release`, exit 0.
+
+**Two corrections to this entry's own drafts, recorded because neither error was
+caught by its author and the second is the more interesting.**
+
+*Draft 1* asserted the issue was closed while stating the break-test had been
+skipped for "time constraint", on the grounds that "the gate framework ensures
+this works by design". An assertion, not evidence — this repo's signature
+defect, and the reason the entry was redone.
+
+*Draft 2* did run probes and reported the CBRANCH guard as **NOT REACHED**,
+downgrading the verdict to "partly closed" and recommending a new test.
+**That finding was wrong.** It probed with a hand-built partial filter
+(`randomx::jit::` plus `randomx::vm::native_loop`, 69 tests) instead of the gate
+itself, and the suites that exercise CBRANCH — `full_hash_tests` and
+`native_loop_diff_tests` — were exactly the ones that filter excluded. Re-run
+through `./scripts/verify-jit.sh`, the same mutation gives **exit 1, `GATE
+FAILED`**, 8 debug-profile failures including
+`full_hash_tests::test_native_loop_known_answer` and
+`native_loop_diff_tests::native_loop_zero_iterations_terminates`. CBRANCH
+targets derive from real RandomX programs, so the known-answer vectors reach the
+guard while the JIT unit tests do not.
+
+That error is the **mirror image** of this repo's usual one — it *under*-claimed
+coverage rather than over-claiming it — but the root cause is identical in both
+directions: a filter narrower than the thing being judged, the same mechanism as
+the vacuous `0 passed; 161 filtered out` trap. **When the question is "does the
+gate catch this", run the gate, not a subset of it.**
+
+**Profile story**, read from the files and confirmed by the runs above:
+
+| Context | Profile | Reaches the JIT? | `debug_assert!` live? |
+| :--- | :--- | :--- | :--- |
+| `make test` | debug | on aarch64 hosts, whole suite | yes |
+| CI `test` (`ci.yml`) | release | no - x86_64, `randomx::jit` is `cfg`'d out | no |
+| CI `jit-macos` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
+| CI `jit-linux-arm` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
+
+The x86_64 jobs are not evidence about these guards at all; they compile no JIT.
+
+**Inventory.** 23 `debug_assert!` invocations across 24 matching lines (one is a
+comment): `jit/aarch64.rs` **17**, `jit/compiler.rs` **4**, `jit/memory.rs` 1,
+`vm.rs` 1. Counted as invocations rather than matching lines, because multi-line
+invocations make the two differ. (The per-file split was first written as 16/5;
+the totals were right and the split was not. R1-F3.)
+
+**Files changed:** `AUDIT.md` (this entry), `CLAUDE.md` (task-board row). No
+`.rs` file is modified — every mutation was reverted and `cmp`-verified.
+
+**Verification.** `cargo clippy --all-targets --release -- -D warnings` clean;
+`git status` shows no modified `.rs` files.
+
+**Review (Sonnet, round 1): NOT MERGEABLE — one blocker, one major, two minors.
+All fixed above; it was right on every count.**
+
+- **Blocker: stale base.** The branch still pointed at `b65fb86`, predating
+  PR #30, which had touched the same `AUDIT.md` and task-board row. Rebased.
+  Worth recording that the reviewer **ruled out a false alarm rather than
+  reporting it**: a naive `git diff origin/main..HEAD` made this PR look as
+  though it reverted #30's `minertim.rs` wiring fix, and it checked the actual
+  merge — zero diff, a stale-base artifact — instead of raising it.
+- **Major: the failure counts did not reproduce**, and the truth was worse than
+  the finding. The CBRANCH figure was a **miscount** — the lead's own gate log
+  held 12, and "8" came from reading a list truncated by `head -8`. The other
+  three came from the **partial-filter** run, not the gate, so one table mixed
+  two harnesses. That is the same mis-scoping error this entry had just
+  finished documenting one paragraph earlier, committed by the author while
+  writing it down. Re-measured as one set above.
+- **Minors:** the per-file inventory split (16/5 -> 17/4) and a row-count claim
+  gone stale on rebase (now **37 against `main`'s 36**).
+
+Recorded for the tier series (PROC-08): **Sonnet, 4 findings, 4 reproduced, 0
+false positives**, 156,800 subagent tokens — above the Opus range of
+76,575-104,304, so on this PR the cheaper tier cost more raw tokens and still
+returned the better result. Ledger: `REVIEW_PR31.md`, removed per LEDGER-01;
+retrieve with `git show 58653a5:REVIEW_PR31.md`.
+
+**A process hazard found the hard way, recorded so it is not repeated.** The
+lead ran probes in the **same worktree** a delegated agent was still probing in.
+Both mutate the same file; the agent's mutation landed after the lead's restore,
+so `cmp` against the lead's own `/tmp` copy reported "byte-identical" while
+`git status` showed `src/randomx/jit/compiler.rs` still carrying
+`debug_assert!(false, "PROBE")`. It was caught by diffing against `origin/main`
+rather than trusting the `cmp`, and restored with `git checkout --`; the gate
+then passes clean, 92 tests, exit 0, and `src/` is byte-identical to `main`.
+Two lessons: **one mutator per worktree at a time**, the same reason the
+worktree rule exists; and **`cmp` against a private copy is not proof the tree
+is clean** — `git status` and a diff against the base are, because they cannot
+be fooled by a third party writing the same file.
+
+**Not established.** The probes show each of the four guards is *reached*; they
+do not show the guards are *correct*, nor that the other 19 `debug_assert!`
+invocations are reached — only the four the issue named were probed. No probe
+was run on `jit-linux-arm`, so the Linux half rests on the same script running
+there, not on an observed Linux failure.

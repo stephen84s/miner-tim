@@ -6409,6 +6409,23 @@ delegated this session:
   repo, and it is told that a probe which does **not** fail is the most
   valuable result it can return.
 
+- **`rust-implementer`** — writes the code from a plan the lead has already
+  settled. The division is deliberate rather than economic: the expensive
+  mistakes in this repo have been mistakes of **judgement**, not of typing — a
+  mutation the test catches for the wrong reason, a claim recorded without
+  being checked — and those belong to the lead. So the agent is told the plan
+  is the specification, that a plan it cannot follow is to be **reported, not
+  worked around**, and that a dropped step must be named. It is also told to
+  break-test anything the plan says is covered, and to hand its report to
+  `audit-writer` rather than writing the `AUDIT.md` entry itself, which keeps
+  the scribe's "record, do not re-derive" boundary intact.
+
+  **It is barred by default from `src/randomx/jit/`, the emitter and `vm.rs`'s
+  native-loop path.** This is the one carve-out where the token saving would be
+  a false economy: a defect there does not crash, it silently produces wrong
+  hashes and the pool rejects the shares. That work needs a deliberately raised
+  model, the JIT gate, and `jit-reviewer`.
+
 Both carry the local traps that produced false results this session: the `rtk`
 filter mangling, `$?` after a pipeline, `debug_assert!` being compiled out in
 release, and `scripts/mutants.sh` being unable to reach `src/bin/` because it
@@ -6420,8 +6437,8 @@ because a one-off brief dies with the session while a committed agent file
 compounds.
 
 **Files changed:** `CLAUDE.md` (two bullets in Operational Protocol step 0, plus
-this task-board row), `.claude/agents/audit-writer.md` and
-`.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`
+this task-board row), `.claude/agents/rust-implementer.md`,
+`.claude/agents/audit-writer.md` and `.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`
 (header: it is read by implementers now, not only reviewers), `AUDIT.md` (this
 entry).
 

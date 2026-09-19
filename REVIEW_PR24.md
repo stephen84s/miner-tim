@@ -529,6 +529,31 @@ printing nothing. Fails closed, which is the right direction, but the operator
 is told nothing — including in the case that matters, a broken build making
 `--list` fail.
 
+### R2-F7 (MINOR, unverified but named) — the advisory job's value rests on an untested GitHub behaviour, asserted in two places
+
+`scripts/mutants.sh:88` — "A *new* survivor should be the thing that turns it
+red" — and `.github/workflows/ci.yml` — "`continue-on-error` keeps a red run
+from failing the workflow" — both assume a failed job-level
+`continue-on-error: true` job is *visibly* red on the PR. If GitHub instead
+reports that job's check run as SUCCESS, the job is not merely non-blocking but
+**invisible**, and a new survivor would never be noticed — the repo's signature
+defect one level up. I could not settle which way it reports without pushing a
+deliberately red run, which I did not do. This does **not** block: the job is
+advisory by design, the five required contexts are unchanged and all six checks
+are green on `d97b0b2`. It should be settled once, cheaply, on the next PR that
+happens to have a survivor.
+
+### R2-F8 (NIT) — the `_shared-context.md` insertion orphans the sentence beneath it
+
+The two new paragraphs are spliced between "State the mutation and the observed
+failure." and "**This** is the one sanctioned exception to working rule 4 below,
+and it is narrow: the mutation is temporary and reverted..." — so "This" now
+reads as referring to the new author-obligation paragraph rather than to
+break-testing. Same shape as the orphaned doc comments VIS-01 fixed. The text
+itself matches what PROC-06 claims for it, and running `mutants.sh` is safe for
+a reviewer bound by working rule 4, since `cargo-mutants` mutates a copy, not
+the source tree.
+
 ## Verified, no defect
 
 * **The gate can go red.** Break-tested: `#[ignore]` on `round_trips`,
@@ -551,10 +576,23 @@ is told nothing — including in the case that matters, a broken build making
 * **Advisory wiring.** Live protection requires exactly the five contexts;
   `mutation testing (advisory, hex::)` is not among them. All six checks are
   SUCCESS on `d97b0b2`; PR is `MERGEABLE` / `CLEAN`.
-* **The merge lost nothing else.** `git diff main HEAD -- src/ Cargo.toml
-  Cargo.lock` is empty (FIX-01's `donate.rs` preserved byte-identical), and
-  `git diff 99854a9 HEAD` over `ci.yml`, `scripts/mutants.sh`, `.gitignore` and
-  `_shared-context.md` is empty. Only `CLAUDE.md` was damaged (R2-F2).
+* **The merge lost nothing.** Checked on both conflicted files, in both
+  directions: `git diff e07a9a2 HEAD -- AUDIT.md CLAUDE.md` and
+  `git diff 99854a9 HEAD -- AUDIT.md CLAUDE.md` contain **no deletion lines at
+  all**, so the resolution really was a pure append each way. `git diff main
+  HEAD -- src/ Cargo.toml Cargo.lock` is empty (FIX-01's `donate.rs` preserved
+  byte-identical), and `git diff 99854a9 HEAD` over `ci.yml`,
+  `scripts/mutants.sh`, `.gitignore` and `_shared-context.md` is empty. The
+  merge's only damage was *additive* — the three stray blank lines of R2-F2.
+* **Rendering, whole file.** `POST /markdown` on all of `CLAUDE.md`: `main`
+  renders **44** table rows, this head renders **42**, with the same three
+  tables and two blockquotes. 44 - 3 lost + 1 new (PROC-06) = 42, which is
+  exactly R2-F2 and nothing else. The new Operational Protocol rule itself
+  renders correctly, as a `<li>` inside the step-0 list.
+* **`_shared-context.md` matches its description.** The added text is the
+  "choose the mutation that is the defect the test claims to catch" paragraph
+  PROC-06 says it is, plus a pointer to `mutants.sh` and the equivalent-mutant
+  caveat. See R2-F8 for the one wrinkle.
 * **The rebase account is corroborated.** The reflog shows two
   `rebase (start): checkout origin/main` / `rebase (abort): returning to
   refs/heads/chore/mutation-testing` pairs at 10:20 and 10:21, both returning to
@@ -563,10 +601,35 @@ is told nothing — including in the case that matters, a broken build making
 
 ## Could not verify
 
-* What a **failed** `continue-on-error: true` job reports as its check-run
-  conclusion. If GitHub reports SUCCESS, the advisory job is not merely
-  non-blocking but invisible, and a new survivor would never be noticed —
-  which is the whole value proposition. Settling it needs a deliberately red
-  run pushed to a PR; not done.
+* The check-run conclusion of a failed `continue-on-error` job — filed as
+  R2-F7 rather than left here.
 * The unscoped `28 min / 8 mutants` row: `take_complete_lines` lives on another
   branch, so it was not re-measured here.
+
+## Housekeeping
+
+My runs left `mutants.out/` and `mutants.out.old/` in this worktree. Both are
+gitignored by this PR, `git status` is clean, and nothing of them is tracked —
+they are scratch, not artifacts.
+
+## Round 2 verdict — NOT MERGEABLE
+
+**ACTIONABLE, blocking:**
+
+* **R2-F1 (major)** — the silent-green fix is one step short. Count with `-E`
+  applied, and print the count actually tested.
+* **R2-F2 (major)** — the merge broke the `CLAUDE.md` task board (three rows out
+  of the table, proved against GitHub's renderer), and the new AUDIT paragraph
+  describes that merge as a clean pure-append.
+
+Both are the repo's own pattern: a defect inside the previous round's fix, and a
+ledger claim that is false at the moment it is written — which is the subject of
+the entry making it.
+
+**ACTIONABLE, non-blocking:** R2-F3, R2-F4, R2-F5, R2-F6, R2-F7, R2-F8.
+
+**Not in dispute:** the tooling works and can go red (break-tested, exit 2), the
+empty-filter guard fires (exit 3), every quoted count reproduces, the scratch
+output is untracked and ignored, the merge lost nothing, and the advisory job is
+correctly absent from the five required contexts. The design is sound; two
+defects in its execution are not.

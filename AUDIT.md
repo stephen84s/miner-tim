@@ -6460,12 +6460,29 @@ updated to say so.
 **Proven by breaking each guard and watching the gate fail**, one at a time,
 each restored from a `/tmp` copy and confirmed `cmp` byte-identical:
 
+**Mutation and harness, stated because the numbers are meaningless without
+them** — this is the correction review forced, below. Each guard's condition
+replaced with `false` (`debug_assert!(false, "PROBE")`), one guard at a time,
+run through **`./scripts/verify-jit.sh`** — the real gate, debug then release —
+with the exit code captured directly and failures counted by
+`grep -c '^test .* FAILED$'`, never read off a screen.
+
 | Guard | Location | Broken -> gate result |
 | :--- | :--- | :--- |
-| `stp_fp_imm` imm7 range | `jit/aarch64.rs:190` | 4 tests fail, debug profile |
-| `ldp_fp_imm` imm7 range | `jit/aarch64.rs:203` | 1 test fails, debug profile |
-| `subs_imm` imm12 | `jit/aarch64.rs:158` | 3 tests fail, debug profile |
-| CBRANCH forward-target | `jit/compiler.rs:637` | **8 tests fail, debug profile** |
+| `stp_fp_imm` imm7 range | `jit/aarch64.rs:190` | 4 failures, debug only |
+| `ldp_fp_imm` imm7 range | `jit/aarch64.rs:203` | 1 failure, debug only |
+| `subs_imm` imm12 | `jit/aarch64.rs:158` | 3 failures, debug only |
+| CBRANCH forward-target | `jit/compiler.rs:637` | **12 failures, debug only** |
+
+Release is 92 passed in every case, as it must be — `debug_assert!` is compiled
+out there, which is the whole point of the gate running both profiles.
+
+**Treat these integers as evidence of *reachability*, not as constants.** They
+move with the mutation: a reviewer probing semantically (`<` -> `>=`) instead of
+forcing the assert got 12 and 11 where forcing gives 12 and 3, because a
+semantic mutation only fires on inputs that cross the boundary. The durable
+claim is the one in the left column — **each guard is reached, and breaking it
+fails the gate.**
 
 Unmutated: `verify-jit: GATE PASSED on Darwin arm64 - 92 tests, debug + release`, exit 0.
 
@@ -6508,15 +6525,54 @@ gate catch this", run the gate, not a subset of it.**
 The x86_64 jobs are not evidence about these guards at all; they compile no JIT.
 
 **Inventory.** 23 `debug_assert!` invocations across 24 matching lines (one is a
-comment): `jit/aarch64.rs` 16, `jit/compiler.rs` 5, `jit/memory.rs` 1, `vm.rs` 1.
-Counted as invocations rather than matching lines, because multi-line
-invocations make the two differ.
+comment): `jit/aarch64.rs` **17**, `jit/compiler.rs` **4**, `jit/memory.rs` 1,
+`vm.rs` 1. Counted as invocations rather than matching lines, because multi-line
+invocations make the two differ. (The per-file split was first written as 16/5;
+the totals were right and the split was not. R1-F3.)
 
 **Files changed:** `AUDIT.md` (this entry), `CLAUDE.md` (task-board row). No
 `.rs` file is modified — every mutation was reverted and `cmp`-verified.
 
 **Verification.** `cargo clippy --all-targets --release -- -D warnings` clean;
 `git status` shows no modified `.rs` files.
+
+**Review (Sonnet, round 1): NOT MERGEABLE — one blocker, one major, two minors.
+All fixed above; it was right on every count.**
+
+- **Blocker: stale base.** The branch still pointed at `b65fb86`, predating
+  PR #30, which had touched the same `AUDIT.md` and task-board row. Rebased.
+  Worth recording that the reviewer **ruled out a false alarm rather than
+  reporting it**: a naive `git diff origin/main..HEAD` made this PR look as
+  though it reverted #30's `minertim.rs` wiring fix, and it checked the actual
+  merge — zero diff, a stale-base artifact — instead of raising it.
+- **Major: the failure counts did not reproduce**, and the truth was worse than
+  the finding. The CBRANCH figure was a **miscount** — the lead's own gate log
+  held 12, and "8" came from reading a list truncated by `head -8`. The other
+  three came from the **partial-filter** run, not the gate, so one table mixed
+  two harnesses. That is the same mis-scoping error this entry had just
+  finished documenting one paragraph earlier, committed by the author while
+  writing it down. Re-measured as one set above.
+- **Minors:** the per-file inventory split (16/5 -> 17/4) and a row-count claim
+  gone stale on rebase (now **37 against `main`'s 36**).
+
+Recorded for the tier series (PROC-08): **Sonnet, 4 findings, 4 reproduced, 0
+false positives**, 156,800 subagent tokens — above the Opus range of
+76,575-104,304, so on this PR the cheaper tier cost more raw tokens and still
+returned the better result. Ledger: `REVIEW_PR31.md`, removed per LEDGER-01;
+retrieve with `git show 58653a5:REVIEW_PR31.md`.
+
+**A process hazard found the hard way, recorded so it is not repeated.** The
+lead ran probes in the **same worktree** a delegated agent was still probing in.
+Both mutate the same file; the agent's mutation landed after the lead's restore,
+so `cmp` against the lead's own `/tmp` copy reported "byte-identical" while
+`git status` showed `src/randomx/jit/compiler.rs` still carrying
+`debug_assert!(false, "PROBE")`. It was caught by diffing against `origin/main`
+rather than trusting the `cmp`, and restored with `git checkout --`; the gate
+then passes clean, 92 tests, exit 0, and `src/` is byte-identical to `main`.
+Two lessons: **one mutator per worktree at a time**, the same reason the
+worktree rule exists; and **`cmp` against a private copy is not proof the tree
+is clean** — `git status` and a diff against the base are, because they cannot
+be fooled by a third party writing the same file.
 
 **Not established.** The probes show each of the four guards is *reached*; they
 do not show the guards are *correct*, nor that the other 19 `debug_assert!`

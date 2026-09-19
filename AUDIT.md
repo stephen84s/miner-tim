@@ -6387,8 +6387,43 @@ arguments, so `cargo test --lib -- <filters>` silently matched **nothing** and
 libtest still printed `ok` — `0 passed; 161 filtered out`. Runs must go through
 `rtk proxy cargo ...`.
 
-**Files changed:** `CLAUDE.md` (one bullet in Operational Protocol step 0, plus
-this task-board row), `AUDIT.md` (this entry).
+**Second instruction, same rule: never delegate to a general-purpose agent.**
+Use a tuned definition in `.claude/agents/`, whose file already carries the
+scope, the house formats and the traps, so a brief cannot forget one. Review
+already had three such agents; **implementation had none**, which is why every
+failure listed above was paid for in an ad-hoc brief that did not mention the
+trap it hit. Two implementer agents now exist, covering exactly the work
+delegated this session:
+
+- **`audit-writer`** — writes `AUDIT.md` entries and task-board rows from
+  findings already established. Explicitly a scribe, not an investigator: it
+  is told to record the lead's results as the lead's, never to imply it re-ran
+  them, and to report a brief it thinks is wrong rather than quietly writing
+  around it. It carries the two format traps (`AUDIT.md` is prose entries, not
+  a table; the board is a GFM table that a blank line destroys) and the
+  render check that catches the second.
+- **`break-tester`** — reintroduces the specific defect a test claims to catch
+  and proves the test fails, then runs `scripts/mutants.sh`. It carries the
+  distinction that actually matters — the mutation must be *the* defect, not
+  merely one the test happens to fail on — with the two worked misses from this
+  repo, and it is told that a probe which does **not** fail is the most
+  valuable result it can return.
+
+Both carry the local traps that produced false results this session: the `rtk`
+filter mangling, `$?` after a pipeline, `debug_assert!` being compiled out in
+release, and `scripts/mutants.sh` being unable to reach `src/bin/` because it
+runs tests with `--lib` — where it reports MISSED though no test ran, a false
+alarm rather than a false pass.
+
+The rule closes with **"if no agent fits, write one before delegating"**,
+because a one-off brief dies with the session while a committed agent file
+compounds.
+
+**Files changed:** `CLAUDE.md` (two bullets in Operational Protocol step 0, plus
+this task-board row), `.claude/agents/audit-writer.md` and
+`.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`
+(header: it is read by implementers now, not only reviewers), `AUDIT.md` (this
+entry).
 
 **Verification.** No code change, so no test claim is made. The task board was
 re-rendered through GitHub's own markdown API (`POST /markdown`, `mode: gfm`)

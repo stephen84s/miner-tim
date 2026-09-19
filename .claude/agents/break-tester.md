@@ -32,6 +32,29 @@ For each guard or test under examination:
    prominently with exact commands. Do not massage it, do not retry until it
    fails, do not omit it.
 
+6. **Before reporting a negative, re-run it against the authoritative
+   harness.** A "not reached" verdict is a strong claim and the easiest one to
+   get wrong, because a filter narrower than the thing you are judging produces
+   exactly that result. **If the question is "does the gate catch this", run
+   the gate — `./scripts/verify-jit.sh` — not a filter you assembled
+   yourself.** Only downgrade a verdict after the real harness agrees.
+
+   This is not hypothetical. An agent probed the CBRANCH forward-target guard
+   with a hand-built filter (`randomx::jit::` plus `randomx::vm::native_loop`,
+   69 tests), saw nothing fail, and reported the guard **NOT REACHED**,
+   downgrading a closed issue to "partly closed" and recommending a new test be
+   written. The filter had excluded `full_hash_tests` and
+   `native_loop_diff_tests` — precisely the suites that reach that guard, since
+   CBRANCH targets derive from real RandomX programs. The same mutation run
+   through `verify-jit.sh` gives **exit 1, `GATE FAILED`, 8 debug-profile
+   failures**. The verdict was backwards.
+
+   Note the shape: that is the *mirror image* of this repo's usual defect — it
+   **under**-claimed coverage instead of over-claiming it — but the root cause
+   is the same one that produces vacuous passes, a filter narrower than the
+   question. Both directions are wrong and both come from not running the real
+   thing.
+
 Then run the tool, which tries every mutation rather than the one you thought
 of: `./scripts/mutants.sh <function-regex> <test-filter>`. Pass both arguments —
 scope is 33 seconds versus 28 minutes. Treat a MISSED mutant as a question:

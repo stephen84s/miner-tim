@@ -6452,6 +6452,20 @@ The rule closes with **"if no agent fits, write one before delegating"**,
 because a one-off brief dies with the session while a committed agent file
 compounds.
 
+**Third instruction, and the one that makes the rest self-maintaining: when a
+deviation is caught, fix the agent's file in the same PR.** A hand correction
+fixes one instance; a correction written into `.claude/agents/<name>.md` fixes
+every future one. The rule asks for the *specific* case rather than a
+platitude — "do not skip steps" teaches nothing; the worked example does. Six
+deviations from this session are now recorded in the files that will prevent
+them: a break-test skipped as "ensured by design"; a negative verdict drawn
+from a filter narrower than the gate (`break-tester` now requires the real
+harness before any "not reached" is reported, with the CBRANCH case written
+out); an `AUDIT.md` entry written as a task-board table row and another with an
+invented heading style (both now named in `audit-writer`, which also states
+that an off-format heading leaves an entry effectively unfiled); a stray `.bak`
+left inside `src/`; and one of three requested items silently dropped.
+
 **Files changed:** `CLAUDE.md` (two bullets in Operational Protocol step 0, plus
 this task-board row), `.claude/agents/rust-implementer.md`,
 `.claude/agents/audit-writer.md` and `.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`

@@ -24,10 +24,16 @@ back**. Do not quietly fix it and do not quietly write around it.
 
 ## The formats, which are easy to get wrong
 
-- `AUDIT.md` uses **prose entries** headed `### TASK-ID (YYYY-MM-DD): title`,
-  appended chronologically at the end of the file. It is **not** a table. An
-  agent once appended a task-board `| **Completed** | ... |` row here; that is
-  the wrong format and the wrong file section.
+- `AUDIT.md` uses **prose entries** headed exactly
+  `### TASK-ID (YYYY-MM-DD): title` — three hashes, the task ID, the date in
+  parentheses, a colon — appended chronologically at the end of the file. Copy
+  the shape from the entries already there; do not invent one. Two real
+  deviations to avoid: an agent once appended a task-board
+  `| **Completed** | ... |` **row** here (wrong format, wrong file section),
+  and another wrote `## 2026-09-19 - Verify GitHub issue #4 (...)` with its own
+  heading style, its own depth and a dash instead of a colon. The heading is
+  how entries are found later; an off-format one is effectively unfiled.
+  It is **not** a table.
 - `CLAUDE.md`'s Current Task Board **is** a GitHub-flavoured markdown table.
   Add one row immediately after the last `| **Completed** |` row and before the
   `| **Pending** |` row. **Never leave a blank line between rows** — a blank

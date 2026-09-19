@@ -5863,6 +5863,193 @@ effect right, the mechanism as described wrong.
 at **`bbc3dc8`** — `git show bbc3dc8:REVIEW_PR26.md`. That sha is in
 this branch's history, not `main`'s, since the repo squash-merges.
 
+### SEC-03 (2026-09-17): the Stratum receive buffer is bounded (GitHub #21)
+
+`receiver_loop` appended every socket read to `pending` and drained only on a
+newline, with no ceiling. A pool — or anyone able to intercept the connection —
+could send an endless newline-free stream and grow that buffer until the process
+was killed by memory pressure. No wrong hashes, no error, no log: the miner
+simply dies.
+
+The asymmetry is what makes it a defect rather than an oversight. `read_line`
+has **always** rejected input past 1 MiB; the long-lived receiver path, which is
+where a hostile peer actually reaches, never did.
+
+**The fix.** One constant, `MAX_LINE_BYTES` (1 MiB), now used by both paths so
+they cannot drift. The check is on the buffer **after draining every complete
+line**, not on bytes as they arrive — because messages split across reads are
+normal and a naive "reject anything without a newline" would break ordinary
+mining. What remains after draining is by construction a single unfinished line;
+if that alone exceeds the limit, the peer is not speaking Stratum, so the buffer
+is discarded and the connection re-established.
+
+Discarding rather than truncating is deliberate: a truncated JSON line cannot
+parse, and keeping any part of it only risks pairing the tail of one message with
+the head of the next. The issue asked that an oversized message not leave a
+partial job active — it cannot, because `handle_pool_message` only ever receives
+whole lines.
+
+**Testing this properly took two attempts, and the first was worthless.**
+
+The decision was extracted into `take_complete_lines` so it could be tested, and
+seven tests cover it: reassembly across reads, several lines in one read, a
+trailing partial kept for next time, the exact limit boundary (at the limit is
+allowed, one byte over is not), a large *terminated* message still accepted, and
+a 4096-byte-chunk flood refused rather than buffered. Four mutations — removing
+the check, raising the limit 1000x, draining one line instead of all, and an
+off-by-one `>=` — are each caught.
+
+But PR #22 established three times over that **testing an extracted function is
+not testing the wiring**: the helper's tests pass happily while the production
+call site is mutated away. So a socket-level test drives the real `receiver_loop`
+against a local listener that floods 1.5 MB with no newline, and asserts the
+miner drops the stream and reconnects — observed as a **second accept**.
+
+**That test passed against the unbounded implementation.** The server thread let
+the flooding socket drop at the end of its scope, closing the connection; the
+miner saw EOF and reconnected, so the second accept arrived for a reason with
+nothing to do with the buffer bound. Holding the socket open makes a reconnect
+possible *only* if the miner gives up on the stream, and the test then fails
+against the unbounded wiring with the diagnostic it was written to produce.
+
+Recorded because the near-miss is the lesson: the test looked like it exercised
+the path, was green, and proved nothing — the same shape as PR #22's three
+failed attempts, arrived at independently one PR later.
+
+**Files changed:** `src/pool_connection.rs` (the constant, `read_line` using it,
+`take_complete_lines`, the bounded loop, **nine** tests), `.gitignore`
+(`mutants.out/`), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
+
+**Review ledger (LEDGER-01).** `REVIEW_PR23.md` carried rounds 1-3 and is
+removed from the tree in this commit; retrieve it with
+`git show 6ca8420:REVIEW_PR23.md` (round 3 appended over `394d8b3`).
+
+**`mutants.out/` was committed by `e3b339f` and is now removed (R3-F1).** A
+`git add -A` swept in 25 files and 5.7 MB of cargo-mutants scratch — build logs
+and per-mutant diffs — and `lock.json` carried this operator's hostname,
+username and absolute home paths into a **public** repository. Rounds 1 and 2
+had both recorded the directory as untracked; the commit that fixed round 2's
+finding pulled it in, and it was missing from the Files-changed list above —
+the very list that commit was editing. Untracked with `git rm -r --cached` and
+added to `.gitignore`. Scope stated precisely rather than comfortably: because
+this repo squash-merges, the tip tree is what lands, so `main` never receives
+these objects; but the branch was pushed, so they remain reachable on the public
+remote through `refs/pull/23/head` until that ref is gone. No credential was in them, and the exposure is
+stated as checked rather than assumed: the **hostname**
+`Stephens-MacBook-Pro-2.local` appears **nowhere** in this repository's commit
+metadata (`git log --all --format='%an|%ae|%cn|%ce'` — zero matches), so that
+one was genuinely new; the `/Users/stephen/...` paths were **not** new, since
+`AUDIT.md` on `main` already contains them; and the author identity was already
+public in every commit. Removed as hygiene, not handled as a credential leak.
+An earlier draft of this paragraph asserted that both the hostname and the
+username "already appear in this repo's commit metadata" — written without
+checking, and false for the hostname.
+
+**Verification.** 159 lib + 18 bin tests, clippy `-D warnings` clean. (Review
+measured 158 before this branch was rebased onto `main`; #26's donate test landed
+in between. Recorded because a test count is exactly the kind of figure that goes
+stale between a review and its fix, and this file has carried several.) Both the
+helper mutations and the wiring mutation are caught. The socket test is hermetic:
+`127.0.0.1` on an ephemeral port, which is not in `TLS_PORTS`, so it is plain TCP
+with no certificate involved; it takes ~5 s, bounded by `RECONNECT_DELAY`.
+
+**`read_line`'s own limit is still untested, and this entry should say so.**
+Mutation testing over `main` shows `> MAX_LINE_BYTES` there survives `> → >=`
+(confirmed still surviving on this branch). This change edits that line — swapping
+the `1 << 20` literal for the shared constant — and the Files-changed list says so,
+while Verification claims the mutations are caught. That is true of
+`take_complete_lines`, not of `read_line`. The precedent this entry argues from
+is itself uncovered; filed as **#27** rather than widened into this change.
+
+**Not established.** No hostile pool was exercised end to end — the flood comes
+from a local listener, not a Stratum peer mid-session, so the interaction between
+a mid-job disconnect and the worker threads is unexercised. The 1 MiB value is
+inherited from `read_line` rather than derived from any measurement of real
+Stratum message sizes; it is three orders of magnitude above a job, which is
+generous, but no survey backs the specific number.
+
+**Round 1 review: mergeable, no blockers, five minors — and its most valuable
+finding was a line with no coverage at all.**
+
+**`pending.clear()` in the overflow arm could be deleted and the suite stayed
+green.** The wiring test only needed *a* second accept, and `reconnect()` still
+supplied one. Covering it took **three attempts, and the first two passed against
+the defect** — the same failure shape as the socket test itself, and as PR #22
+before it.
+
+The interesting part is that **review's predicted consequence was wrong, and
+testing it is how that came out.** The prediction was an infinite reconnect loop:
+the oversized remainder survives, the next read re-enters the overflow arm,
+forever. It does not happen. Without the clear, the stale flood is still in the
+buffer when the next read appends data that *does* contain a newline — so
+`take_complete_lines` drains the whole megabyte-plus-message as one bogus line
+and the buffer self-clears. No second overflow, no loop.
+
+What is actually lost is narrower and quieter: **the first real message after the
+flood** arrives concatenated onto a megabyte of `x`, fails to parse, and is
+silently swallowed. A job, typically. So the observable is not "does it reconnect
+again" but "does the first job after a flood survive" — now asserted through
+`get_work()`, and it fails against the unfixed code with exactly that message.
+
+Two dead ends recorded because each looked like a working test:
+
+- Asserting a **third accept** does not occur. Green with or without the clear,
+  for the reason above.
+- The same test with the server looping on `accept()`, which **hung**: the server
+  blocked waiting for a third connection that must never arrive, so `join()`
+  never returned. Restructured to a deadline-bounded non-blocking accept, which
+  also keeps the listener alive — dropping it would have made a third accept
+  unobservable and the assertion vacuous.
+
+Also from review: the flood test's `loop` was **uncapped**, so raising the limit
+would make it spin O(n²) rather than fail — measured at >19 minutes of CPU and
+>3.2 GB RSS still climbing, which on the 7 GB `macos-14` runner is an OOM instead
+of a verdict.
+
+**The first cap did not fix it, and this entry said it did.** It was
+`(MAX_LINE_BYTES * 2) / chunk.len()` — derived from the very quantity the "raise
+the limit" mutation moves, so the cap scaled with the mutation, the terminal
+`panic!` became unreachable, and the test *passed* instead of failing. Round 2
+measured it: 1x passes in 0.05 s, 4x in 0.82 s, 16x in 18.3 s, still quadratic.
+The claim "now bounded at twice the limit, so that mutation fails cleanly" was
+false on both clauses, and is withdrawn.
+
+Now bounded by an **absolute** 4 MiB, independent of `MAX_LINE_BYTES`. Measured
+in release, this one test alone, restoring the source byte-identical after each
+mutation: **1x passes in 0.06 s, 2x passes in 0.18 s, 4x fails in 0.66 s, 16x
+and 1024x fail in 0.66 s** with *"fed 4194304 bytes without being refused; the
+limit is not being enforced"*. Two things follow, and the first version of this
+paragraph got both wrong. **The detection threshold is 4x, not "a raised
+limit"**: at 2x the buffer still overflows inside the 1024 iterations, so this
+test passes and the two socket tests are what catch that mutation. And the
+comparison with round 2's 18.3 s is **a difference of verdict, not of speed**:
+the old cap spent 18.3 s arriving at the *wrong* answer (pass) and the new one
+spends 0.66 s arriving at the right one (fail). Calling that "27x faster" would
+swap a withdrawn over-claim for a fresh one, which is the exact move BENCH-02
+round 2 caught. The withdrawn "42 s" was a whole-suite
+figure quoted against a single-test one, a non-reproducing number inside the
+paragraph whose job was to withdraw a non-reproducing number (R3-F3).
+
+Kept as a minor rather than a major by review, and rightly: the *socket* test
+still caught the mutation throughout, so nothing was shippable-green — what was
+wrong was the record, not the protection.
+
+**Three corrections to this entry's own claims**, from review:
+
+- The real ceiling is `MAX_LINE_BYTES + 4096`, not `MAX_LINE_BYTES`, because the
+  check runs after each 4096-byte read. Two conditions hold that bound — the
+  chunk size and the per-read check — and both are now named.
+- The two paths share the constant but **not the semantics**: `read_line` rejects
+  a line of `MAX+1`, while `receiver_loop` will deliver a *complete* line of up
+  to `MAX+4096`. "Cannot drift apart" was true of the number, not the behaviour.
+- "`read_line` has always rejected input past 1 MiB" is true, but the sharper
+  fact is that the capped helper and today's `receiver_loop` were written **in
+  the same commit**. This was never drift: the asymmetry was there from birth.
+
+Complete lines drained alongside an overflow are discarded with the buffer. That
+is defensible — `reconnect()` clears `current_job` regardless — but it was stated
+only in a test comment, and the `error!` line did not mention it.
+
 ### PROC-06 (2026-09-17): mutation testing, because the break-testing rule never bound the author
 
 User asked for a permanent fix to a defect this session produced repeatedly:

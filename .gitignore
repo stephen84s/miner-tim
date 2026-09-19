@@ -41,9 +41,13 @@ mining.conf
 # stays tracked.
 .claude/settings.local.json
 
-# cargo-mutants scratch. Every run writes ~788 KB here and rotates the previous
-# directory to mutants.out.old, so without this a documented invocation dirties
-# dozens of tracked files. PR #24 committed 102 of them before review caught it —
-# the same accretion as LEDGER-01, four days later and in a less durable form.
+# cargo-mutants scratch. Untracked deliberately, for two reasons found
+# independently one PR apart: volume and disclosure. Every run writes ~788 KB
+# and rotates the previous directory to mutants.out.old, so a documented
+# invocation dirties dozens of files — PR #24 committed 102 of them. And
+# `lock.json` records the operator's hostname, username and absolute home paths,
+# which PR #23 swept in via a `git add -A` (25 files, 5.7 MB) into a **public**
+# repository. Both directories are listed because a run creates both. The
+# findings belong in `AUDIT.md`; the directories are scratch.
 mutants.out/
 mutants.out.old/

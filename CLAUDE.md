@@ -95,6 +95,120 @@
       what is saved is queue time, runner capacity and a reviewer's attention.
       Worth saving — but never by skipping a verification step to avoid a run.
 
+    - **Delegate the mechanical work to Haiku; keep the judgement.** The
+      default division of labour is that a **Haiku subagent** does the verbose,
+      mechanical work and **you supervise and verify it**. Delegate: long test
+      and benchmark runs, `debug_assert!`/symbol inventories, `AUDIT.md`
+      write-ups, repetitive edits across files, and anything whose output is
+      long but whose decisions are few.
+
+      **Why, in this repo specifically.** Two costs compound. Haiku tokens are
+      weighted far below Opus against the usage window, and **this file is
+      ~60 KB and is re-sent on every turn the lead takes** (59967 bytes
+      measured on `main`) — so the lead's cost per tool call is high and a cold
+      subagent's is low. Counted from this session's own task notifications:
+      Haiku implementations ran **101,608** and **111,957** subagent tokens and
+      cold reviewers **94,350-104,304**, none of which enters the lead's
+      context — only the brief and the returned summary do, which is order
+      1-3k, estimated rather than measured. Note the limit that actually bites
+      is a **session** limit spanning every model, so delegating stretches the
+      window rather than sidestepping it.
+
+      **Never delegate to Haiku:** the independent review itself (the repo's
+      whole quality mechanism rests on a strong cold reviewer — see the
+      reviewer-agents rule above), design decisions, merge decisions, or the
+      final verification of someone else's claim.
+
+      **Rework is the only thing that makes this lose, and it is not
+      hypothetical.** In one session Haiku agents skipped the break-test that
+      *was* the task and wrote "ensured by design" instead; appended an
+      `AUDIT.md` entry as a task-board **table row** in the wrong format; left a
+      stray `src/randomx/jit/aarch64.rs.bak` inside the source tree; and
+      silently dropped one of three requested items. Each cost Opus tokens to
+      catch and redo, which is the expensive direction.
+
+      So the brief carries the difference. **Hand over every finding you have
+      already verified, with the exact commands**, so the agent cannot
+      re-derive them wrong; name the house-style formats it must follow; tell
+      it what "not established" means here; and warn it of local traps — the
+      `rtk` hook mangles trailing `cargo test` filter arguments, so runs must go
+      through **`rtk proxy cargo ...`** or a filter silently matches nothing and
+      libtest still prints `ok`.
+
+      **Use a specialised agent, never a general-purpose one.** Delegation
+      goes to a tuned definition in `.claude/agents/`, whose file already
+      carries the scope, the house formats and the traps — so the brief does
+      not have to re-teach them and cannot forget one. Reviewing has
+      **`jit-reviewer`**, **`ci-reviewer`** and **`pr-reviewer`**; implementing
+      has **`rust-implementer`** (writes the code from a plan you have already
+      settled), **`audit-writer`** (writes `AUDIT.md` entries and task-board
+      rows from findings already established — a scribe, explicitly not an
+      investigator) and **`break-tester`** (reintroduces a defect and proves
+      the test catches it, then runs `scripts/mutants.sh`). All of them read
+      `_shared-context.md`.
+
+      **You plan; the implementer writes.** The division is deliberate: the
+      expensive mistakes here have been mistakes of *judgement* — a test
+      mutated in a way it catches for the wrong reason, a claim recorded
+      without being checked — and those are the lead's to make and to catch.
+      So hand over a plan that names the files, the functions, the behaviour
+      and the tests, and say what "done" looks like. An implementer that has to
+      infer the design will infer it wrong, and the rework costs more than
+      writing the plan did.
+
+      Tell it explicitly that **a plan it cannot follow is to be reported, not
+      worked around**, and that a dropped step must be named — an agent here
+      once silently omitted one of three requested items.
+
+      **Raise the model with the cost of being wrong: Haiku → Sonnet → Opus.**
+      The agent definitions default to Haiku; the `model` argument overrides
+      that per call, so escalation is a deliberate act each time.
+
+      **The trigger is not difficulty — it is whether a defect would be
+      silent.** Work where failure announces itself (a test goes red, a build
+      breaks, a connection errors) is cheap to get wrong and safe to delegate
+      cheaply. Work where a defect *passes* — wrong hashes the pool quietly
+      rejects, a verifier that accepts anything, a check that reports success
+      having verified nothing — is expensive to get wrong no matter how small
+      the diff, and that is what buys a stronger model.
+
+      | Tier | Use it for |
+      | :--- | :--- |
+      | **Haiku** | The default. Write-ups, inventories, long test runs, docs and CLI wording, mechanical edits across files. |
+      | **Sonnet** | Real logic with a visible blast radius — the Stratum client, the miner loop, argument parsing, test harnesses. A defect here tends to show up as a failure, not as a wrong answer. |
+      | **Opus** | Anything whose failure is silent: `src/randomx/jit/`, the emitter, `vm.rs`'s native-loop path, hashing and crypto correctness, TLS and certificate verification, concurrency and shared state. **And every independent review**, whatever the diff touched — review is the mechanism that has caught every class of defect listed in this file, and cheapening it removes the thing that catches the others. |
+
+      `rust-implementer` is barred by default from the JIT paths for exactly
+      this reason. If that code must change, raise the model deliberately, keep
+      the JIT gate in the loop, and review with `jit-reviewer`.
+
+      **If no agent fits, write one before delegating** — a few paragraphs in
+      `.claude/agents/`, committed, rather than a one-off brief that dies with
+      the session. That is the difference between a lesson that compounds and
+      one relearned each time: every failure mode listed above was first paid
+      for in an ad-hoc brief that did not mention it. A generic agent starts
+      from nothing and repeats them.
+
+      **Verify, do not accept.** An agent reporting a check as passed is not
+      that check passing. Re-run what the merge decision rests on yourself.
+
+      **When you catch an agent deviating, fix its file in the same PR.** A
+      correction you make by hand fixes one instance; a correction written into
+      `.claude/agents/<name>.md` fixes every future one, and the agent files
+      exist precisely so a lesson survives the session that learnt it. Write
+      the specific case, not a platitude — "do not skip steps" teaches nothing,
+      while "an agent probed with a hand-built 69-test filter instead of the
+      gate and reported the guard unreached; the filter had excluded the two
+      suites that reach it" is followable. Every rule in those files was paid
+      for once already; the point is not to pay twice.
+
+      Deviations caught so far, each now in the relevant agent file: a
+      break-test skipped as "ensured by design"; a negative verdict drawn from
+      a filter narrower than the gate; an `AUDIT.md` entry written as a
+      task-board table row, and another with an invented heading style; a
+      stray `.bak` left inside `src/`; one of three requested items silently
+      dropped.
+
     - **Break-testing binds you, not just the reviewer.** If you write a test to
       cover a specific defect, **reintroduce that defect and watch the test
       fail** before claiming it is covered. This rule already existed — in
@@ -211,6 +325,7 @@
 | **Completed** | **FIX-01** | **`DonationSchedule::level()` pinned (#25).** The first real defect mutation testing found, one run after the tooling landed — and in code nobody was editing. `level()` had one assertion, `new(0).level() == MIN_DONATE_LEVEL`, written to check clamping; since the minimum *is* 1, an accessor that always returned 1 satisfied it for the wrong reason. Impact stated at its real size: `beneficiary_at` reads the **field**, so the donation was never at risk — only the `"donate-level {}%"` line reported to the operator. Still worth fixing: it is the one financial setting the miner has, and that line is how someone confirms `--donate-level` took effect. Fixed by pinning the accessor across values that defeat both plausible constants (the clamp floor and the default). Verified by the tool that found it: 2 mutants, 2 caught, 12 s. |
 | **Completed** | **SEC-03** | **Stratum receive buffer bounded (#21).** `receiver_loop` appended every read to `pending` and drained only on a newline, with no ceiling — a peer sending an endless newline-free stream grew it until the process died. No wrong hashes, no error, no log. The asymmetry is the defect: `read_line` has always capped at 1 MiB; the long-lived path a hostile peer actually reaches never did. One `MAX_LINE_BYTES` now serves both. The check is on the buffer **after draining complete lines**, so messages split across reads keep working. **Testing it took two attempts and the first was worthless**: the socket-level wiring test passed against the unbounded implementation, because the server dropped the flooding socket and the miner reconnected on EOF — a second accept for a reason unrelated to the bound. Holding the socket open makes it discriminate. Same shape as PR #22's three failed attempts, hit independently one PR later. Nine tests (159 lib + 18 bin post-rebase); four helper mutations, the wiring mutation and the `pending.clear()` mutation all caught — the last taking **three attempts**, the first two passing against the defect. Review predicted the missing clear would cause an infinite reconnect loop; **it does not** — the next newline drains the stale flood as one bogus line, and what is actually lost is the *first real job after the flood*, swallowed. Round 2 found the *first* cap for that was itself derived from the limit it guards, so it scaled with the mutation and the test passed instead of failing — recorded here as fixed when it was not. Now an absolute 4 MiB, and the figure recording that was wrong too: measured in release, one test, the threshold is **4x** (2x still passes; 4x/16x/1024x fail in 0.66 s) — the withdrawn "42 s" was a whole-suite number quoted against a single-test one. **Round 3 found two more majors**: `e3b339f` swept 25 files / 5.7 MB of `mutants.out/` scratch into a public repo via `git add -A`, absent from the very Files-changed list it was editing (now untracked and ignored); and the rebase added a *second* SEC-03 row beside the stale pre-round-1 one, with blank lines that terminate the GFM table — confirmed against GitHub's renderer, which dropped FIX-01, both SEC-03 rows and `Pending` out of the table. DOC-02 round 3 recurring in the same file. 159 lib + 18 bin, clippy clean. Not established: no hostile *pool* end to end, and the 1 MiB value is inherited from `read_line`, not derived from a survey of real message sizes. |
 | **Completed** | **PROC-06** | **Mutation testing, because the break-testing rule never bound the author.** The rule existed and was good — but lived in `_shared-context.md`, headed *"for MinerTim reviewers"*. So reviewers break-tested and caught the author **eight times**, several occasions recorded here as "break-tested" when the claim was false. The subtler half: hand break-testing means *choosing* a mutation, and one the test catches for an unrelated reason proves nothing — an all-zeros pin *rejects* everything; a dropped test socket makes the miner reconnect on EOF. Fixed three ways: the obligation moves into `CLAUDE.md`'s protocol with those examples; `scripts/mutants.sh` prefers the tool, which tries every mutation; and an **advisory** CI job. Cost measured, and scope is everything — **28 min unscoped for 8 mutants, ~31-33 s scoped for 20**. First real run found a survivor in this session's own `hex_decode`, which is an **equivalent mutant** (`\|` vs `^` agree on all 256 nibble pairs) — the reason the job must stay advisory. Not established: the crate generates **3,196** mutants (`vm.rs` 855, `jit/aarch64.rs` 710) and almost none have been run. `pool_connection.rs` is **88** on `main` and 95 on the in-flight branch — an earlier note gave 95 without saying which tree. **Round 2 returned NOT MERGEABLE, two majors.** The silent-green fix was one step short in exactly the way this PR exists to prevent: the count filtered with `-F` alone while the run also applies `-E`, so the exclusion could empty the set and the script would announce one mutant, test none and exit 0 — round 1's own finding surviving inside its fix. And the merge that brought `main` in broke the GFM task board with three blank lines, dropping PROC-06 itself out of the rendered table, while the entry justifying the merge called the append clean. Both fixed and re-verified against GitHub's renderer; five minors closed, and R2-F7 settled from live check-run data — a failed `continue-on-error` job does report `conclusion=failure`, so the advisory gate is visibly red without blocking. **Round 3: MERGEABLE, no blockers, no majors** — it executed every exit path rather than reading them and could not make the script report success having tested nothing, bar one case it found: a scope whose mutants are *all unviable* exited 0, the same silent-green shape one layer further out. Now exit 66. Its other minors closed too: this script's exit codes were colliding with cargo-mutants' own (a mutant surviving *by hanging* exited with the code meaning "your filter matched nothing"), so they moved to 64/65/66; an orphaned duplicate comment block; `cargo-mutants` pinned to 27.1.0 since the script parses `--list`; and the stale "21 mutants / 33 s" swept to 20 / ~31-33 s. |
+| **Completed** | **PROC-08** | **Delegate the mechanical work to Haiku; keep the judgement.** User asked which costs less — doing it directly or supervising a subagent — then asked to make the answer the default. Supervising, for two compounding reasons: Haiku tokens are weighted far below Opus against the usage window, and `CLAUDE.md` is **59,967 bytes** re-sent on every lead turn, so the lead's cost *per tool call* is high and a cold subagent's is low. Counted from this session's notifications: Haiku implementations **101,608** / **111,957** subagent tokens, cold reviewers **94,350**-**104,304**, none of it entering the lead's context; the brief plus summary that do are order 1-3k, **estimated, not measured**. Two of this entry's own draft claims were corrected before commit (it said "~40 KB", and presented the 1-3k as measured). Never delegated to Haiku: the independent review itself, design decisions, merge decisions, or verifying another agent's claim. Rework is what makes delegation lose and it is recorded because it happened — Haiku agents skipped the break-test that *was* the task and wrote "ensured by design", wrote an `AUDIT.md` entry as a task-board table row, left a stray `.bak` in `src/`, and dropped one of three items. Hence the rule that a brief hands over every verified finding with exact commands, and names local traps: the `rtk` hook mangles trailing `cargo test` filters, which produced a **vacuous pass** — `0 passed; 161 filtered out` reported as `ok`. **Second instruction: never delegate to a general-purpose agent** — use a tuned definition in `.claude/agents/`, which already carries the scope, formats and traps a brief can forget. Review had three such agents; **implementation had none**, which is why each failure above was paid for in an ad-hoc brief that omitted the trap it hit. Added **`rust-implementer`** (writes code from a plan the lead settled; told that a plan it cannot follow is to be *reported, not worked around*, and that a dropped step must be named — and **barred by default from `src/randomx/jit/`**, the one carve-out where a cheap model is a false economy, since a JIT defect silently mines wrong hashes rather than crashing), **`audit-writer`** (scribe for `AUDIT.md` entries and board rows, explicitly not an investigator) and **`break-tester`** (reintroduces *the* defect, not merely one the test fails on, and is told a probe that does **not** fail is its most valuable result). Both carry this session's traps, including that `scripts/mutants.sh` cannot reach `src/bin/` because it tests with `--lib`, reporting MISSED where no test ran. **Escalation ladder** on the user's instruction: **Haiku → Sonnet → Opus**, raised as the component warrants, with the trigger being **not difficulty but whether a defect would be silent** — a red test is cheap, a defect that *passes* is not. Sonnet for logic with a visible blast radius (Stratum, miner loop, parsing); Opus for the silent-failure surface (JIT, emitter, native loop, hashing, TLS, concurrency) **and every independent review whatever the diff touched**, since review is what caught every class of defect in this file. Rule ends: if no agent fits, write one first — a brief dies with the session, an agent file compounds. **Third instruction, which makes the rest self-maintaining: when a deviation is caught, fix that agent's file in the same PR**, with the specific worked case rather than a platitude — six from this session are now recorded, including `break-tester` being required to re-run a negative against the real gate after one reported a guard unreached from a filter that had excluded the two suites reaching it. Not established: whether this reduces total window consumption over time; the figures are single-session and the rework tax is unquantified. |
 | **Pending** | - | **Awaiting User Task** |
 
 ---

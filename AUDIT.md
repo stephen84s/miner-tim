@@ -6370,7 +6370,8 @@ coverage-live.
 established by running the binary: `NATIVE_LOOP=off ./target/release/minertim
 127.0.0.1:1 <wallet> 1` logs `Native-loop JIT: on (requested)` — ignored.
 `MINERTIM_NATIVE_LOOP=off ...` logs `off (requested)` — works. Source confirms
-it: `parse_native_loop` makes the only `std::env::var` call and reads exactly
+it: the shared `parse_switch` helper — not `parse_native_loop`, which merely
+calls it — makes the `std::env::var` call on this path, and is passed exactly
 `"MINERTIM_NATIVE_LOOP"` / `"MINERTIM_VERIFY_SHARES"`. The bare names are
 **not** environment variables the binary reads; they are `mining.conf` keys that
 the `Makefile`'s `run` target converts to CLI flags. **Fixed in place** in
@@ -6394,9 +6395,46 @@ coverage gap. This is tooling limitation, not a defect in the code under test.
   with both `--native-loop "$VAR"` and `MINERTIM_NATIVE_LOOP="$VAR"` forms.
   Exit 1 is expected (args.len() < 3 triggers the help pathway to exit 1).
 
+`MINERTIM_TLS_FINGERPRINT` is read by a **separate** `std::env::var` call at
+`minertim.rs:281`, so "the only such call in the binary" — as an earlier draft
+of this paragraph put it — was wrong; it is the only one on the *switch* path.
+
+**The wiring was untested, and review caught it.** The test exercised
+`native_loop_disabled_warning(bool)` directly while `main` passed
+`cfg!(target_arch = "aarch64")` inline at the call site — so **negating that
+`cfg!` left the entire bin suite green**, silently reintroducing the very defect
+issue #3 item 3 was filed to fix, by a wiring bug instead of a hardcoded string.
+This is PR #22's tested-the-helper-not-the-wiring defect in miniature, and it is
+the third occurrence in this repo. Closed by moving the `cfg!` into
+`native_loop_disabled_warning_for_target()`, which `main` now calls, and
+covering it with `the_warning_this_build_emits_matches_its_target` — which
+asserts the arm for whatever target it was compiled on. Break-tested: negating
+the `cfg!` now fails that test (19 passed, 1 failed) where it previously passed
+all 19. Source restored `cmp` byte-identical.
+
+That test also **narrows the gap this entry had to declare open**: it is the
+non-aarch64 arm on a non-aarch64 build, so CI's x86_64 `test` job now exercises
+that arm for real — the case no aarch64 host can reach.
+
 **Files changed:** `CLAUDE.md` ("Runtime switches" section); `src/bin/minertim.rs`
-(two small edits in existing code, one function definition, one test function) —
-no changes to line counts or function signatures.
+(two edits to existing code, two function definitions, two test functions).
+An earlier draft said "no changes to line counts", which was false by 55 lines.
+
+**Review (Sonnet, round 1): MERGEABLE, one major and two minors, all fixed
+above.** Recorded because this PR was the deliberate trial of reviewing at the
+Sonnet tier rather than Opus (PROC-08's ladder listed Sonnet as reasoned but
+**untested**). Graded against a ground-truth list written *before* the review
+was spawned, it passed above the bar: it found the wiring major — going further
+than the lead's own prediction by mutating the `cfg!` and showing the whole bin
+suite stayed green — reproduced all five of the lead's verified claims by
+running them rather than reading, independently reproduced the
+`scripts/mutants.sh` `--lib` blind spot, raised **zero** false positives on the
+two items seeded as already-correct, and found three record errors the lead had
+not predicted (the `env::var` misattribution, "the only such call", and the
+false line-count claim). Cost 91,085 subagent tokens against Opus reviews at
+76,575-104,304 — **no saving in raw tokens; the saving is in model weighting.**
+Ledger: `REVIEW_PR30.md`, removed from the tree per LEDGER-01; retrieve with
+`git show e210782:REVIEW_PR30.md`.
 
 **Not established:** The non-aarch64 arm of the `native_loop_disabled_warning()`
 function has never been observed on a real non-aarch64 host. Both arms were

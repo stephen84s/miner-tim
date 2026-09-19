@@ -72,7 +72,8 @@ fn main() {
         eprintln!("Switch values (--native-loop, --verify-shares):");
         eprintln!("  on/off, true/false, yes/no, 1/0. An empty value is treated as unset: it is");
         eprintln!("  ignored with a warning rather than overriding an earlier setting, so");
-        eprintln!("  `--native-loop \"$VAR\"` with $VAR unset will not silently undo one.");
+        eprintln!("  `--native-loop \"$VAR\"` with $VAR unset will not silently undo one, and");
+        eprintln!("  neither will `MINERTIM_NATIVE_LOOP=\"$VAR\"` if $VAR is empty.");
         std::process::exit(if args.len() < 3 { 1 } else { 0 });
     }
 
@@ -137,9 +138,8 @@ fn main() {
         // it silently gives up ~7% hashrate, and someone who set it during an
         // incident should not discover it months later in a config file.
         log::warn!(
-            "Native-loop JIT DISABLED — running the per-iteration body JIT. \
-             Expect roughly 7% lower hashrate. Unset --native-loop / \
-             MINERTIM_NATIVE_LOOP to restore it."
+            "{}",
+            native_loop_disabled_warning(cfg!(target_arch = "aarch64"))
         );
     }
 
@@ -529,6 +529,25 @@ fn startup_state_line(native_loop: bool, verify_shares: bool, target_has_native_
     )
 }
 
+/// The native-loop-disabled warning, target-aware.
+///
+/// On aarch64, the JIT exists and can be restored. On other targets, the JIT is
+/// cfg'd out entirely, so there's nothing to turn on — the message must say so
+/// rather than giving non-actionable advice.
+fn native_loop_disabled_warning(target_has_native_loop: bool) -> String {
+    if target_has_native_loop {
+        // aarch64: the JIT exists but is turned off.
+        "Native-loop JIT DISABLED — running the per-iteration body JIT. \
+         Expect roughly 7% lower hashrate. Unset --native-loop / \
+         MINERTIM_NATIVE_LOOP to restore it."
+            .to_string()
+    } else {
+        // Other targets: the JIT doesn't exist on this architecture at all.
+        "Native-loop JIT unavailable on this architecture (aarch64 only)."
+            .to_string()
+    }
+}
+
 /// The native-loop JIT switch. Malformed input falls back to **off**: slower,
 /// but it cannot mine wrong hashes.
 fn parse_native_loop(args: &[String]) -> bool {
@@ -820,5 +839,41 @@ mod tests {
             }
         }
         assert!(startup_state_line(true, false, true).contains("share verification: off"));
+    }
+
+    /// The native-loop-disabled warning differs between aarch64 and other targets.
+    ///
+    /// On aarch64, it describes how to restore the JIT. On other targets, it
+    /// acknowledges the architecture doesn't have one rather than suggesting
+    /// a switch the operator cannot flip.
+    #[test]
+    fn native_loop_warning_is_target_aware() {
+        let aarch64_msg = native_loop_disabled_warning(true);
+        assert!(
+            aarch64_msg.contains("Unset --native-loop"),
+            "aarch64 arm must give actionable advice: {aarch64_msg}"
+        );
+        assert!(
+            aarch64_msg.contains("7% lower hashrate"),
+            "aarch64 arm must mention the performance cost: {aarch64_msg}"
+        );
+        assert!(
+            !aarch64_msg.contains("architecture"),
+            "aarch64 arm must not say 'unavailable on this architecture': {aarch64_msg}"
+        );
+
+        let other_msg = native_loop_disabled_warning(false);
+        assert!(
+            other_msg.contains("unavailable on this architecture"),
+            "non-aarch64 arm must say the JIT is unavailable: {other_msg}"
+        );
+        assert!(
+            !other_msg.contains("Unset --native-loop"),
+            "non-aarch64 arm must not suggest unsetting the flag: {other_msg}"
+        );
+        assert!(
+            !other_msg.contains("hashrate"),
+            "non-aarch64 arm must not mention aarch64 performance figures: {other_msg}"
+        );
     }
 }

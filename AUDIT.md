@@ -1014,6 +1014,23 @@ Decision rule agreed with user:
 **Goal:** Size the vector-FP JIT port (work item #1) either way, ahead of the
 xmrig-vs-us benchmark result. Web research + file reading only; no builds run.
 
+**Instruction — long runs launch under `caffeinate`.** Absent from every
+earlier draft of this entry (R1-M3). Any live pool session,
+benchmark sweep or multi-hour gate now runs under **`caffeinate -dimsu`**,
+because macOS will otherwise sleep the host part-way and an eight-hour run that
+dies at hour three is not a shorter result, it is **no** result — everything
+such a run tests is about sustained behaviour: reconnects, donation rotations,
+seed changes, share acceptance over time. Written down because it was **missed
+once**: a previous eight-hour run was launched with no inhibitor and survived
+only because the host happened to be on mains with sleep disabled, which is
+luck rather than design. Verified on this host rather than asserted —
+`caffeinate -dimsu /usr/bin/true` exits 0, `-m` is real (documented in
+`man caffeinate`, merely absent from the `[-disu]` usage synopsis), and while
+it runs `pmset -g assertions` lists `PreventUserIdleSystemSleep` held on the
+utility's behalf, which is the check the rule tells the operator to make.
+`_shared-context.md` said `caffeinate -i`, which leaves system sleep free to
+kill a run; it now points at the same `-dimsu` (R1-m4).
+
 **Files changed:** `NEON_FP_PORT_NOTES.md` (new, repo root); this AUDIT entry.
 
 **Content:** xmrig master (post-PR #3708) ARM64 register map (f→v16-19,
@@ -6692,11 +6709,12 @@ Haiku subagent costs less, then asked to make the cheaper one the default.
 
 **Answer, from this session's own numbers rather than intuition.** Supervising
 is cheaper, for two compounding reasons. Haiku tokens are weighted far below
-Opus against the usage window; and `CLAUDE.md` is **59,967 bytes on `main`** and
-is re-sent on every turn the lead takes, so the lead's cost *per tool call* is
+Opus against the usage window; and `CLAUDE.md` is **62,625 bytes on `main`** and
+is re-sent on every turn the lead takes (59,967 when this was drafted, two
+merges ago — the figure moves, which is itself the point), so the lead's cost *per tool call* is
 high while a cold subagent's is low. Counted from this session's task
 notifications: Haiku implementations ran **101,608** and **111,957** subagent
-tokens, cold reviewers **94,350**, **95,394** and **104,304** — none of which
+tokens, cold reviewers **76,575**, **94,350**, **95,394**, **97,823** and **104,304** — none of which
 enters the lead's context. What does enter it is the brief plus the returned
 summary, order 1-3k. **That last figure is an estimate, not a measurement**:
 subagent totals are reported back, the lead's own per-turn cost is not.
@@ -6729,12 +6747,12 @@ arguments, so `cargo test --lib -- <filters>` silently matched **nothing** and
 libtest still printed `ok` — `0 passed; 161 filtered out`. Runs must go through
 `rtk proxy cargo ...`.
 
-**Second instruction, same rule: never delegate to a general-purpose agent.**
+**Instruction — never delegate to a general-purpose agent.**
 Use a tuned definition in `.claude/agents/`, whose file already carries the
 scope, the house formats and the traps, so a brief cannot forget one. Review
 already had three such agents; **implementation had none**, which is why every
 failure listed above was paid for in an ad-hoc brief that did not mention the
-trap it hit. Two implementer agents now exist, covering exactly the work
+trap it hit. Three implementer agents now exist, covering exactly the work
 delegated this session:
 
 - **`audit-writer`** — writes `AUDIT.md` entries and task-board rows from
@@ -6762,8 +6780,7 @@ delegated this session:
   `audit-writer` rather than writing the `AUDIT.md` entry itself, which keeps
   the scribe's "record, do not re-derive" boundary intact.
 
-  **Escalation ladder, added on the user's instruction: Haiku → Sonnet → Opus,
-  raised as the component warrants.** The definitions default to Haiku and the
+  **Instruction — escalate Haiku → Sonnet → Opus as the component warrants.** The definitions default to Haiku and the
   `model` argument overrides per call, so each escalation is deliberate. The
   trigger recorded in the rule is **not difficulty but whether a defect would
   be silent** — work whose failure announces itself (red test, broken build,
@@ -6794,8 +6811,7 @@ The rule closes with **"if no agent fits, write one before delegating"**,
 because a one-off brief dies with the session while a committed agent file
 compounds.
 
-**Fourth instruction: monitor the tiers over time rather than trusting one
-trial.** Each PR's `AUDIT.md` entry now records the review's **tier**, what it
+**Instruction — monitor the tiers over time rather than trusting one trial.** Each PR's `AUDIT.md` entry now records the review's **tier**, what it
 **found**, what it **missed**, and its **false positives**, so
 `grep -n 'Review (' AUDIT.md` reads as a running series. Grading must be
 written down *before* the review is spawned or it is post-hoc; a false positive
@@ -6808,7 +6824,7 @@ the ladder still rests on reasoning rather than outcomes, and the cost note
 stays blunt: Sonnet's 91,085 subagent tokens sat inside Opus's
 76,575-104,304 range, so the saving is weighting and nothing else.
 
-**Third instruction, and the one that makes the rest self-maintaining: when a
+**Instruction — the one that makes the rest self-maintaining: when a
 deviation is caught, fix the agent's file in the same PR.** A hand correction
 fixes one instance; a correction written into `.claude/agents/<name>.md` fixes
 every future one. The rule asks for the *specific* case rather than a
@@ -6822,20 +6838,73 @@ invented heading style (both now named in `audit-writer`, which also states
 that an off-format heading leaves an entry effectively unfiled); a stray `.bak`
 left inside `src/`; and one of three requested items silently dropped.
 
-**Files changed:** `CLAUDE.md` (two bullets in Operational Protocol step 0, plus
-this task-board row), `.claude/agents/rust-implementer.md`,
+**Review (Opus, round 1): NOT MERGEABLE — four majors, six minors, a nit, no
+blockers. All fixed above; every one was right.** The majors were that the
+Verification paragraph measured a two-merge-stale tree *and* asserted a check
+that cannot fail (R1-M1); that both "Not established" sections were falsified
+ten lines above by this same entry, Sonnet having already reviewed two PRs
+(R1-M2); that the PR body and entry omitted two of the five rules actually
+merging, `caffeinate` entirely (R1-M3); and that the blanket "every review on
+Opus" rule was contradicted by the evidence table printed directly beneath it,
+with the two series diverging on arrival (R1-M4). The minors included the one
+that mattered structurally: the three reviewer agents carried **no `model:`
+key**, so the rule called load-bearing was enforced by nothing but the lead
+remembering. They now carry `model: opus` (`jit-reviewer`, `ci-reviewer`) and
+`model: sonnet` (`pr-reviewer`), making the tier a property of the definition
+rather than of the brief.
+
+It also **verified `caffeinate` rather than taking the rule's word**, and
+confirmed `-m` is genuine — documented in `man caffeinate`, merely missing from
+the `[-disu]` usage synopsis — and that `-u`'s five-second default does not
+bite because the timeout is not applied when a utility is invoked. That last
+point is one the rule's author did not know.
+
+Recorded for the series: **Opus, 11 findings, 11 reproduced, 0 false
+positives**, 97,823 subagent tokens. Ledger: `REVIEW_PR29.md`, removed per
+LEDGER-01; retrieve with `git show 5d1b51b:REVIEW_PR29.md`.
+
+**This entry's own cost, stated because the rule turns on it.** `CLAUDE.md`
+goes from **62,625** bytes to **77,003**, **+23%**, in the change whose premise
+is that the file is expensive because it is re-sent every turn. That is a real
+cost and it is not dismissed: the bet is that five rules which stop one round
+of rework pay for the tokens they add on every turn thereafter, and **nothing
+here measures that.** If the file keeps growing at this rate the right response
+is to move the task board out of it, which LEDGER-01 already flagged and
+nothing has yet acted on.
+
+**Files changed:** `CLAUDE.md` (five bullets in Operational Protocol step 0 —
+delegation, specialised agents, the escalation ladder, tier logging and
+`caffeinate` — plus this task-board row), `.claude/agents/rust-implementer.md`,
 `.claude/agents/audit-writer.md` and `.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`
 (header: it is read by implementers now, not only reviewers), `AUDIT.md` (this
 entry).
 
 **Verification.** No code change, so no test claim is made. The task board was
-re-rendered through GitHub's own markdown API (`POST /markdown`, `mode: gfm`)
-and gives **3 tables, 46 rows, 0 stray pipes**, matching `main` — checked
-because a blank line between rows terminates a GFM table and has broken this
-board twice in the past week.
+re-rendered through GitHub's own markdown API (`POST /markdown`, `mode: gfm`):
+the board is **one table, 38 rows against `main`'s 37** — exactly the one row
+this change adds — with **0 stray pipes**. Whole-file, this branch renders
+**5 tables** to `main`'s 3, the two extra being the escalation ladder and the
+tier series added here.
+
+*An earlier version of this paragraph read "3 tables, 46 rows, matching
+`main`", and was wrong twice over.* The figures were measured against
+`b65bf86`, two merges stale, so they described a tree nobody was reviewing. And
+"matching `main`" is **vacuous by construction** — this change adds a row, so
+matching `main` would have been the defect, not the proof. A check that cannot
+fail is this repo's signature defect, and it appeared here inside the
+verification section of the entry that documents it (R1-M1).
 
 **Not established.** Whether the rule actually reduces total window consumption
 over time — the figures above are single-session counts, and the rework tax is
-real but unquantified. The claim is directional, not a measured saving. Nor is
-there evidence about delegating to models between Haiku and Opus; only those
-two were used.
+real but unquantified. The claim is directional, not a measured saving.
+
+*The previous sentence here claimed "no evidence about models between Haiku and
+Opus; only those two were used". That was false when written and falsified ten
+lines above it by this same entry:* Sonnet reviewed **PR #30** and **PR #31**,
+the latter returning a blocker and a major that were both right. The premise
+had changed and the section was edited around rather than rewritten — the
+accretion failure this file keeps recording (R1-M2). What **is** still
+unestablished about Sonnet is narrower: three reviews, all on documentation or
+evidence claims, none on a silent-failure surface, and no instance yet of any
+tier missing something a later round found — except one, by Opus, on a
+mechanical heading check.

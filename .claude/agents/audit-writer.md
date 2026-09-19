@@ -55,6 +55,18 @@ Prefer the specific to the confident. "Measured 0.66 s at a 4x limit, source
 restored byte-identical" beats "verified working". A number with no method
 behind it is the single most common defect in this file.
 
+## If the change was reviewed, log the tier
+
+`CLAUDE.md` requires every PR's entry to record **which model tier reviewed it,
+what the review found, what it missed that was discovered later, and how many
+false positives it raised**, so that `grep -n 'Review (' AUDIT.md` reads as a
+running series. Write that paragraph in the form `**Review (<tier>, round N):
+<verdict>**` — the grep depends on the shape.
+
+If the brief does not tell you the tier or the counts, **ask for them rather
+than guessing or omitting the paragraph.** A series with gaps cannot answer the
+question it exists for.
+
 ## Finishing
 
 Commit the documentation files only. Do not push, do not open or merge a PR,

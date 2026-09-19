@@ -515,9 +515,11 @@ that was available and not read.
 
 `AUDIT.md` PROC-06 says the debug lib suite measures **188 s** here and derives
 8 x 188 s = 25.1 min; `scripts/mutants.sh:27` says **~192 s**; R1-F12 measured
-191.87 s. Neither figure is sourced. Both support the conclusion (scope
-dominates), so this is accuracy only — but this repo retracts figures for a
-living and the two numbers are in the same change.
+191.87 s. I measured it again on this head: `cargo test --lib` (debug),
+**189.60 s**, 150 passed / 2 ignored. So both figures reproduce within noise and
+neither is wrong — but the same change states two different values for one
+measurement in two files, with no source for either, and the conclusion (scope
+dominates) is unaffected. Accuracy only.
 
 ### R2-F6 (MINOR) — a bad `-F` regex fails with no message at all
 

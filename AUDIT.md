@@ -6342,3 +6342,83 @@ nothing — `git diff` against both parents shows no deletions in either
 direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
 `_shared-context.md` are identical to their sources. The damage was purely
 additive.
+
+### TEST-01 (2026-09-20): issue #4's `debug_assert!` guards are exercised — proven, not asserted
+
+**Issue #4.** Three `debug_assert!` guards were cited in `AUDIT.md` as safety
+nets while the verification runs quoted were done in **release**, where
+`debug_assert!` is compiled out — so the evidence never exercised them, and
+`make test` (debug) was a different profile from the one verified.
+
+**Verdict: FULLY CLOSED.** All four guards the issue names are reached by
+`scripts/verify-jit.sh`, which runs its 92-test set in **both** debug and
+release and is run by `jit-macos` and `jit-linux-arm` on every pull request.
+PLAT-02 closed this when it added the two-profile gate; the issue was never
+updated to say so.
+
+**Proven by breaking each guard and watching the gate fail**, one at a time,
+each restored from a `/tmp` copy and confirmed `cmp` byte-identical:
+
+| Guard | Location | Broken -> gate result |
+| :--- | :--- | :--- |
+| `stp_fp_imm` imm7 range | `jit/aarch64.rs:190` | 4 tests fail, debug profile |
+| `ldp_fp_imm` imm7 range | `jit/aarch64.rs:203` | 1 test fails, debug profile |
+| `subs_imm` imm12 | `jit/aarch64.rs:158` | 3 tests fail, debug profile |
+| CBRANCH forward-target | `jit/compiler.rs:637` | **8 tests fail, debug profile** |
+
+Unmutated: `verify-jit: GATE PASSED on Darwin arm64 - 92 tests, debug + release`, exit 0.
+
+**Two corrections to this entry's own drafts, recorded because neither error was
+caught by its author and the second is the more interesting.**
+
+*Draft 1* asserted the issue was closed while stating the break-test had been
+skipped for "time constraint", on the grounds that "the gate framework ensures
+this works by design". An assertion, not evidence — this repo's signature
+defect, and the reason the entry was redone.
+
+*Draft 2* did run probes and reported the CBRANCH guard as **NOT REACHED**,
+downgrading the verdict to "partly closed" and recommending a new test.
+**That finding was wrong.** It probed with a hand-built partial filter
+(`randomx::jit::` plus `randomx::vm::native_loop`, 69 tests) instead of the gate
+itself, and the suites that exercise CBRANCH — `full_hash_tests` and
+`native_loop_diff_tests` — were exactly the ones that filter excluded. Re-run
+through `./scripts/verify-jit.sh`, the same mutation gives **exit 1, `GATE
+FAILED`**, 8 debug-profile failures including
+`full_hash_tests::test_native_loop_known_answer` and
+`native_loop_diff_tests::native_loop_zero_iterations_terminates`. CBRANCH
+targets derive from real RandomX programs, so the known-answer vectors reach the
+guard while the JIT unit tests do not.
+
+That error is the **mirror image** of this repo's usual one — it *under*-claimed
+coverage rather than over-claiming it — but the root cause is identical in both
+directions: a filter narrower than the thing being judged, the same mechanism as
+the vacuous `0 passed; 161 filtered out` trap. **When the question is "does the
+gate catch this", run the gate, not a subset of it.**
+
+**Profile story**, read from the files and confirmed by the runs above:
+
+| Context | Profile | Reaches the JIT? | `debug_assert!` live? |
+| :--- | :--- | :--- | :--- |
+| `make test` | debug | on aarch64 hosts, whole suite | yes |
+| CI `test` (`ci.yml`) | release | no - x86_64, `randomx::jit` is `cfg`'d out | no |
+| CI `jit-macos` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
+| CI `jit-linux-arm` | **debug + release** | yes, the 92-test gate | **yes, in the debug half** |
+
+The x86_64 jobs are not evidence about these guards at all; they compile no JIT.
+
+**Inventory.** 23 `debug_assert!` invocations across 24 matching lines (one is a
+comment): `jit/aarch64.rs` 16, `jit/compiler.rs` 5, `jit/memory.rs` 1, `vm.rs` 1.
+Counted as invocations rather than matching lines, because multi-line
+invocations make the two differ.
+
+**Files changed:** `AUDIT.md` (this entry), `CLAUDE.md` (task-board row). No
+`.rs` file is modified — every mutation was reverted and `cmp`-verified.
+
+**Verification.** `cargo clippy --all-targets --release -- -D warnings` clean;
+`git status` shows no modified `.rs` files.
+
+**Not established.** The probes show each of the four guards is *reached*; they
+do not show the guards are *correct*, nor that the other 19 `debug_assert!`
+invocations are reached — only the four the issue named were probed. No probe
+was run on `jit-linux-arm`, so the Linux half rests on the same script running
+there, not on an observed Linux failure.

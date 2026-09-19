@@ -6079,6 +6079,12 @@ that gate. So a survivor shows red on the PR and still cannot block a merge,
 which is exactly the intended behaviour. Established from this repository's own
 check-run data, not from documentation.
 
+**Both documented examples were re-run, not just the first.** Round 1's finding
+was precisely that a documented example returned zero mutants and exited 0, so
+checking only one would have repeated it: `hex_decode 'hex::'` gives 20 mutants,
+18 caught, 2 unviable, 31 s; `'DonationSchedule::level' 'donate::'` gives 2
+mutants, 2 caught, 11 s. Both exit 0.
+
 **Verification of the gate's exit codes**, all re-run on this head: green path
 exit **0** (20 mutants, 18 caught, 2 unviable, 31 s); real survivors exit **2**
 (break-tested by `#[ignore]`-ing three `hex.rs` tests → 4 missed; `src/hex.rs`

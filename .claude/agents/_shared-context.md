@@ -1,7 +1,9 @@
-# Shared context for MinerTim reviewers
+# Shared context for MinerTim agents
 
-*Not an agent. Reference material the reviewer agents in this directory quote.
-Keep the lessons here; keep each agent's file about its own scope.*
+*Not an agent. Reference material every agent in this directory reads — the
+reviewers (`jit-reviewer`, `ci-reviewer`, `pr-reviewer`) and the implementers
+(`audit-writer`, `break-tester`) alike. Keep the lessons here; keep each
+agent's file about its own scope.*
 
 ## What this project is
 

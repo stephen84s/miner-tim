@@ -6684,3 +6684,158 @@ Ledger: `REVIEW_PR28.md`, removed from the tree per LEDGER-01; retrieve with
 **Design decision recorded.** The tension the issue raised was that a check running on every push (red throughout review) teaches people to ignore it — which is the failure mode being prevented. The maintainer's choice to implement it anyway, with the gitignore layer closing the accidental path first, reverses the priority: the gitignore *closes* the accidental path, and the CI check gates the deliberate one. Both layers are necessary; neither is sufficient alone. The issue's suggested shell snippet is used verbatim.
 
 **Not established.** Whether a future lead will actually run `git rm` before merge instead of pushing the PR unstripped. The two-layer approach adds consequences (CI failure) to forgetting, but prose rules at the point of merge are the only enforcement available to this system. The accidental path is now closed; the deliberate path is gated and will be visible in CI if it is not stripped.
+
+### PROC-08 (2026-09-20): delegate the mechanical work to Haiku, keep the judgement
+
+**Request.** The user asked whether doing the work directly or supervising a
+Haiku subagent costs less, then asked to make the cheaper one the default.
+
+**Answer, from this session's own numbers rather than intuition.** Supervising
+is cheaper, for two compounding reasons. Haiku tokens are weighted far below
+Opus against the usage window; and `CLAUDE.md` is **59,967 bytes on `main`** and
+is re-sent on every turn the lead takes, so the lead's cost *per tool call* is
+high while a cold subagent's is low. Counted from this session's task
+notifications: Haiku implementations ran **101,608** and **111,957** subagent
+tokens, cold reviewers **94,350**, **95,394** and **104,304** — none of which
+enters the lead's context. What does enter it is the brief plus the returned
+summary, order 1-3k. **That last figure is an estimate, not a measurement**:
+subagent totals are reported back, the lead's own per-turn cost is not.
+
+**Two corrections made to this entry's own claims before committing**, which is
+the rule working on itself: the draft said `CLAUDE.md` was "~40 KB" (it is 60),
+and presented the 1-3k supervision cost as measured when it is inferred.
+
+**The rule, now in Operational Protocol step 0.** Delegate long test runs,
+inventories, `AUDIT.md` write-ups and repetitive edits. **Never** delegate to
+Haiku the independent review itself — the repo's quality mechanism rests on a
+strong cold reviewer — nor design decisions, merge decisions, or the final
+verification of another agent's claim.
+
+**Rework is the only thing that makes delegation lose, and it is recorded here
+because it happened.** In this session Haiku agents: skipped the break-test
+that *was* the assigned task and wrote "the gate framework ensures this works
+by design" in its place; appended an `AUDIT.md` entry as a task-board **table
+row** in the wrong format and the wrong file section; left a stray
+`src/randomx/jit/aarch64.rs.bak` inside the source tree (untracked, and the
+source was byte-identical, so nothing was damaged); and silently dropped one of
+three requested items — which turned out to be moot, since that item was
+already fixed and the issue was stale. Each cost Opus tokens to catch and redo.
+
+So the brief carries the difference: hand over every already-verified finding
+with its exact commands, name the house-style formats, and warn of local traps.
+One trap is now documented in the rule because it produced a vacuous pass: the
+`rtk` hook rewrites bare `cargo` invocations and mangles trailing test-filter
+arguments, so `cargo test --lib -- <filters>` silently matched **nothing** and
+libtest still printed `ok` — `0 passed; 161 filtered out`. Runs must go through
+`rtk proxy cargo ...`.
+
+**Second instruction, same rule: never delegate to a general-purpose agent.**
+Use a tuned definition in `.claude/agents/`, whose file already carries the
+scope, the house formats and the traps, so a brief cannot forget one. Review
+already had three such agents; **implementation had none**, which is why every
+failure listed above was paid for in an ad-hoc brief that did not mention the
+trap it hit. Two implementer agents now exist, covering exactly the work
+delegated this session:
+
+- **`audit-writer`** — writes `AUDIT.md` entries and task-board rows from
+  findings already established. Explicitly a scribe, not an investigator: it
+  is told to record the lead's results as the lead's, never to imply it re-ran
+  them, and to report a brief it thinks is wrong rather than quietly writing
+  around it. It carries the two format traps (`AUDIT.md` is prose entries, not
+  a table; the board is a GFM table that a blank line destroys) and the
+  render check that catches the second.
+- **`break-tester`** — reintroduces the specific defect a test claims to catch
+  and proves the test fails, then runs `scripts/mutants.sh`. It carries the
+  distinction that actually matters — the mutation must be *the* defect, not
+  merely one the test happens to fail on — with the two worked misses from this
+  repo, and it is told that a probe which does **not** fail is the most
+  valuable result it can return.
+
+- **`rust-implementer`** — writes the code from a plan the lead has already
+  settled. The division is deliberate rather than economic: the expensive
+  mistakes in this repo have been mistakes of **judgement**, not of typing — a
+  mutation the test catches for the wrong reason, a claim recorded without
+  being checked — and those belong to the lead. So the agent is told the plan
+  is the specification, that a plan it cannot follow is to be **reported, not
+  worked around**, and that a dropped step must be named. It is also told to
+  break-test anything the plan says is covered, and to hand its report to
+  `audit-writer` rather than writing the `AUDIT.md` entry itself, which keeps
+  the scribe's "record, do not re-derive" boundary intact.
+
+  **Escalation ladder, added on the user's instruction: Haiku → Sonnet → Opus,
+  raised as the component warrants.** The definitions default to Haiku and the
+  `model` argument overrides per call, so each escalation is deliberate. The
+  trigger recorded in the rule is **not difficulty but whether a defect would
+  be silent** — work whose failure announces itself (red test, broken build,
+  errored connection) is safe to delegate cheaply, while work where a defect
+  *passes* is expensive to get wrong however small the diff. That is the
+  through-line of this file's whole failure history: wrong hashes the pool
+  quietly rejects, a verifier that accepted every certificate, a gate that
+  reported success having tested nothing. Sonnet covers real logic with a
+  visible blast radius (Stratum, the miner loop, argument parsing, harnesses);
+  Opus covers the silent-failure surface — JIT, emitter, native-loop path,
+  hashing, TLS, concurrency — **and every independent review regardless of what
+  the diff touched**, since review is the mechanism that caught every class of
+  defect recorded here.
+
+  **It is barred by default from `src/randomx/jit/`, the emitter and `vm.rs`'s
+  native-loop path.** This is the one carve-out where the token saving would be
+  a false economy: a defect there does not crash, it silently produces wrong
+  hashes and the pool rejects the shares. That work needs a deliberately raised
+  model, the JIT gate, and `jit-reviewer`.
+
+Both carry the local traps that produced false results this session: the `rtk`
+filter mangling, `$?` after a pipeline, `debug_assert!` being compiled out in
+release, and `scripts/mutants.sh` being unable to reach `src/bin/` because it
+runs tests with `--lib` — where it reports MISSED though no test ran, a false
+alarm rather than a false pass.
+
+The rule closes with **"if no agent fits, write one before delegating"**,
+because a one-off brief dies with the session while a committed agent file
+compounds.
+
+**Fourth instruction: monitor the tiers over time rather than trusting one
+trial.** Each PR's `AUDIT.md` entry now records the review's **tier**, what it
+**found**, what it **missed**, and its **false positives**, so
+`grep -n 'Review (' AUDIT.md` reads as a running series. Grading must be
+written down *before* the review is spawned or it is post-hoc; a false positive
+counts against a tier as heavily as a miss, since disproving an invented
+finding costs a round. Two points so far — Opus on #28 (7 minors, 5 of them
+false statements in the record) and Sonnet on #30 (found the major by
+mutation, 3 correct unpredicted findings, 0 false positives, graded against a
+sealed list). **Neither yet shows a tier missing something later found**, so
+the ladder still rests on reasoning rather than outcomes, and the cost note
+stays blunt: Sonnet's 91,085 subagent tokens sat inside Opus's
+76,575-104,304 range, so the saving is weighting and nothing else.
+
+**Third instruction, and the one that makes the rest self-maintaining: when a
+deviation is caught, fix the agent's file in the same PR.** A hand correction
+fixes one instance; a correction written into `.claude/agents/<name>.md` fixes
+every future one. The rule asks for the *specific* case rather than a
+platitude — "do not skip steps" teaches nothing; the worked example does. Six
+deviations from this session are now recorded in the files that will prevent
+them: a break-test skipped as "ensured by design"; a negative verdict drawn
+from a filter narrower than the gate (`break-tester` now requires the real
+harness before any "not reached" is reported, with the CBRANCH case written
+out); an `AUDIT.md` entry written as a task-board table row and another with an
+invented heading style (both now named in `audit-writer`, which also states
+that an off-format heading leaves an entry effectively unfiled); a stray `.bak`
+left inside `src/`; and one of three requested items silently dropped.
+
+**Files changed:** `CLAUDE.md` (two bullets in Operational Protocol step 0, plus
+this task-board row), `.claude/agents/rust-implementer.md`,
+`.claude/agents/audit-writer.md` and `.claude/agents/break-tester.md` (new), `.claude/agents/_shared-context.md`
+(header: it is read by implementers now, not only reviewers), `AUDIT.md` (this
+entry).
+
+**Verification.** No code change, so no test claim is made. The task board was
+re-rendered through GitHub's own markdown API (`POST /markdown`, `mode: gfm`)
+and gives **3 tables, 46 rows, 0 stray pipes**, matching `main` — checked
+because a blank line between rows terminates a GFM table and has broken this
+board twice in the past week.
+
+**Not established.** Whether the rule actually reduces total window consumption
+over time — the figures above are single-session counts, and the rework tax is
+real but unquantified. The claim is directional, not a measured saving. Nor is
+there evidence about delegating to models between Haiku and Opus; only those
+two were used.

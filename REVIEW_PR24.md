@@ -12,10 +12,10 @@ Fresh reviewer. Scope: the round-2 fixes, `git diff d97b0b2..HEAD` (`8fcfadc`,
 |---|---|---|
 | 1 | `mutants.sh` control flow — every path executed | done |
 | 2 | Anchored `EQUIVALENT` exclusion | done |
-| 3 | Task board renders (whole file, GFM) | pending |
-| 4 | AUDIT/CLAUDE claims re-derived | pending |
-| 5 | clippy + suite | pending |
-| 6 | Working tree restored | pending |
+| 3 | Task board renders (whole file, GFM) | done |
+| 4 | AUDIT/CLAUDE claims re-derived | done |
+| 5 | clippy + suite | done |
+| 6 | Working tree restored | done |
 
 ### Priority 1 — control flow, executed not read
 
@@ -91,3 +91,121 @@ Stale cross-reference introduced by the commit that added the comment.
   description stays the same (e.g. the nibbles stop being disjoint) — the
   exclusion would keep silencing a no-longer-equivalent mutant. The anchor
   catches a move to another file, not a change in semantics at the same site.
+
+#### R3-F4 (minor, ACTIONABLE) — a scope whose mutants are all *unviable* still exits 0
+
+The guard counts **listed** mutants, not mutants that were actually built and
+killed. cargo-mutants exits **0** when every mutant in scope fails to compile.
+Demonstrated on this head:
+
+```
+$ ./scripts/mutants.sh 'replace \+ with \* in hex_decode' 'hex::'
+mutants: 2 mutant(s) matching /replace \+ with \* in hex_decode/ after exclusions, tested with 'hex::'
+2 mutants tested in 9s: 2 unviable
+ WARN No mutants were viable: ...
+$ echo $?
+0
+```
+
+(The two are `src/hex.rs:34:42` and `35:42`, `replace + with *`, taken from
+`mutants.out/unviable.txt` of the real run — they are genuinely unviable, not
+contrived.)
+
+That is the same shape as R1-F11 and R2-F1 — the script reports a mutant count
+and success while nothing was verified — now a third time in this PR, one layer
+further out. Narrower than its predecessors, and that is why this is a minor
+rather than a major: it needs **every** mutant in scope to be unviable (the CI
+scope has 18 viable of 20), cargo-mutants does print a `WARN`, and the job is
+advisory so it can neither block nor unblock a merge. The realistic trigger is
+not a rename — that path exits 3 correctly — but a signature change that makes
+the whole function's mutants fail to compile.
+
+Actionable either way: assert on the outcome, not the listing (the run's
+`mutants.out/caught.txt` / `missed.txt` are right there), or record it in
+`AUDIT.md` as a known limit of the guard rather than leaving the entry's
+"nothing would be tested must FAIL" claim reading as complete.
+
+#### R3-F5 (nit) — unpinned `cargo-mutants` in CI
+
+`cargo install cargo-mutants --locked` takes whatever is current. The script's
+correctness depends on `--list` emitting exactly one `file:line:col: text` line
+per mutant and on the exit-code taxonomy; a release that adds a header line to
+`--list` shifts the count silently. Reviewed against 27.1.0 locally; CI may run
+something else. Consistent with the repo's existing `cargo-audit` practice, so a
+nit, not a finding against this PR alone.
+
+### Priority 3 — task board: fixed, verified on the whole file
+
+Rendered `git show <rev>:CLAUDE.md` in full through `POST /markdown`, `mode:
+gfm`, three revisions:
+
+| Revision | `<tr>` | `<table>` | `<th>` | `<td>` |
+|---|---|---|---|---|
+| `main` | 44 | 3 | 11 | 117 |
+| `77246b39` (the merge round 2 faulted) | **42** | — | — | — |
+| `HEAD` (`9512b11`, board identical to `8a03fa8`) | **45** | 3 | 11 | 120 |
+
+Delta `main` → `HEAD` is **exactly +1 row and +3 cells** — one new three-column
+row, not a re-flow. Extracting the task IDs from the rendered cells gives 27 on
+`main` and 28 on `HEAD`, `diff` showing the single addition `PROC-06`. The other
+two tables (Platform coverage, Versions) still render as tables — `<table>` and
+`<th>` counts are unchanged. No `<p>| **Completed**` paragraphs anywhere.
+
+The round-2 account also checks out at its details: three blank lines inside the
+task board in the merge tree, **zero** in either parent (`99854a9b`,
+`e07a9a20`) and **zero** at `HEAD`; and `77246b39` is indeed a merge
+(`Merge remote-tracking branch 'origin/main' into chore/mutation-testing`).
+42 vs 44 is confirmed by rendering, not asserted.
+
+### Priority 4 — the record
+
+| Claim | Re-derived | Result |
+|---|---|---|
+| debug lib suite ~190 s (188.0, 189.6, 191.9, 192.6) | `cargo test --lib`, warm build, twice, `caffeinate -i` | **188.72 s and 189.23 s** — inside the quoted range. Reproduces. |
+| `hex_decode 'hex::'` → 20 mutants, 18 caught, 2 unviable, 31 s | re-run | **exact**: "20 mutants tested in 30s: 18 caught, 2 unviable", wall 31.4 s |
+| `'DonationSchedule::level' 'donate::'` → 2 mutants, 2 caught, 11 s | re-run | 2 mutants, 2 caught, cargo-mutants "10s", wall **10.9 s** → 11 s. Reproduces. (CLAUDE.md's FIX-01 says 12 s for the same command; that is a second run, not a second figure for one measurement, so it is not R2-F5 recurring — but after an entry that argues for quoting a range, two single-run seconds in two files is an odd note to end on.) |
+| R2-F7: on `fc35c12` the advisory job reads `conclusion=failure` while the five required contexts gate | `gh api .../commits/fc35c12/check-runs` and `.../branches/main/protection` | **Confirmed.** `mutation testing (advisory, hex::) \| completed \| failure`. Required contexts are exactly the five job names; the mutants job is not among them. `strict: true`, `enforce_admins: true`. |
+| "break-tested by `#[ignore]`-ing three `hex.rs` tests → 4 missed" | attempted | **Not reproducible as written** — the three tests are not named. Ignoring `round_trips`, `decodes_either_case_and_encodes_lower` and `every_byte_round_trips` gives **13 missed, 5 caught, 2 unviable, exit 2**. The substance (real survivors ⇒ exit 2) holds; the specific number cannot be checked. Nit. |
+| merge "lost nothing", damage purely additive | blank-line counts across both parents and the merge; diff of the named files | consistent with what I checked |
+
+### Priority 5 — build and suite
+
+- `cargo clippy --all-targets --release -- -D warnings` → **exit 0**, no warnings.
+- `cargo test --lib` (debug) → **150 passed, 0 failed, 2 ignored**, twice.
+- `cargo test --bins` → **18 passed, 0 failed**.
+- `mutants.out/` and `mutants.out.old/` confirmed ignored (`git check-ignore -v`
+  names `.gitignore:48` and `:49`), and both exist after my runs without
+  dirtying the tree.
+
+### Working tree
+
+`src/hex.rs` mutated twice (a syntax error, then three `#[ignore]`s) and
+restored from a `cp` each time; `cmp` against the pre-mutation copies passes.
+`scripts/mutants.sh` `cmp`-identical to its committed form. `git status
+--porcelain` is empty apart from this ledger.
+
+### Not verified
+
+- The `mutants` job has never been observed on a **fresh** `ubuntu-24.04`
+  runner in this form: `cargo install cargo-mutants` from source plus the run,
+  inside `timeout-minutes: 20`. `fc35c12` shows it completing and failing, so it
+  fits there, but the install is unpinned and the margin is unmeasured.
+- Behaviour under a cargo-mutants version other than 27.1.0.
+- Signal-handling cleanup (no `trap`); reasoned, not raced.
+
+### Verdict — MERGEABLE
+
+No blockers, no majors. Round 2's major (R2-F1) is genuinely closed and its
+reproducer now exits 3; the two bugs the author hit inside that fix are both
+gone, and I could not make the script report success while testing nothing along
+any path I exercised except R3-F4. The anchored exclusion is exactly right and
+its anchor is load-bearing. The task board renders +1 row and nothing else.
+Every quoted number reproduced.
+
+**ACTIONABLE: R3-F4 only** — either assert on the outcome rather than the
+listing, or record the all-unviable case in `AUDIT.md` as a known limit, so the
+entry does not read as if the silent-green class were fully closed. R3-F1 to
+R3-F3 and R3-F5 are tidying: the exit-code taxonomy collides with
+cargo-mutants' own (2 = usage *and* survivors; 3 = "nothing to test" *and*
+Timeout), lines 64-76 are an orphaned duplicate of 109-119, and line 130 cites
+"line 42" for a `set -e` that is on line 45.

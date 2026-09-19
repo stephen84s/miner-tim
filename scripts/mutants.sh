@@ -18,7 +18,9 @@
 #
 # Scope is everything. Unscoped, one function took 28 minutes for 8 mutants,
 # because every mutant re-ran the whole 48-second suite. Scoping the *tests* as
-# well as the mutants took 21 mutants to 33 seconds. Always pass both.
+# well as the mutants took it to 20 mutants in ~31 s here (46 s on
+# `ubuntu-24.04`). Always pass both. The count is 20, not the 21 cargo-mutants
+# lists, because the known-equivalent one is excluded before the run.
 #
 #   ./scripts/mutants.sh hex_decode 'hex::'
 #   ./scripts/mutants.sh 'DonationSchedule::level' 'donate::'
@@ -50,30 +52,20 @@ if [ $# -lt 2 ]; then
     echo >&2
     echo "Both arguments matter. Omitting the test filter makes every mutant" >&2
     echo "run the full suite, which measured 28 minutes for 8 mutants." >&2
-    exit 2
+    exit 64   # EX_USAGE — see the exit-code table below
 fi
 
 FN="$1"
 TESTS="$2"
 
 command -v cargo-mutants >/dev/null || {
-    echo "cargo-mutants is not installed: cargo install cargo-mutants --locked" >&2
+    echo "cargo-mutants is not installed:" >&2
+    echo "  cargo install cargo-mutants --version 27.1.0 --locked" >&2
+    echo "  (pinned: this script parses --list's format and depends on the" >&2
+    echo "   documented exit codes, neither of which is a stable interface.)" >&2
     exit 127
 }
 
-# A filter that matches nothing must FAIL, not pass quietly.
-#
-# `cargo-mutants` prints "No mutants found under the active filters" and exits
-# **0**. That is the repo's signature defect — a check that reports success
-# having verified nothing — shipping inside the fix for it. `verify-jit.sh`, in
-# this same directory, asserts an exact test count for precisely this reason;
-# this script did not, and review found its own second documented example
-# (`take_complete_lines`, which lives on another branch) returned 0 mutants and
-# exited 0.
-#
-# The realistic trigger is a rename: the CI job names one function, someone
-# renames it, and the job flips from red to green. The break would read as an
-# improvement.
 # Known-equivalent mutants are excluded by regex, with the reason recorded here.
 # Without this the run exits 2 on a mutant nothing can ever kill, so the CI job
 # is red on day one and red forever — and a red check that never changes carries
@@ -127,7 +119,7 @@ EQUIVALENT='^src/hex\.rs:[0-9]+:[0-9]+: replace \| with \^ in hex_decode$'
 # error (or, in the bad-regex case, as nothing at all).
 LIST_ERR=$(mktemp)
 LIST_OUT=$(mktemp)
-# `|| LIST_STATUS=$?` rather than a bare call: `set -e` is on (line 42), so a
+# `|| LIST_STATUS=$?` rather than a bare call: `set -e` is on (line 45), so a
 # non-zero exit would otherwise kill the script here and the diagnostic below
 # would never run — which is what made a bad -F regex exit 1 silently.
 LIST_STATUS=0
@@ -138,7 +130,7 @@ if [ "$LIST_STATUS" -ne 0 ]; then
     echo "error: could not list mutants (cargo-mutants exited $LIST_STATUS):" >&2
     sed 's/^/  /' "$LIST_ERR" >&2
     rm -f "$LIST_ERR"
-    exit 3
+    exit 65
 fi
 if [ "$LIST" -eq 0 ]; then
     echo "error: no mutants match /$FN/ after exclusions — nothing would be tested." >&2
@@ -148,10 +140,52 @@ if [ "$LIST" -eq 0 ]; then
     echo "  swallow the last one?" >&2
     sed 's/^/  /' "$LIST_ERR" >&2
     rm -f "$LIST_ERR"
-    exit 3
+    exit 65
 fi
 rm -f "$LIST_ERR"
 
 echo "mutants: $LIST mutant(s) matching /$FN/ after exclusions, tested with '$TESTS'"
 
-cargo mutants -F "$FN" -E "$EQUIVALENT" --timeout "${MUTANTS_TIMEOUT:-300}" -- --lib "$TESTS"
+# EXIT CODES
+#
+# This script's own codes are deliberately **outside** cargo-mutants' range, so
+# a verdict from the tool can never be confused with a verdict from the wrapper
+# (R3-F1). cargo-mutants 27.1.0 uses 1 (usage), 2 FoundProblems, 3 Timeout,
+# 4 BaselineFailed — so the old `exit 3` for "nothing would be tested" was the
+# same code a mutant surviving *by hanging* produces.
+#
+#   0   every mutant tested was caught
+#   2   a mutant survived (cargo-mutants FoundProblems) — a real gap
+#   3   a mutant timed out (cargo-mutants Timeout)
+#   4   the unmutated baseline failed (cargo-mutants BaselineFailed)
+#   64  usage error in this script
+#   65  nothing would be tested, or the mutant list could not be produced
+#   66  mutants were tested but none of them ran — all unviable
+#   127 cargo-mutants is not installed
+RUN_STATUS=0
+cargo mutants -F "$FN" -E "$EQUIVALENT" --timeout "${MUTANTS_TIMEOUT:-300}" -- --lib "$TESTS" || RUN_STATUS=$?
+
+# A scope in which EVERY mutant is unviable must FAIL too.
+#
+# The guard above counts mutants that were *listed*; this one checks that at
+# least one was actually *run*. An unviable mutant is one that does not compile,
+# so it exercises no test — and a scope where all of them are unviable reports
+# "N mutants tested" and exits 0 having verified nothing. That is the same
+# silent-green shape as R1-F11 and R2-F1, one layer further out, and round 3
+# demonstrated it with `./scripts/mutants.sh 'replace \+ with \* in hex_decode'
+# 'hex::'` — 2 mutants, 2 unviable, exit 0. cargo-mutants prints a WARN and
+# nothing acts on it; now something does. `CLAUDE.md` points authors here, so a
+# green run has to mean a test did work.
+if [ "$RUN_STATUS" -eq 0 ]; then
+    CAUGHT=0
+    [ -f mutants.out/caught.txt ] && CAUGHT=$(grep -c . mutants.out/caught.txt || true)
+    if [ "$CAUGHT" -eq 0 ]; then
+        echo "error: $LIST mutant(s) were tested and NONE of them ran — all unviable." >&2
+        echo "  An unviable mutant does not compile, so it exercises no test. This" >&2
+        echo "  run proves nothing about your coverage despite exiting green." >&2
+        echo "  Widen the -F scope until at least one mutant is viable." >&2
+        exit 66
+    fi
+fi
+
+exit "$RUN_STATUS"

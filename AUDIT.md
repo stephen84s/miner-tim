@@ -5916,7 +5916,7 @@ Each looked like a working break test. Each was green for the wrong reason.
 | | mutants | time |
 |---|---|---|
 | unscoped (`-F take_complete_lines`, full suite per mutant) | 8 | **28 min** |
-| scoped (`-F hex_decode -- --lib hex::`) | 21 | **33 s** |
+| scoped (`-F hex_decode -- --lib hex::`) | 21 listed, **20** run | **~31 s** |
 
 Both arguments to the script are therefore mandatory, and it refuses to run
 without them.
@@ -5993,7 +5993,7 @@ that, one severity down. Known-equivalent mutants are now excluded by regex, eac
 requiring a written justification rather than a silenced line; the run is green
 with **20 mutants still tested**, so a *new* survivor is what turns it red.
 
-**Verification.** The script runs in 33 s; excluding the equivalent mutant, 20
+**Verification.** The script runs in ~31 s (46 s on `ubuntu-24.04`); excluding the equivalent mutant, 20
 mutants, 18 caught, 2 unviable, exit 0. `ci.yml` parses and the
 new job is absent from the required contexts, checked against the live API rather
 than assumed.
@@ -6009,7 +6009,7 @@ unflattering.
 (An earlier version of this paragraph gave the figure as "95" without naming the
 tree it was measured in, sitting next to "roughly seven were ever hand-tested" —
 so it read as a fact about `main`, where it is wrong by seven. The counting
-method was sound; the omission was the branch.) The 33 s figure is for one small pure function; a PR-sized scope
+method was sound; the omission was the branch.) The ~31 s figure is for one small pure function; a PR-sized scope
 across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
 Whether this should ever become a required check is therefore still open, and the
 entry deliberately does not answer it.
@@ -6032,9 +6032,55 @@ that squash-merges anyway, so nothing reaches `main` either way.
 Recorded because the failure mode is worth knowing: a rebase that reports success
 while dropping the files under review is not a conflict you get asked about.
 
+**Round 3: MERGEABLE, no blockers, no majors.** It executed every exit path
+rather than reading them — success, the round-2 reproducer, an empty `-F`, a
+malformed `-F`, a broken build, `MUTANTS_TIMEOUT=0.001`, missing arguments, a
+test filter matching nothing, and a break-test — and could not make the script
+report success having tested nothing, with one exception it found:
+
+- **R3-F4.** A scope whose mutants are **all unviable** exited **0**.
+  Demonstrated with `./scripts/mutants.sh 'replace \+ with \* in hex_decode'
+  'hex::'`: 2 mutants, 2 unviable, exit 0. An unviable mutant does not compile,
+  so it exercises no test; the guard added for R2-F1 counts mutants *listed*,
+  not mutants *run*. That is the signature defect one layer further out, and
+  cargo-mutants' `WARN` was the only thing saying so while `CLAUDE.md` now
+  points authors at this script. The script now asserts on the **outcome**
+  (`mutants.out/caught.txt`) and exits **66**.
+- **R3-F1.** This script's exit codes collided with cargo-mutants' own — its
+  `exit 2` for a usage error against `FoundProblems=2`, and `exit 3` for
+  "nothing would be tested" against `Timeout=3`, so a mutant surviving *by
+  hanging* exited with the code documented here as "your filter matched
+  nothing". Moved outside the tool's range: **64** usage, **65** nothing to
+  test, **66** all unviable, with the full table in the script.
+- **R3-F2.** Lines 64-76 were an orphaned duplicate: the code they introduced
+  moved down during the R2-F1 fix and the comment stayed, leaving it reading as
+  a preamble to `EQUIVALENT`. The repo's documented orphaned-doc-comment mode,
+  inside the previous round's fix. Removed.
+- **R3-F3, F5, F6.** A wrong line reference (42 → 45); `cargo-mutants` pinned
+  to **27.1.0** in `ci.yml`, since this script parses `--list`'s output format
+  and depends on documented exit codes, neither a stable interface; and the
+  stale "21 mutants / 33 s" swept to **20 / ~31 s** (46 s on `ubuntu-24.04`)
+  across the script header, this entry, the task board and the PR body — 21 is
+  what cargo-mutants lists, 20 is what runs after the equivalent one is
+  excluded.
+
+Round 3 reproduced every figure in this entry independently: the debug lib
+suite at 188.72 / 189.23 s against the claimed ~190; `hex_decode 'hex::'` at 20
+mutants, 18 caught, 2 unviable, 31.4 s; `'DonationSchedule::level' 'donate::'`
+at 2/2 in 10.9 s; and the R2-F7 check-run claim live on `fc35c12`. It confirmed
+the merge deleted nothing against either parent, and that the task board now
+renders 45 rows against `main`'s 44 — exactly the one row this change adds.
+
+**All nine exit paths re-verified after the R3 fixes:** green 0, all-unviable
+**66** (was 0), exclusion-empties 65, unknown function 65, bad regex 65, no
+args 64, one arg 64, test filter matching nothing 2, second documented example
+0. Break-test (three `hex.rs` tests `#[ignore]`d) still exits 2;
+`src/hex.rs` restored byte-identical.
+
 **Review ledger (LEDGER-01).** `REVIEW_PR24.md` carried rounds 1-2 and is
-removed from the tree in this commit; retrieve it with
-`git show 75e178d:REVIEW_PR24.md` (round 2 built over `1d8fa4a` and `06dfb46`).
+removed from the tree in this commit. Rounds 1-2: `git show 75e178d:REVIEW_PR24.md`
+(built over `1d8fa4a` and `06dfb46`). Round 3: `git show fb94776:REVIEW_PR24.md`
+(built over `9512b11` and `637b045`).
 
 **Round 2 also closed five smaller items in `scripts/mutants.sh`, one of which
 was the same defect this PR exists to prevent, shipping inside the fix for it.**

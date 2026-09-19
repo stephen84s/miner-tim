@@ -298,7 +298,7 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked
+        run: cargo install cargo-mutants --version 27.1.0 --locked
 
       - name: Mutate hex_decode
         run: ./scripts/mutants.sh hex_decode 'hex::'

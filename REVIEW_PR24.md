@@ -418,3 +418,153 @@ and restored both times with `git checkout -- mutants.out mutants.out.old &&
 git clean -fd` those two paths; `git status` clean apart from this ledger. No
 production file was mutated — the break tests in F11 used filter arguments, not
 source edits.
+
+---
+
+# Round 2 (fresh reviewer, cold; head `d97b0b2`)
+
+Scope: the two fix commits `99854a9`, `d97b0b2` plus the merge `77246b3`.
+
+## Coverage ledger
+
+| # | Item | State |
+|---|---|---|
+| 1 | Can the gate still go red? | done — break-tested, exit 2 |
+| 2 | Silent green (R1 F11) closed? | **done — NOT fully closed, R2-F1** |
+| 3 | EQUIVALENT exclusion narrow? | done — R2-F3 |
+| 4 | `mutants.out/` untracked+ignored | done — clean |
+| 5 | Count claims (3196 / 88 / 95) | done — all reproduce |
+| 6 | `MUTANTS_TIMEOUT` default | done — R2-F5 |
+| 7 | Merge vs rebase, nothing lost | **done — R2-F2** |
+| 8 | Required contexts / advisory job | done — 5 required, mutants not among them |
+| 9 | clippy, six checks | done |
+
+## Findings
+
+### R2-F1 (MAJOR) — the silent-green fix is one step short: the guard counts mutants *before* the exclusion, so an all-excluded scope still reports success having tested nothing
+
+`scripts/mutants.sh:74` counts with `-F` only; the run at line 98 adds
+`-E "$EQUIVALENT"`. Nothing asserts that anything survived the exclusion.
+
+Reproduced on this head:
+
+```
+$ ./scripts/mutants.sh 'replace \| with \^ in hex_decode' 'hex::'
+mutants: 1 mutant(s) matching /replace \| with \^ in hex_decode/, tested with 'hex::'
+Found 0 mutants to test
+ WARN No mutants found under the active filters
+EXIT=0
+```
+
+Exit 0, zero mutants tested, and the script's own line *claims* one was. This is
+R1-F11 surviving in its fix, in the narrower form the fix itself created: the
+guard was added for the empty-`-F` case and the exclusion opens a second door to
+the same room. It is also the repo's signature defect (a check reporting success
+having verified nothing) shipping inside the fix for it, for the second time in
+one PR.
+
+Realistic trigger: the exclusion list is invited to grow ("Each entry needs a
+justification"), and any future scope whose mutants are all excluded goes green
+silently. The fix is one character of scope — count with `-F` **and** `-E`, i.e.
+`cargo mutants -F "$FN" -E "$EQUIVALENT" --list`, which returns 20 here.
+
+### R2-F2 (MAJOR) — the merge broke the `CLAUDE.md` task board; three rows now render outside the table, and the AUDIT entry records the merge as a clean pure-append
+
+`git blame` attributes lines 211, 213 and 215 of `CLAUDE.md` — three **blank
+lines** inside the task-board table — to the merge commit `77246b39`. Neither
+parent has them (`main` has SEC-02 / FIX-01 / Pending contiguous).
+
+A blank line terminates a GFM table. Confirmed against GitHub's own renderer
+(`POST /markdown`, mode `gfm`, lines 179-216): the table ends after **SEC-02**,
+and `FIX-01`, **`PROC-06` — the row this PR adds** — and `Pending | Awaiting
+User Task` render as literal paragraphs with visible pipes.
+
+This is DOC-02 round 3 repeating: a documentation edit silently destroying the
+structure of the very table it edits. It also contradicts the new AUDIT
+paragraph, which argues the merge was safe because "the conflicts were a pure
+append in two documents". The append was not clean, and the entry does not say
+so.
+
+### R2-F3 (MINOR) — the EQUIVALENT exclusion is broader than the mutant it documents, global to every invocation, and has no expiry
+
+`EQUIVALENT='replace \| with \^ in hex_decode'` is matched against the `--list`
+name, which is `src/hex.rs:42:44: replace | with ^ in hex_decode`. The regex is
+unanchored and carries no file or line, so it excludes:
+
+* **any future** `| → ^` mutant anywhere in `hex_decode`, not just the one at
+  42:44 that the justification proves equivalent — a second `|` added to that
+  function where OR and XOR differ would be silenced on arrival;
+* the same mutant in any function whose name *contains* `hex_decode`;
+* on every invocation of the script, including
+  `./scripts/mutants.sh 'DonationSchedule::level' 'donate::'`, since the
+  exclusion is not scoped to the run.
+
+Anchoring on `^src/hex\.rs:42:44: ` would pin it to the justified mutant and
+would fail closed (re-appearing as a survivor) the moment the line moves.
+Secondary: the comment reads as a list ("Each entry needs a justification") but
+the mechanism holds exactly one regex; a second entry has to be alternated into
+the same string.
+
+### R2-F4 (MINOR) — the script's headline count is the pre-exclusion count
+
+`mutants: 21 mutant(s) ... tested with 'hex::'` immediately above
+`Found 20 mutants to test`. Same root cause as R2-F1; it is the visible symptom
+that was available and not read.
+
+### R2-F5 (MINOR) — the debug-suite figure disagrees with itself inside this PR
+
+`AUDIT.md` PROC-06 says the debug lib suite measures **188 s** here and derives
+8 x 188 s = 25.1 min; `scripts/mutants.sh:27` says **~192 s**; R1-F12 measured
+191.87 s. Neither figure is sourced. Both support the conclusion (scope
+dominates), so this is accuracy only — but this repo retracts figures for a
+living and the two numbers are in the same change.
+
+### R2-F6 (MINOR) — a bad `-F` regex fails with no message at all
+
+`2>/dev/null` on line 74 discards `cargo-mutants`' diagnostics, and `set -e`
+then aborts on the pipeline. `./scripts/mutants.sh '[' 'hex::'` exits **1**
+printing nothing. Fails closed, which is the right direction, but the operator
+is told nothing — including in the case that matters, a broken build making
+`--list` fail.
+
+## Verified, no defect
+
+* **The gate can go red.** Break-tested: `#[ignore]` on `round_trips`,
+  `decodes_either_case_and_encodes_lower` and `every_byte_round_trips` in
+  `src/hex.rs` gave `20 mutants tested in 30s: 13 missed, 5 caught, 2 unviable`,
+  **exit 2**. `src/hex.rs` restored from a pre-edit copy; tree clean.
+* **Empty filter fails.** `./scripts/mutants.sh no_such_function_xyz 'hex::'` →
+  exit **3** with the explanatory message. Usage error → exit 2.
+* **Green path reproduces.** `./scripts/mutants.sh hex_decode 'hex::'` →
+  `20 mutants tested in 32s: 18 caught, 2 unviable`, exit 0, `real 33.0s`. The
+  33 s claim holds.
+* **R1-F1 closed.** `git ls-files | grep -i mutant` → `scripts/mutants.sh` only.
+  `.gitignore` carries `mutants.out/` and `mutants.out.old/` with the reason.
+* **R1-F2 closed.** The Files-changed list names six files; the diff against
+  `main` touches exactly those six plus this ledger.
+* **Counts reproduce** (arm64, this tree): total **3,196**;
+  `src/pool_connection.rs` **88** here (src is byte-identical to `main`) and
+  **95** on `security/bound-recv-buffer`, counted from `git archive` of that
+  branch. The tree is now named in the entry.
+* **Advisory wiring.** Live protection requires exactly the five contexts;
+  `mutation testing (advisory, hex::)` is not among them. All six checks are
+  SUCCESS on `d97b0b2`; PR is `MERGEABLE` / `CLEAN`.
+* **The merge lost nothing else.** `git diff main HEAD -- src/ Cargo.toml
+  Cargo.lock` is empty (FIX-01's `donate.rs` preserved byte-identical), and
+  `git diff 99854a9 HEAD` over `ci.yml`, `scripts/mutants.sh`, `.gitignore` and
+  `_shared-context.md` is empty. Only `CLAUDE.md` was damaged (R2-F2).
+* **The rebase account is corroborated.** The reflog shows two
+  `rebase (start): checkout origin/main` / `rebase (abort): returning to
+  refs/heads/chore/mutation-testing` pairs at 10:20 and 10:21, both returning to
+  `99854a9`, and the branch was exactly one commit behind (`e07a9a2`). The
+  narrative matches the record.
+
+## Could not verify
+
+* What a **failed** `continue-on-error: true` job reports as its check-run
+  conclusion. If GitHub reports SUCCESS, the advisory job is not merely
+  non-blocking but invisible, and a new survivor would never be noticed —
+  which is the whole value proposition. Settling it needs a deliberately red
+  run pushed to a PR; not done.
+* The unscoped `28 min / 8 mutants` row: `take_complete_lines` lives on another
+  branch, so it was not re-measured here.

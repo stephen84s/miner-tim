@@ -209,3 +209,49 @@ R3-F3 and R3-F5 are tidying: the exit-code taxonomy collides with
 cargo-mutants' own (2 = usage *and* survivors; 3 = "nothing to test" *and*
 Timeout), lines 64-76 are an orphaned duplicate of 109-119, and line 130 cites
 "line 42" for a `set -e` that is on line 45.
+
+### Addendum — record checks the first pass left open
+
+- **PR body (#24) is current, not stale.** `gh pr view 24` shows it updated
+  2026-09-19T08:11Z and carrying the full round-2 account: R2-F1 and its
+  reproducer, the two silences found while fixing it, the task-board damage with
+  the 42-vs-44 figure, the anchored `EQUIVALENT`, the ~190 s reconciliation and
+  R2-F8. "The PR body was never updated" — found in three previous round 2s —
+  does **not** recur here.
+- **"The merge lost nothing" is now derived, not asserted.**
+  `git diff 99854a9b..77246b39 | grep -c '^-[^-]'` → **0**; same against
+  `e07a9a20` → **0**. No deletions in either direction; the damage was purely
+  additive, as claimed.
+- **R2-F7's framing holds at the detail level too.** On `fc35c12` the job failed
+  on a *real* survivor, not a timeout or an install error: the step log reads
+  `21 mutants tested in 46s: 1 missed, 18 caught, 2 unviable` with the missed one
+  being `src/hex.rs:42:44: replace | with ^`, and `Process completed with exit
+  code 2`.
+- **`timeout-minutes: 20` has margin** — closing one of my "not verified" items.
+  That job ran 10:18:42 → 10:20:47, **2 min 05 s**, of which `cargo install
+  cargo-mutants` was 67 s and the gate itself 47 s. Roughly a 10x margin, on an
+  unpinned install.
+- **R3-F6 (nit).** The cost table quoted in the PR body, `CLAUDE.md`'s PROC-06
+  row, the `AUDIT.md` entry and `mutants.sh`'s header all say the scoped run is
+  **21 mutants / 33 s**. That count predates `EQUIVALENT`: no invocation of the
+  current script can produce 21, and the documented command now gives **20 in
+  31 s** here and 46 s on `ubuntu-24.04`. The figures are internally consistent
+  with each other and with the pre-exclusion state, so this is a stale
+  measurement rather than a contradiction — but R2-F4 was closed as "the script
+  now prints 20 where it printed 21", and four other places still print 21.
+- **R3-F1's consequence, stated concretely.** cargo-mutants' `Timeout = 3` means
+  **a mutant that survives by hanging** — a genuine uncaught mutant, and the
+  worst kind — exits with the same code the script documents as "your filter
+  matched nothing". An operator following the documentation goes looking for a
+  rename instead of a survivor. Severity unchanged (minor); the misdiagnosis is
+  the point.
+- **Why R3-F4 is worth recording even though it stays minor.** The advisory
+  status makes it harmless at the merge gate, but `CLAUDE.md` now points the
+  **author** at this same script for local break-testing, and there
+  cargo-mutants' `WARN No mutants were viable` on stdout is the only signal —
+  no red check behind it, and the script's own line above it says a mutant was
+  tested.
+
+Verdict unchanged: **MERGEABLE**, no blockers, no majors, **ACTIONABLE: R3-F4**
+(and, trivially, R3-F6 if the 21/33 s figures are to match what the script now
+does).

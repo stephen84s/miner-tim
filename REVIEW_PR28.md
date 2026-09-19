@@ -157,6 +157,15 @@ record, not a defect to fix.
 printing an empty file list. Fails in the safe direction; the message is
 useless. `ls -d` would fix it. Not worth a push on its own.
 
+**Minor 7 — `git status` can no longer see the one file class reviewers always
+create.** Same root cause as minor 5, opposite direction. `_shared-context.md`
+rule 4 requires a reviewer to leave the working tree undirtied, and every
+reviewer checks that with `git status`. An un-force-added `REVIEW_*.md` is now
+invisible to it. Nothing can reach `main` that way (untracked files do not
+push), but a stated rule silently lost its verification. I hit this myself and
+had to confirm with `ls -la REVIEW_*.md && git status --ignored --short` —
+which is the remedy worth adding to rule 4 or to the strip step.
+
 ## Ordering warning for the lead
 
 Committing this ledger **arms the gate**. The PR is `CLEAN` right now only
@@ -165,6 +174,11 @@ with this file in the tree turns `lint` red — correctly, by design. Strip the
 ledger (`git rm REVIEW_PR28.md`) *before* pushing, and record this ledger's
 commit sha in the `AUDIT.md` entry per LEDGER-01. (`70afde2` above was a
 throwaway crash-recovery test commit, since reset away — not this ledger.)
+
+**Also for the lead:** the committed `PROC-07` entry has **no `Ledger:`
+sentence**. `PROC-01`, `CI-03`, `REL-01` and `PERF-02` all carry one; ten exist
+in `AUDIT.md`. Expected before the strip, but that is the line that must be
+added at strip time and it is easy to miss.
 
 ## What I did not verify
 

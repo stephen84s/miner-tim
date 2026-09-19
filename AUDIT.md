@@ -6580,7 +6580,7 @@ invocations are reached — only the four the issue named were probed. No probe
 was run on `jit-linux-arm`, so the Linux half rests on the same script running
 there, not on an observed Linux failure.
 
-## 2026-09-19 — PROC-07: No-ledgers-on-main rule enforced with a CI gate (issue #19)
+### PROC-07 (2026-09-19): the no-ledgers-on-main rule enforced by a CI gate (#19)
 
 **Request.** Review ledgers (`REVIEW_*.md`) are deliberately committed during review for crash recovery (LEDGER-01, rules 1-3), then `git rm`'d before merge — a prose rule with nothing enforcing it. On this repo that rule has been followed exactly as written; the 13 ledgers that accumulated to 530 KB did so because reviewers obeyed it. Replacing one prose rule with another prose rule (`git rm` before merge) leaves the same failure mode available: the next lead forgets, or a reviewer's ledger reaches `main` via a path nobody anticipated. Nothing would notice until the repository filled again.
 
@@ -6652,6 +6652,17 @@ residual gap is narrower and is the accurate one: **the step has never been
 observed red on GitHub.** Its red path is reproduced only locally. (R1-F4.)
 
 **Not verified.** The workflow file parses and the step structure is syntactically correct.
+
+**This entry's own heading was off-format until the rebase, and review did not
+catch it** — it read `## 2026-09-19 — PROC-07: ...` where the house form is
+`### TASK-ID (date): title`. Recorded as the **first miss in the PROC-08 tier
+series**: the Opus round found seven minors and a nit, all real, and still
+walked past a heading two levels wrong in the file it was auditing. The lesson
+is not "Opus is unreliable" but that **format conformance is a mechanical check
+and reviews are bad at mechanical checks** — `grep -c '^### PROC-07' AUDIT.md`
+answers it in a second, and an off-format heading leaves an entry effectively
+unfiled. `audit-writer` already carries this rule; what it lacked was anyone
+running the one-line check.
 
 **Review (Opus, round 1): MERGEABLE, no blockers, no majors, seven minors and
 a nit — five of them false statements in this entry, the PR body or the

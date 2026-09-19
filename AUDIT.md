@@ -5934,10 +5934,16 @@ the very list that commit was editing. Untracked with `git rm -r --cached` and
 added to `.gitignore`. Scope stated precisely rather than comfortably: because
 this repo squash-merges, the tip tree is what lands, so `main` never receives
 these objects; but the branch was pushed, so they remain reachable on the public
-remote through `refs/pull/23/head` until that ref is gone. Nothing secret was in
-them — a hostname and a username that already appear in this repo's commit
-metadata — so they are being removed as hygiene, not treated as a credential
-leak.
+remote through `refs/pull/23/head` until that ref is gone. No credential was in them, and the exposure is
+stated as checked rather than assumed: the **hostname**
+`Stephens-MacBook-Pro-2.local` appears **nowhere** in this repository's commit
+metadata (`git log --all --format='%an|%ae|%cn|%ce'` — zero matches), so that
+one was genuinely new; the `/Users/stephen/...` paths were **not** new, since
+`AUDIT.md` on `main` already contains them; and the author identity was already
+public in every commit. Removed as hygiene, not handled as a credential leak.
+An earlier draft of this paragraph asserted that both the hostname and the
+username "already appear in this repo's commit metadata" — written without
+checking, and false for the hostname.
 
 **Verification.** 159 lib + 18 bin tests, clippy `-D warnings` clean. (Review
 measured 158 before this branch was rebased onto `main`; #26's donate test landed
@@ -6015,9 +6021,12 @@ and 1024x fail in 0.66 s** with *"fed 4194304 bytes without being refused; the
 limit is not being enforced"*. Two things follow, and the first version of this
 paragraph got both wrong. **The detection threshold is 4x, not "a raised
 limit"**: at 2x the buffer still overflows inside the 1024 iterations, so this
-test passes and the two socket tests are what catch that mutation. And the new
-cap is **~27x faster** than the broken one at the same 16x mutation (0.66 s
-against round 2's 18.3 s), not slower — the withdrawn "42 s" was a whole-suite
+test passes and the two socket tests are what catch that mutation. And the
+comparison with round 2's 18.3 s is **a difference of verdict, not of speed**:
+the old cap spent 18.3 s arriving at the *wrong* answer (pass) and the new one
+spends 0.66 s arriving at the right one (fail). Calling that "27x faster" would
+swap a withdrawn over-claim for a fresh one, which is the exact move BENCH-02
+round 2 caught. The withdrawn "42 s" was a whole-suite
 figure quoted against a single-test one, a non-reproducing number inside the
 paragraph whose job was to withdraw a non-reproducing number (R3-F3).
 

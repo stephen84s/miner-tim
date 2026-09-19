@@ -93,13 +93,18 @@ tokens and it could no longer start. You are spawned cold on purpose.
    the end. Assume you can be killed at any moment.
 2. Keep a coverage ledger of your checklist, updated **before** and after each
    item, so an interruption leaves an accurate picture.
-3. `git add <your ledger> && git commit` periodically. **That file only.** Never
-   amend, never push, never merge.
+3. `git add -f <your ledger> && git commit` periodically. **That file only.**
+   Never amend, never push, never merge.
 
    Why commit at all: the commit is **crash recovery, not archival**. Reviewers
    in this project have been killed by session limits mid-review, and an
    uncommitted ledger dies with them. Commit early and often for that reason
    alone.
+
+   **Use `git add -f` (force-add), not plain `git add`.** The ledger is
+   gitignored to close the accidental path — a `git add -A` can never sweep it
+   in (see PROC-07). Force-add is required and intended; a CI check fails if the
+   ledger reaches the PR, gating the deliberate path at merge time.
 
    Your ledger is **working state for the review, not a repo artifact.** Once
    its findings are folded into the `AUDIT.md` entry and the PR description, the

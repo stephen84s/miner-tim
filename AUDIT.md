@@ -6603,13 +6603,72 @@ there, not on an observed Linux failure.
 - Unstaging and deleting left no traces
 
 **Verification — CI shell logic, both states.** Ran the step's shell block directly:
-- With no `REVIEW_*.md` files present: exits 0, prints "Check passed: no ledgers found"
+- With no `REVIEW_*.md` files present: exits 0 and prints **nothing**. (An
+  earlier draft of this bullet said it prints "Check passed: no ledgers found".
+  It does not — the committed step has no such `echo`. That bullet described a
+  script that was never committed, which is this file's signature defect
+  appearing in the very verification section meant to prevent it. R1-F1.)
 - With a `REVIEW_PR99.md` file present: exits 1, prints "Review ledgers must be stripped before merge (LEDGER-01):" followed by the filename list
 - Logic is exact to the issue's suggested snippet
 
+**Three further corrections from review, all to claims rather than to the
+mechanism (R1-F2, F3, F5):**
+
+- **Step position was misstated and its stated rationale does not hold.** The
+  `lint` job has **six** steps and the new one is **fifth**, after checkout,
+  the rustup install and both cache restores — not "first", and an earlier
+  "was 4" list contained five items. Both this entry and the PR body called it
+  "fails fast"; it does not fail before setup. The cost either way is nil, so
+  the placement stands and only the description changes.
+- **`_shared-context.md` rule 3 was changed, not "rules 1-3".** The diff
+  touches one rule. Review also confirmed the three per-agent files carry no
+  `git add` instruction of their own, so rule 3 was the only place that needed
+  it — the fix is complete, the description was simply wider than the change.
+- **"`git add -A` can never sweep them in" holds only while the ledger is
+  untracked.** After the first mandated `git add -f` the file is tracked, and
+  from then on `git add -A`, `git add .` and `git commit -a` all stage further
+  edits to it — verified. The accidental path is closed for the *first* add,
+  which is the one that matters, but the claim as written was unscoped.
+
+**Two gaps recorded rather than fixed:**
+
+- **The two layers do not cover the same ground.** `.gitignore` matches
+  `REVIEW_*.md` at any depth; the CI step globs the **repo root only**. A
+  force-added `docs/REVIEW_X.md` would pass the gate. That matches LEDGER-01's
+  scope — ledgers are written at the root — so it is recorded as a known edge
+  rather than widened, which would risk matching unrelated files.
+- **A gitignored ledger is invisible to `git status`**, which is exactly how
+  `_shared-context.md` rule 4 ("leave the tree undirtied") is normally checked.
+  The reviewer hit this itself. The remedy, now known:
+  `ls REVIEW_*.md && git status --ignored --short`.
+
 **Verification — YAML validity.** The step is properly indented, integrated into the existing `lint` job before the clippy step. Job structure confirmed: `lint`, `audit`, `test`, `mutants` jobs all present. The `lint` job now contains 5 steps (was 4: Checkout, Install Rust, Cache cargo registry, Cache target/, cargo clippy — now has the new ledger-check step first).
 
-**Not verified.** The CI check cannot be run on GitHub without pushing; this is noted explicitly rather than claimed. The workflow file parses and the step structure is syntactically correct.
+**It has since run on GitHub, successfully.** On head `f2394bc`, job
+`105875464670`, step 6 `no review ledgers in the tree` completed `success` in
+0 s — not skipped. The earlier "cannot be run on GitHub without pushing" is
+withdrawn; it was true when written and false by the time it was read. The
+residual gap is narrower and is the accurate one: **the step has never been
+observed red on GitHub.** Its red path is reproduced only locally. (R1-F4.)
+
+**Not verified.** The workflow file parses and the step structure is syntactically correct.
+
+**Review (Opus, round 1): MERGEABLE, no blockers, no majors, seven minors and
+a nit — five of them false statements in this entry, the PR body or the
+`.gitignore` comment, all corrected above.** It verified the mechanism by
+execution rather than reading: ten cases of the step's shell under GitHub's own
+invocation (`bash --noprofile --norc -e -o pipefail`), the step's real
+`success` on GitHub, the five required contexts string-exact against the live
+protection API, and the crash-recovery sequence performed literally — plain
+`git add` refused, `git add -f` staged, `git rm` stripped, and
+`git show <sha>:REVIEW_X.md` still returning content afterwards. Its nit is
+fixed in the workflow: `ls` became `ls -d`, so a *directory* named
+`REVIEW_x.md` is named rather than producing an empty list. Re-verified after
+that change across six cases — clean tree 0; a root ledger, a filename with a
+space, three at once, and the directory case all 1 with the offending names
+printed; a subdirectory-only ledger 0, the known gap recorded above.
+Ledger: `REVIEW_PR28.md`, removed from the tree per LEDGER-01; retrieve with
+`git show 0dd9e68:REVIEW_PR28.md`.
 
 **Design decision recorded.** The tension the issue raised was that a check running on every push (red throughout review) teaches people to ignore it — which is the failure mode being prevented. The maintainer's choice to implement it anyway, with the gitignore layer closing the accidental path first, reverses the priority: the gitignore *closes* the accidental path, and the CI check gates the deliberate one. Both layers are necessary; neither is sufficient alone. The issue's suggested shell snippet is used verbatim.
 

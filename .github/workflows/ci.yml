@@ -131,9 +131,9 @@ jobs:
       - name: no review ledgers in the tree
         run: |
           set -euo pipefail
-          if ls REVIEW_*.md >/dev/null 2>&1; then
+          if ls -d REVIEW_*.md >/dev/null 2>&1; then
             echo "Review ledgers must be stripped before merge (LEDGER-01):"
-            ls REVIEW_*.md
+            ls -d REVIEW_*.md
             exit 1
           fi
 

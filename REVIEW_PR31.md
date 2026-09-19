@@ -84,24 +84,53 @@ via `rtk proxy`) in debug. Result: **11 failed**, 81 passed (not the claimed
 **3**). Every failure panics at `src/randomx/jit/aarch64.rs:158:9`, the correct
 site. Restored, `cmp` byte-identical.
 
-Both mismatches go the same direction (actual >> claimed) and by a wide margin
-(50% and 267%). This is the exact "reported figures do not reproduce" pattern
-this repo has hit repeatedly (MEM-01's RSS figures, PERF-02's timing claims,
-CI-03's first draft) and which this review was explicitly asked to check. The
-entry's "Not established" section hedges on *correctness* of the guards and on
-the *unprobed* 19 invocations, but not on whether its own quoted *counts* for
-the four it did probe are right — they are two-for-four wrong. I did not
-re-verify the `stp_fp_imm`/`ldp_fp_imm` pair (imm7 guards, claimed 4 and 1)
-given the consistent pattern already found in the two I did check and the
-~4-minute-per-probe cost (each full gate run is ~3-4 minutes for the debug
-half alone); I'd expect them to be off too, but that's an inference, not a
-measurement — noting it rather than claiming it.
+**Reframing, on reflection (an advisor call caught that my first pass invited a
+cheap rebuttal):** "the counts don't reproduce" is rebuttable by "you used a
+different mutation" — and that rebuttal would be correct. Inverting the
+comparison (`<` → `>=`) fires the assert on *every* call to the function,
+which is a different, broader break than e.g. narrowing the bound by one. The
+count is a function of *which* mutation you choose, and **the entry never
+states which mutation produced its counts.** That is the actual defect, and it
+is not fixable by finding "the right" mutation to match 8 and 3 — the entry's
+own methodology is silent on this, so its counts are unreproducible **by
+construction**, independent of whether mine happen to differ.
+
+What does reproduce unconditionally: the qualitative claim. Both guards, once
+broken by any input-widening mutation, take the debug half from 92/0 to
+failing, the release half stays 92/0 (assert compiled out), and the gate's
+overall verdict flips to `GATE FAILED`, exit 101/1. That is what issue #4
+actually asked to be shown, and it holds.
+
+**A structural check that supports this without a third probe.** `stp_fp_imm`
+(line 190) and `ldp_fp_imm` (line 203) carry **byte-identical** assert bodies —
+same `% 8 == 0` pre-check, same `(-512..=504).contains(&byte_offset)` range,
+same message — on the same emit path. The entry claims 4 failures for one and
+1 for the other. Two structurally identical guards should not diverge 4:1
+under a mutation that fires on real inputs; a 4:1 split is itself evidence that
+whatever mutation produced these four numbers was not applied uniformly, or
+was chosen post hoc per guard. Observation, not a third measurement — I did not
+probe these two.
 
 **This does not overturn the core verdict on issue #4** — the guards genuinely
 are reached in the debug profile, and the gate genuinely does fail when they
-are violated, which is exactly what the issue asked to be shown. What's wrong
-is the entry's specific evidentiary numbers, in an entry that opens by
-insisting on "proven, not asserted."
+are violated, which is exactly what the issue asked to be shown (confirmed
+against the issue text itself, see Finding 1a below). What's wrong is that the
+entry states four precise integers as "proven, not asserted" evidence while
+omitting the one fact (the mutation used) that would make them reproducible,
+and two of the four I checked land 50%-267% higher under the standard
+mutation.
+
+### Finding 1a: issue #4's scope is correctly matched (checked, not just read)
+
+`gh issue view 4` names exactly three guard categories: "the imm7 range checks
+on `stp_fp_imm` / `ldp_fp_imm`", "the `subs_imm` imm12 check", and "the CBRANCH
+forward-target check." It does **not** name the CBZ zero-iteration patch range
+or the back-branch imm19 range that `scripts/verify-jit.sh`'s own header
+mentions in a different, broader context (and that `_shared-context.md`
+records a real historical defect in — the imm19 sign bug). So the entry's "all
+four guards the issue names" is accurate: three named *categories* produce
+four concrete assert *sites* because the imm7 bullet covers two functions. No
+scoping error here — checked because it would have been a major if wrong.
 
 ## Finding 2 (MINOR): the debug_assert! inventory's per-file split is wrong
 
@@ -143,6 +172,12 @@ row keeps the row count at 36 either way — it is not additive. The entry's
 "main's 35" was evidently computed against the stale pre-PR-30 base rather
 than current `origin/main`, which is the same staleness as Finding 0's git
 conflicts, showing up a second way.
+
+**For whoever resolves the Finding 0 rebase**: once the conflict is resolved
+correctly — keeping *both* `DOC-03` and `TEST-01` as separate rows — the
+correct comparison is **37 rows against current `main`'s 36**, not "36 vs 35."
+Recording this now so the corrected PR body does not repeat the same stale-base
+error in a new form.
 
 ## Finding 4 (confirmed correct): the CBRANCH reversal's explanation holds up
 
@@ -187,24 +222,32 @@ The entry's profile table is accurate.
   separate rows) and the "Runtime switches" section kept at PR #30's corrected
   text. This is mechanical, not a design problem — but it is real and it is
   not optional per CLAUDE.md's own rebase-before-merge rule.
-- **Major**: two of the four quoted break-test failure counts (CBRANCH: 8
-  claimed vs 12 actual; `subs_imm`: 3 claimed vs 11 actual) do not reproduce
-  with the standard boundary-inversion mutation. The qualitative verdict on
-  issue #4 (guards are reached in debug, gate fails when they're violated,
-  gate is run in both profiles by both `jit-*` CI jobs) is sound and I
-  reproduced it independently — but an entry whose entire point is "proven,
-  not asserted" should not itself contain unverified numbers, and these are
-  wrong by 50-267%.
+- **Major**: the entry states four precise break-test failure counts (4, 1, 3,
+  8) without ever recording which mutation produced them — so they are
+  unreproducible by construction, not merely "wrong." Confirmed the gap is
+  real, not theoretical: under the standard boundary-inversion mutation, two
+  of the four I checked came in far higher than claimed (CBRANCH: 12 vs 8;
+  `subs_imm`: 11 vs 3), and the claimed 4:1 split between the two
+  byte-identical imm7 guards (`stp_fp_imm`/`ldp_fp_imm`) is itself implausible.
+  The qualitative verdict on issue #4 — confirmed correctly scoped against the
+  issue text (Finding 1a) — is sound: the guards are reached in debug, the
+  gate fails when they're violated, and both `jit-*` CI jobs run the gate in
+  both profiles. But an entry whose entire framing is "proven, not asserted"
+  should not itself carry integers nobody could reproduce without guessing the
+  method.
 - **Minor**: the `debug_assert!` per-file inventory split is off by one in two
   files (17/4 actual vs 16/5 claimed; totals still correct).
 - **Minor**: the PR body's "36 rows against main's 35" is not true against
   current `main` (both are 36) — an artifact of comparing against the stale
   pre-rebase base rather than current `main`, same root cause as the blocker.
+  After a correct rebase (keeping both `DOC-03` and `TEST-01`) the true
+  comparison will be 37 vs 36, not 36 vs 35 — flagging so the fix doesn't
+  repeat the error in a new form.
 
-**ACTIONABLE**: yes, all four findings have a concrete fix — rebase, correct
-the two counts (or explicitly caveat them as mutation-dependent and give the
-actual reproduced numbers), fix the inventory split, and drop or correct the
-row-count comparison.
+**ACTIONABLE**: yes, all findings have a concrete fix — rebase; either name the
+mutation behind each count or drop the counts and keep the pass/fail evidence;
+fix the inventory split; correct the row-count comparison to 37 vs 36 once
+rebased.
 
 **Not verified / left for a later round**: the `stp_fp_imm` (imm7, claimed 4)
 and `ldp_fp_imm` (imm7, claimed 1) guards were not independently broken —

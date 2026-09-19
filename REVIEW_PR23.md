@@ -406,3 +406,194 @@ clear never averted the storm and round 1's F1 framing does not survive either.
 Only the absolute phrasing is wrong. Downgraded to a nit and rewritten above.
 The first ledger commit (`78fc74d`) still carries the over-claim in its message;
 this commit is the correction, not an amend (shared-context rule 3).
+
+---
+
+# Round 3
+
+Fresh reviewer, cold context. Scope as briefed: the tip commit `e3b339f` as new
+work, plus the round-2 items it claims to close. Head reviewed:
+`e3b339fc904cbeb83d5bc129819e31cf4382cf7a`.
+
+**Verdict: NOT MERGEABLE — no blockers, two majors, four minors, one nit. All
+ACTIONABLE and all small.** The code change is right and the new cap genuinely
+works; what fails is the record and what the commit swept into the tree.
+
+## Coverage ledger
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Correctness of the change itself | done — cap verified by mutation at 2×/16×/1024× |
+| 2 | Silent failure / fallbacks | done — no new fallback; overflow arm logs at `error!` and reconnects |
+| 3 | Safety switches, fail-safe direction | n/a — no switch touched |
+| 4 | Tests — do they fail when the subject breaks? | done — break-tested, see R3-F3/F4 |
+| 5 | Resource use | done — R3-F1 (5.5 MB of artifacts committed) |
+| 6 | Documentation and audit accuracy | done — R3-F1, F2, F3, F5, F6, F7 |
+| 7 | Concurrency | done — socket tests are deadline-bounded; no production concurrency change |
+
+Ran myself: `cargo test --release` → **159 lib + 18 bin, 2 ignored, 0 failed**;
+`cargo clippy --all-targets --release -- -D warnings` → clean.
+
+## Priority 1: the new absolute cap works
+
+`FEED_CEILING_BYTES = 4 * 1024 * 1024` is independent of `MAX_LINE_BYTES`.
+Mutating `src/pool_connection.rs:216` and running the single test in release:
+
+| `MAX_LINE_BYTES` | `a_newline_free_stream_is_refused…` |
+|---|---|
+| `1 << 20` (shipping) | pass, 0.04 s |
+| `1 << 21` (2×) | **pass**, 0.20 s |
+| `1 << 24` (16×) | **fail**, 0.67 s — `fed 4194304 bytes without being refused` |
+| `1 << 30` (1024×) | **fail**, 0.69 s — same message |
+
+Round 1's F2 is now genuinely closed: no spin, no OOM, a clean named failure,
+and the time is flat in the size of the mutation because the feed is absolute.
+The cap cannot be defeated by a change to `MAX_LINE_BYTES` — it shares no term
+with it. Source restored byte-identical after every mutation (`diff` clean).
+
+## R3-F1 (major) — the fix commit committed 5.5 MB of `mutants.out/` build artifacts
+
+`e3b339f` adds **25 files / ~5 000 lines** under `mutants.out/`: cargo build
+logs, `outcomes.json`, `mutants.json`, `debug.log`, `lock.json`.
+
+- Both earlier rounds recorded it as *untracked and not theirs* (this ledger,
+  lines 214 and 253). The tip commit swept it in — the shape of a `git add -A`.
+- Not in `.gitignore`; `main` has no `mutants.out` and no `scripts/mutants.sh`
+  (that is #24, unlanded), so this is not sanctioned evidence like
+  `PERF1_RUNS.log`.
+- **Not in the AUDIT Files-changed list** — the very list this commit edits to
+  add the `CLAUDE.md` it had omitted. It now omits 25 files instead of one.
+- Contents are machine-local and the repo is **public**: `lock.json` carries
+  `"hostname": "Stephens-MacBook-Pro-2.local"`, `"username": "stephen"`, and the
+  logs carry absolute `/Users/stephen/...` paths.
+- Stale: generated 2026-09-16, before the rebase.
+
+For scale: LEDGER-01 removed 530 KB of review ledgers as too large to keep on
+`main`. This is 5.5 MB. Squash-merge lands all of it permanently.
+
+**Fix:** `git rm -r --cached mutants.out`, add it to `.gitignore`.
+
+## R3-F2 (major) — the task board is broken, and SEC-03 appears twice
+
+`CLAUDE.md` lines 184-191 after the rebase:
+
+```
+184  | ... SEC-02 ... |
+185  (blank)
+186  | ... FIX-01 ... |        <- from main (#26)
+187  (blank)
+188  | ... SEC-03 ... |        <- this branch, PRE-round-1 text
+189  (blank)
+190  | ... SEC-03 ... |        <- this branch, current text
+191  | **Pending** | - | ... |
+```
+
+Two defects in one place.
+
+**(a) The blank lines terminate the GFM table.** Confirmed against GitHub's own
+renderer (`POST /markdown`, `mode: gfm`) on the live file: exactly one `<table>`
+is emitted and it **ends at SEC-02**. FIX-01, *both* SEC-03 rows and the
+`Pending` row render as paragraph text with literal `|` characters — four rows,
+including this PR's own entry and the board's only pending marker, fall out of
+the Current Task Board. `main`'s board is contiguous (no blank line between
+rows) and renders whole, so the branch causes this. This is DOC-02 round 3
+recurring exactly: *"the numbering fix had broken the very table its convention
+note documented — GitHub swallowed the whole task board."*
+
+**(b) The SEC-03 row is duplicated, and the stale copy is the retracted one.**
+`git blame`: 188 is from `6f15fe40`, 190 from `e3b339f` — the rebase resolved
+"additively" and added a second row instead of replacing the first. Line 188
+still claims *"Eight tests; four helper mutations and the wiring mutation all
+caught. 157+18 tests"* — the exact claims this branch's own AUDIT withdraws.
+
+**(c) The surviving row still carries the stale count.** Line 190 ends
+*"157+18 tests, clippy clean"* while the same commit corrects AUDIT to 159+18.
+Measured: 159 lib + 18 bin. The commit that fixed the count in one file left it
+wrong in the other.
+
+## R3-F3 (minor) — "fails in 42 s" does not reproduce, and it inverts the comparison
+
+`AUDIT.md` and the commit message: *"Verified by raising the limit 16x: the test
+fails in 42 s … where the old cap passed in 18 s having proved nothing."*
+
+Round 2's 18.29 s was explicitly *"single test, release"*. The comparable
+measurement for the new cap is **0.67 s** (table above). 42 s is not the test:
+`cargo test --release --lib` at 16× takes 43.78 s (3 tests fail);
+`--lib pool_connection` at 2× takes 42.31 s. Either way it is a suite time
+presented as a test time, and compared against a single-test time.
+
+As written the record says the new cap is 2.3× **slower** than the cap it
+replaces. It is ~27× **faster**. A figure in the authoritative record that does
+not reproduce — in the paragraph whose job is to withdraw a figure that did not
+reproduce.
+
+## R3-F4 (minor) — the detection threshold is 4×, not "a raised limit"
+
+The source comment claims *"4 MiB is four times the real limit and independent
+of it, so a raised limit runs out of iterations and fails cleanly here."* A 2×
+raise **passes** this test in 0.20 s; only ≥4× reaches the ceiling. Not blind
+overall — I confirmed that at 2× the two socket tests
+(`the_receiver_loop_really_drops_a_newline_free_stream`,
+`the_first_job_after_a_flood_is_not_swallowed_by_the_stale_buffer`) fail in 30 s.
+So the suite catches a 2× raise; this test does not, and the comment should say
+which. Same distinction round 2 drew for the old cap.
+
+## R3-F5 (minor) — the PR body was never updated
+
+Round 2 raised this; it is unchanged. `gh pr view 23` still says **"Seven
+tests"** (nine), **"Four mutations are each caught"** (six, plus the wiring and
+`pending.clear()` ones), **"157 lib + 18 bin"** (159+18), and still asserts the
+constant means the two paths **"cannot drift apart"** — the claim this branch's
+AUDIT explicitly corrects. It mentions neither the `pending.clear()` gap, nor
+the cap that did not work, nor #27. Third PR in this repo to reach review with
+a stale body.
+
+## R3-F6 (minor) — the source comment still says "cannot drift apart"
+
+`src/pool_connection.rs:214-215` is unchanged by the branch's correction:
+
+```rust
+/// `read_line` has always had this limit; the long-lived `receiver_loop` did
+/// not, which is the asymmetry GitHub #21 records. The value lives here so the
+/// two cannot drift apart.
+```
+
+`AUDIT.md:6008` records the correction — *"'Cannot drift apart' was true of the
+number, not the behaviour"* — so the ledger is not false. But the commit message
+lists this round-2 item among its fixes with no verb of action, and the diff does
+not touch the line. The source still asserts the retracted version, one file away
+from the entry retracting it. Add the `MAX+4096` clause here.
+
+## R3-F7 (nit) — "filed rather than widened" names no issue
+
+AUDIT says the `read_line` gap was *"filed"*; it does not say **#27**. Neither
+does the PR body. A reader of the authoritative record cannot reach the issue.
+
+## Priority 4: is the `read_line` disclosure honest and sufficient?
+
+**Yes.** I verified the claim rather than taking it: mutating
+`src/pool_connection.rs:833` `>` → `>=` leaves the full lib suite green
+(159 passed, 0 failed). The gap is real, the AUDIT paragraph states it without
+hedging and explicitly flags that the Verification sentence above it does *not*
+cover it, and #27 is specific (three surviving mutants named, four concrete test
+cases, a note that `PoolStream::Plain` is trivially constructible). The PR's
+edit to that line is a literal-to-constant substitution with no behaviour change.
+Deferring is defensible and the disclosure is sufficient — apart from R3-F7, the
+missing number.
+
+## What I could not verify
+
+- No end-to-end run against a real pool (unchanged from rounds 1-2).
+- I did not run `make verify-jit` — the diff touches no JIT code, no emitter,
+  no `vm.rs`. Nothing here is in `jit-reviewer`'s scope.
+- CI: I ran `cargo test --release` and clippy locally on this head, not the
+  five GitHub checks.
+- I did not re-derive round 2's 18.29 s for the old cap; I took it from the
+  ledger and measured only the new cap.
+
+## Handoff
+
+Nothing in this diff belongs to `jit-reviewer` (no `src/randomx/jit/`, no
+emitter, no `vm.rs` native-loop path, no `benches/`, no hashrate claim) or to
+`ci-reviewer` (no `.github/workflows/`, no `Makefile`, no `scripts/`, no
+`.cargo/config.toml`). Reviewed in full here.

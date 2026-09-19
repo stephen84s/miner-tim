@@ -6049,3 +6049,296 @@ wrong was the record, not the protection.
 Complete lines drained alongside an overflow are discarded with the buffer. That
 is defensible — `reconnect()` clears `current_job` regardless — but it was stated
 only in a test comment, and the `error!` line did not mention it.
+
+### PROC-06 (2026-09-17): mutation testing, because the break-testing rule never bound the author
+
+User asked for a permanent fix to a defect this session produced repeatedly:
+**tests that look like they cover something and do not.** Reviewers caught eight
+instances, several of them described in this very file as "break-tested" at the
+time the claim was false.
+
+**The diagnosis is structural, not carelessness.** The rule already existed and
+was well written:
+
+> **Break-testing is required, not optional.** If a change adds or relies on a
+> test, mutate the production code that test guards and confirm the test fails.
+
+It lives in `.claude/agents/_shared-context.md`, a file whose first line reads
+*"Shared context for MinerTim **reviewers**"*. So reviewers break-tested, caught
+the author eight times, and `CLAUDE.md`'s Operational Protocol — the file that
+governs the author — said nothing. That is why "try harder" was never going to
+work: nothing in the author's own instructions asked for it.
+
+**The second half of the diagnosis is subtler and matters more.** Hand
+break-testing means *choosing* a mutation, and **a mutation the test catches for
+an unrelated reason proves nothing.** Every miss this session was that, not
+laziness:
+
+- A pinned **all-zeros** fingerprint, which *rejects* everything — so the test
+  went red while the default verifier was wide open. Nearly closed the finding
+  falsely (PR #22).
+- A flooding socket the test server **dropped**, so the miner reconnected on EOF
+  and the "second accept" had nothing to do with the buffer bound (PR #23).
+- A test asserting **no third reconnect**, when the stale buffer self-clears on
+  the next newline arriving (PR #23).
+
+Each looked like a working break test. Each was green for the wrong reason.
+
+**The fix, in three parts, all implemented here.**
+
+1. **The obligation moves to the author.** `CLAUDE.md`'s Operational Protocol now
+   carries the rule, with the specific failure named and the three examples above
+   quoted, so the next session reads *why* rather than just *what*.
+   `_shared-context.md` keeps its copy, sharpened to say "choose the mutation that
+   is the defect the test claims to catch, not merely one it happens to fail on".
+
+2. **`scripts/mutants.sh` — prefer the tool over judgement.** `cargo-mutants`
+   does not choose a mutation; it tries all of them. That removes the exact
+   failure mode above.
+
+3. **An advisory CI job**, deliberately not a required check.
+
+**Cost, measured rather than estimated, because scope is the whole story.**
+
+| | mutants | time |
+|---|---|---|
+| unscoped (`-F take_complete_lines`, full suite per mutant) | 8 | **28 min** |
+| scoped (`-F hex_decode -- --lib hex::`) | 21 listed, **20** run | **~31-33 s** |
+
+Both arguments to the script are therefore mandatory, and it refuses to run
+without them.
+
+**The figure explaining that cost was wrong, and review caught it.** This entry
+said "the full lib suite is 48 s and every mutant pays it" — but 48 s is the
+**release** suite, and `cargo-mutants` builds and runs in **debug**, where the
+same suite measures **~190 s** here (188.0, 189.6, 191.9 and 192.6 s across
+four runs; an earlier draft quoted the single figure 188 s while
+`scripts/mutants.sh` quoted 192 s — one quantity, two numbers, R2-F5). The
+arithmetic gives it away: 8 x 48 s is
+6.4 minutes, barely a fifth of the observed 28; 8 x 190 s is 25.3 minutes, which
+reconciles once builds are added. The conclusion was right and the mechanism
+4x out, quoted from the wrong profile — MEM-01's release measurement, reused
+without checking it applied.
+
+The script's default timeout was 120 s for the same reason, i.e. **below this
+tree's own debug baseline**, so an unscoped run aborts on baseline timeout. Now
+300 s, overridable with `MUTANTS_TIMEOUT`.
+
+**The first real run found a survivor in code written this session, and it is a
+false alarm — which is the most useful thing it could have taught.**
+`src/hex.rs:42: replace | with ^ in hex_decode` was MISSED. It is an **equivalent
+mutant**: `(hi << 4) | lo` and `(hi << 4) ^ lo` agree on all 256 nibble pairs,
+because the high nibble occupies bits 4-7 and the low nibble bits 0-3 — disjoint,
+so no test can kill it. Verified exhaustively rather than argued.
+
+That is why the CI job is **advisory and must stay advisory until this is
+settled**: a gate that fails on equivalent mutants is a check people learn to
+ignore, which is the same failure as a prose rule with a green tick on top. The
+job is not among the five required contexts (verified against the live branch
+protection) and carries `continue-on-error: true`, so it cannot block a merge by
+either mechanism.
+
+Its scope is deliberately narrow — `hex_decode` only — as a standing
+demonstration that the tooling works, not as coverage of the crate. Widening it
+means scoping the tests per target; `scripts/mutants.sh` exists for exactly that
+and the CI job calls it rather than duplicating the invocation.
+
+**Files changed:** `CLAUDE.md` (the rule, in the author's protocol),
+`.claude/agents/_shared-context.md` (sharpened, cross-referenced),
+`scripts/mutants.sh` (new), `.github/workflows/ci.yml` (advisory job),
+`.gitignore` (see below), `AUDIT.md` (this entry).
+
+**Plus 102 files that should never have been there.** An earlier revision of this
+entry listed five files while the diff touched **107**: every run of the tool
+writes ~788 KB to `mutants.out/` and rotates the previous one to
+`mutants.out.old/`, and `.gitignore` was never updated, so the scratch was
+committed. A false files-changed claim in the append-only ledger — inside the
+entry whose entire subject is claims recorded as true when they were not — and it
+survived a commit made specifically to correct a different figure in this same
+entry. Untracked and ignored now. This is LEDGER-01 repeating four days later,
+in a larger and less durable form.
+
+**Two defects review found in the tooling itself, both the failure it exists to
+prevent.**
+
+**The script had a silent-green mode.** `cargo-mutants` prints "No mutants found
+under the active filters" and exits **0**, so a filter matching nothing reported
+success having checked nothing — and this entry's own second documented example,
+`take_complete_lines`, does exactly that here, because that function lives on
+another branch. `verify-jit.sh`, in the same directory, has carried
+`EXPECTED_PASSES=92` against this precise failure for weeks; the lesson was
+sitting next to the new file and was not applied. The script now counts the
+mutants first and exits 3 if there are none. Break-tested: a nonsense filter
+fails loudly, a real one still runs.
+
+**The advisory job was red on day one and red forever.** `cargo-mutants` exits 2
+on any survivor, and the only survivor is the equivalent mutant this entry proves
+is unkillable — so the check could never go green and could never distinguish a
+new survivor from the permanent one. This entry argues that "a gate failing on
+equivalent mutants is a check people learn to ignore" and then shipped exactly
+that, one severity down. Known-equivalent mutants are now excluded by regex, each
+requiring a written justification rather than a silenced line; the run is green
+with **20 mutants still tested**, so a *new* survivor is what turns it red.
+
+**Verification.** The script runs in ~31-33 s locally (31.4, 31 and 33 s across three runs; 46 s on `ubuntu-24.04`); excluding the equivalent mutant, 20
+mutants, 18 caught, 2 unviable, exit 0. `ci.yml` parses and the
+new job is absent from the required contexts, checked against the live API rather
+than assumed.
+
+**Not established.** `cargo-mutants` has **not** been run over the whole crate,
+which generates **3,196** mutants — `randomx/vm.rs` 855 and `randomx/jit/aarch64.rs`
+710 between them account for half. `pool_connection.rs` generates **88** on
+`main`, and **95** on the `security/bound-recv-buffer` branch, whose new code adds
+seven. Roughly seven mutants in total were ever hand-tested anywhere, so what the
+remaining ~3,190 would say is unknown and, on this week's evidence, probably
+unflattering.
+
+(An earlier version of this paragraph gave the figure as "95" without naming the
+tree it was measured in, sitting next to "roughly seven were ever hand-tested" —
+so it read as a fact about `main`, where it is wrong by seven. The counting
+method was sound; the omission was the branch.) The ~31-33 s figure is for one small pure function; a PR-sized scope
+across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
+Whether this should ever become a required check is therefore still open, and the
+entry deliberately does not answer it.
+
+**Brought up to date with `main` by a merge, not a rebase, and that was not the
+first choice.** The rebase was attempted twice and had to be aborted both times:
+the interactive backend produced a todo list with the same commit listed as both
+done and pending, and the apply backend reported "all conflicts fixed" while
+silently leaving `scripts/mutants.sh` absent, the advisory CI job gone from
+`ci.yml`, and the `CLAUDE.md` rule stripped — with nothing staged to signal it.
+Both aborts restored the branch exactly and the remote was never touched.
+
+`CLAUDE.md`'s own protocol prefers a rebase, and the reason stands: it keeps the
+branch reviewable and the tested tree identical to the landed one. But the branch
+was one commit behind, the conflicts were in two documents, and a
+merge resolves that without a history rewrite that had already twice produced a
+tree missing the change under review. The cost is one merge commit in a branch
+that squash-merges anyway, so nothing reaches `main` either way.
+
+Recorded because the failure mode is worth knowing: a rebase that reports success
+while dropping the files under review is not a conflict you get asked about.
+
+**Round 3: MERGEABLE, no blockers, no majors.** It executed every exit path
+rather than reading them — success, the round-2 reproducer, an empty `-F`, a
+malformed `-F`, a broken build, `MUTANTS_TIMEOUT=0.001`, missing arguments, a
+test filter matching nothing, and a break-test — and could not make the script
+report success having tested nothing, with one exception it found:
+
+- **R3-F4.** A scope whose mutants are **all unviable** exited **0**.
+  Demonstrated with `./scripts/mutants.sh 'replace \+ with \* in hex_decode'
+  'hex::'`: 2 mutants, 2 unviable, exit 0. An unviable mutant does not compile,
+  so it exercises no test; the guard added for R2-F1 counts mutants *listed*,
+  not mutants *run*. That is the signature defect one layer further out, and
+  cargo-mutants' `WARN` was the only thing saying so while `CLAUDE.md` now
+  points authors at this script. The script now asserts on the **outcome**
+  (`mutants.out/caught.txt`) and exits **66**.
+- **R3-F1.** This script's exit codes collided with cargo-mutants' own — its
+  `exit 2` for a usage error against `FoundProblems=2`, and `exit 3` for
+  "nothing would be tested" against `Timeout=3`, so a mutant surviving *by
+  hanging* exited with the code documented here as "your filter matched
+  nothing". Moved outside the tool's range: **64** usage, **65** nothing to
+  test, **66** all unviable, with the full table in the script.
+- **R3-F2.** Lines 64-76 were an orphaned duplicate: the code they introduced
+  moved down during the R2-F1 fix and the comment stayed, leaving it reading as
+  a preamble to `EQUIVALENT`. The repo's documented orphaned-doc-comment mode,
+  inside the previous round's fix. Removed.
+- **R3-F3, F5, F6.** A wrong line reference (42 → 45); `cargo-mutants` pinned
+  to **27.1.0** in `ci.yml`, since this script parses `--list`'s output format
+  and depends on documented exit codes, neither a stable interface; and the
+  stale "21 mutants / 33 s" swept to **20 / ~31-33 s** (three runs: 31.4, 31, 33 s; 46 s on `ubuntu-24.04`)
+  across the script header, this entry, the task board and the PR body — 21 is
+  what cargo-mutants lists, 20 is what runs after the equivalent one is
+  excluded.
+
+Round 3 reproduced every figure in this entry independently: the debug lib
+suite at 188.72 / 189.23 s against the claimed ~190; `hex_decode 'hex::'` at 20
+mutants, 18 caught, 2 unviable, 31.4 s; `'DonationSchedule::level' 'donate::'`
+at 2/2 in 10.9 s; and the R2-F7 check-run claim live on `fc35c12`. It confirmed
+the merge deleted nothing against either parent, and that the task board now
+renders 45 rows against `main`'s 44 — exactly the one row this change adds.
+
+**All nine exit paths re-verified after the R3 fixes:** green 0, all-unviable
+**66** (was 0), exclusion-empties 65, unknown function 65, bad regex 65, no
+args 64, one arg 64, test filter matching nothing 2, second documented example
+0. Break-test (three `hex.rs` tests `#[ignore]`d) still exits 2;
+`src/hex.rs` restored byte-identical.
+
+**Review ledger (LEDGER-01).** `REVIEW_PR24.md` carried rounds 1-2 and is
+removed from the tree in this commit. Rounds 1-2: `git show 75e178d:REVIEW_PR24.md`
+(built over `1d8fa4a` and `06dfb46`). Round 3: `git show fb94776:REVIEW_PR24.md`
+(built over `9512b11` and `637b045`).
+
+**Round 2 also closed five smaller items in `scripts/mutants.sh`, one of which
+was the same defect this PR exists to prevent, shipping inside the fix for it.**
+
+- **R2-F1 (major).** The mutant count used `-F` alone while the real run adds
+  `-E "$EQUIVALENT"`, so the exclusion could empty the set: the script announced
+  "1 mutant(s)", tested **zero**, and exited **0**. Round 2 reproduced it with
+  `./scripts/mutants.sh 'replace \| with \^ in hex_decode' 'hex::'`. That is
+  round 1's own F11 — silent green — surviving inside the code written to close
+  it, the second occurrence in this one PR. The count now applies both filters
+  and reports "after exclusions"; the reproducer exits **3**.
+- **R2-F6, found while fixing F1.** Two further silences sat in the same lines:
+  `2>/dev/null` discarded cargo-mutants' diagnostics, and `set -e` (line 42)
+  killed the script at the failing call before any diagnostic could run — so a
+  malformed `-F` regex exited **1 printing nothing at all**. Piping `--list`
+  into `wc -l` also put cargo-mutants' status behind `wc`'s, which is always 0,
+  so a *failed* list would have been misreported as an *empty* one. All three
+  fixed; a bad regex now exits 3 quoting the parse error.
+- **R2-F3.** `EQUIVALENT` was an unanchored substring, silencing that mutation
+  in any file and any function whose name merely contains `hex_decode`. Now
+  anchored on file and full description, line and column left as wildcards so
+  ordinary edits do not turn the job red without cause. Verified: the anchored
+  form excludes exactly one mutant (21 → 20), a wrong-file anchor excludes none,
+  and `replace | with &` is untouched.
+- **R2-F4** was a symptom of F1 and closed with it: the script now prints 20
+  where it printed 21 above cargo-mutants' own "Found 20".
+- **R2-F5.** One quantity carried two numbers — `AUDIT.md` said the debug lib
+  suite takes 188 s, `scripts/mutants.sh` said ~192 s. Four measurements
+  (188.0, 189.6, 191.9, 192.6 s) put it at **~190 s**; both places now say that
+  and quote the spread.
+- **R2-F8 (nit).** The author-obligation paragraph added to
+  `_shared-context.md` had been inserted between "break-test your tests" and
+  "**This** is the one sanctioned exception", stealing the referent. The
+  sentence now names break-testing explicitly and the paragraph moved below it.
+
+**R2-F7 is settled, and it was the one round 2 could not verify.** The worry was
+that a job with `continue-on-error: true` might report SUCCESS when it fails,
+making the advisory gate invisible rather than merely non-blocking. It does not:
+on `fc35c12`, where this job genuinely failed, the check run the PR displays
+reads `conclusion=failure` while the five required contexts remain the only ones
+that gate. So a survivor shows red on the PR and still cannot block a merge,
+which is exactly the intended behaviour. Established from this repository's own
+check-run data, not from documentation.
+
+**Both documented examples were re-run, not just the first.** Round 1's finding
+was precisely that a documented example returned zero mutants and exited 0, so
+checking only one would have repeated it: `hex_decode 'hex::'` gives 20 mutants,
+18 caught, 2 unviable, 31 s; `'DonationSchedule::level' 'donate::'` gives 2
+mutants, 2 caught, 11 s. Both exit 0.
+
+**Verification of the gate's exit codes**, all re-run on this head: green path
+exit **0** (20 mutants, 18 caught, 2 unviable, 31 s); real survivors exit **2**
+(break-tested by `#[ignore]`-ing three `hex.rs` tests → 4 missed; `src/hex.rs`
+restored byte-identical afterwards); filter emptied by the exclusion, unknown
+function, and malformed regex each exit **3** with a reason on stderr.
+
+**Correction (round 2, R2-F2): the append was not clean, and this entry said it
+was.** "A pure append in two documents" is withdrawn. The merge commit
+`77246b39` introduced three **blank lines** into the `CLAUDE.md` task board at
+what were then lines 211, 213 and 215 — present in neither parent, confirmed by
+`git blame`. A blank line terminates a GFM table, so GitHub rendered **42** rows
+here against **44** on `main`, dropping FIX-01, `Pending` and **PROC-06 — the
+row this PR exists to add** — out of the table and into paragraphs of literal
+pipes. Verified against GitHub's own renderer (`POST /markdown`, `mode: gfm`),
+before and after. This is DOC-02 round 3 recurring, and it happened
+independently on `security/bound-recv-buffer` in the same week, where the same
+resolution also left a duplicate SEC-03 row: the shared cause is resolving a
+task-board conflict by pasting rows rather than editing the table, and neither
+`make check` nor CI can see it because the file is documentation. What survives
+of the original claim is the part review confirmed by inspection: the merge lost
+nothing — `git diff` against both parents shows no deletions in either
+direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
+`_shared-context.md` are identical to their sources. The damage was purely
+additive.

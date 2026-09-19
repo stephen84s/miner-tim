@@ -101,6 +101,33 @@ mod tests {
         assert_eq!(clamp_level(250), MAX_DONATE_LEVEL);
     }
 
+    /// `level()` had exactly one assertion — inside `floor_enforced`, checking
+    /// that a level of 0 clamps **up** to the minimum. Because the minimum *is*
+    /// 1, a `level()` that ignored its field and always returned 1 satisfied
+    /// that assertion, and mutation testing found it survives (GitHub #25).
+    ///
+    /// The impact was narrow: `beneficiary_at` reads the field directly, so the
+    /// donation itself was never at risk — only the figure reported to the
+    /// operator in `pool_connection`'s "donate-level {}%" line. But that line is
+    /// how someone confirms `--donate-level` took effect, and a miner that
+    /// misreports the one financial setting it has is worth a test.
+    ///
+    /// The list deliberately **includes** the clamp floor and the default, and
+    /// spans them: an accessor stuck at any single constant fails on every other
+    /// element. An earlier version of this comment said the values were "chosen
+    /// to avoid" those two, which is the opposite of what the array does — the
+    /// effect was right, the stated mechanism was not.
+    #[test]
+    fn level_reports_what_was_configured() {
+        for n in [MIN_DONATE_LEVEL, 2, 3, 5, 10, 50, MAX_DONATE_LEVEL] {
+            assert_eq!(
+                DonationSchedule::new(n).level(),
+                n,
+                "level() must report the configured value, not a constant"
+            );
+        }
+    }
+
     #[test]
     fn donated_fraction_matches_level() {
         for level in [MIN_DONATE_LEVEL, 5, 50] {

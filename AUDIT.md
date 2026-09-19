@@ -5769,6 +5769,100 @@ minutes of the first test being written for it. The panic fix was reviewed; the
 module's total absence of tests was not remarked on by anyone, including me,
 until it was asked about directly.
 
+
+### FIX-01 (2026-09-18): `DonationSchedule::level()` pinned (GitHub #25)
+
+The first real defect mutation testing found, one run after the tooling landed.
+
+```
+src/donate.rs:62:9: replace DonationSchedule::level -> u8 with 1   [MISSED]
+```
+
+`level()` had exactly one assertion, inside `floor_enforced`:
+
+```rust
+assert_eq!(DonationSchedule::new(0).level(), MIN_DONATE_LEVEL);   // == 1
+```
+
+That test exists to check a level of 0 is clamped **up** to the minimum — and
+because the minimum *is* 1, a `level()` that ignored its field and always
+returned 1 satisfied it for entirely the wrong reason. Nothing anywhere asserted
+`DonationSchedule::new(5).level() == 5`.
+
+**This is precisely the failure mode PROC-06 exists for**, and it is worth
+noticing that it appeared in code nobody was editing: a test that passes for the
+wrong reason does not announce itself, and no amount of reading the test would
+have shown it. The tool found it in 38 seconds.
+
+**Impact, stated at its real size rather than its scariest.** `level()` is used
+in one place — `pool_connection.rs`'s `"donate-level {}%"` log line.
+`beneficiary_at` computes the schedule from `self.level`, the **field**, so the
+donation itself was never at risk. What a stuck accessor would corrupt is the
+figure reported to the operator.
+
+That is still worth fixing: the donation level is the one financial setting this
+miner has, `--donate-level` is documented as adjustable, and that log line is how
+someone confirms their setting took effect. A miner that donates 5% while
+reporting 1% is lying to its operator about money. But it is a reporting defect,
+not a financial one, and this entry should not be read as the latter.
+
+**The fix** is a test pinning the accessor across values chosen to defeat both
+plausible constants — neither the clamp floor (1) nor the default (5) can pass:
+
+```rust
+for n in [MIN_DONATE_LEVEL, 2, 3, 5, 10, 50, MAX_DONATE_LEVEL] {
+    assert_eq!(DonationSchedule::new(n).level(), n);
+}
+```
+
+**Files changed:** `src/donate.rs` (one test), `CLAUDE.md` (task board), `AUDIT.md` (this entry).
+
+**Verification.** 2 mutants, **2 caught**, 12 s, via
+
+```
+cargo mutants --file src/donate.rs -F 'DonationSchedule::level' --timeout 120 -- --lib 'donate::'
+```
+
+The command is written out rather than cited as `./scripts/mutants.sh`, because
+that script and the PROC-06 entry it belongs to land in a **different, still-open
+PR (#24)**. Citing them from here would leave `AUDIT.md` — which is append-only
+once merged — pointing at a path and a process ID that do not exist, if this
+lands first. Review caught that ordering dependency; the safer fix is to depend
+on nothing. The mutant is dead, confirmed by the tool that found it rather than by a
+hand-picked mutation.
+
+Two points of precision from review. "2 caught" is the post-fix figure; before
+the fix the same filter gave **1 missed, 1 caught** — the `-> 0` sibling was
+already killed by `floor_enforced`, so this closed **one** mutant, not two. And
+the full suite is **168 passed** (150 lib + 18 bin), not the 150 quoted
+elsewhere, which was the `--lib` count alone.
+
+Review also swept the whole file both ways: `origin/main`'s `donate.rs` gives
+25 mutants with **1 missed** — this one — and this branch gives 25 with **zero
+survivors**, so `clamp_level`, `beneficiary_at`, `new` and the constants are all
+covered and no neighbouring gap was left open.
+
+**Review:** one round, `pr-reviewer`, mergeable with no blockers and no majors.
+It verified the gap by running rather than reading — stubbing `level()` to `1`
+with the new test removed leaves `3 passed`, so the mutant really was invisible
+before — and confirmed the new test kills a stub at **all nine** constants tried,
+not just the two the comment names. It also checked the impact claim by grepping
+the whole tree: `.level()` has exactly one non-test caller, the `log::info!` at
+`pool_connection.rs:500`, so "reporting defect, not financial" holds.
+
+Its findings are actioned above: an `AUDIT.md` citation of `scripts/mutants.sh`
+and PROC-06, neither of which exists on `main` yet — they land in the still-open
+#24, and `AUDIT.md` is append-only once merged, so this entry would have carried
+a dangling path if it landed first; a files-changed list omitting `CLAUDE.md`; a
+"150 passed" figure that was the `--lib` count rather than the full 168; the
+one-versus-two mutant precision; and an in-code comment claiming the value list
+"avoids" the clamp floor and the default when it plainly **contains** both — the
+effect right, the mechanism as described wrong.
+
+**Ledger:** `REVIEW_PR26.md`, removed before merge per LEDGER-01 and retrievable
+at **`bbc3dc8`** — `git show bbc3dc8:REVIEW_PR26.md`. That sha is in
+this branch's history, not `main`'s, since the repo squash-merges.
+
 ### PROC-06 (2026-09-17): mutation testing, because the break-testing rule never bound the author
 
 User asked for a permanent fix to a defect this session produced repeatedly:
@@ -5916,3 +6010,4 @@ method was sound; the omission was the branch.) The 33 s figure is for one small
 across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
 Whether this should ever become a required check is therefore still open, and the
 entry deliberately does not answer it.
+

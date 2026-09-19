@@ -18,7 +18,7 @@
 #
 # Scope is everything. Unscoped, one function took 28 minutes for 8 mutants,
 # because every mutant re-ran the whole 48-second suite. Scoping the *tests* as
-# well as the mutants took it to 20 mutants in ~31 s here (46 s on
+# well as the mutants took it to 20 mutants in ~31-33 s here (46 s on
 # `ubuntu-24.04`). Always pass both. The count is 20, not the 21 cargo-mutants
 # lists, because the known-equivalent one is excluded before the run.
 #

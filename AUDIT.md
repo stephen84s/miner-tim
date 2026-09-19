@@ -6103,7 +6103,7 @@ Each looked like a working break test. Each was green for the wrong reason.
 | | mutants | time |
 |---|---|---|
 | unscoped (`-F take_complete_lines`, full suite per mutant) | 8 | **28 min** |
-| scoped (`-F hex_decode -- --lib hex::`) | 21 listed, **20** run | **~31 s** |
+| scoped (`-F hex_decode -- --lib hex::`) | 21 listed, **20** run | **~31-33 s** |
 
 Both arguments to the script are therefore mandatory, and it refuses to run
 without them.
@@ -6180,7 +6180,7 @@ that, one severity down. Known-equivalent mutants are now excluded by regex, eac
 requiring a written justification rather than a silenced line; the run is green
 with **20 mutants still tested**, so a *new* survivor is what turns it red.
 
-**Verification.** The script runs in ~31 s (46 s on `ubuntu-24.04`); excluding the equivalent mutant, 20
+**Verification.** The script runs in ~31-33 s locally (31.4, 31 and 33 s across three runs; 46 s on `ubuntu-24.04`); excluding the equivalent mutant, 20
 mutants, 18 caught, 2 unviable, exit 0. `ci.yml` parses and the
 new job is absent from the required contexts, checked against the live API rather
 than assumed.
@@ -6196,7 +6196,7 @@ unflattering.
 (An earlier version of this paragraph gave the figure as "95" without naming the
 tree it was measured in, sitting next to "roughly seven were ever hand-tested" —
 so it read as a fact about `main`, where it is wrong by seven. The counting
-method was sound; the omission was the branch.) The ~31 s figure is for one small pure function; a PR-sized scope
+method was sound; the omission was the branch.) The ~31-33 s figure is for one small pure function; a PR-sized scope
 across `miner.rs` or `vm.rs` is unmeasured, and those modules have slow tests.
 Whether this should ever become a required check is therefore still open, and the
 entry deliberately does not answer it.
@@ -6246,7 +6246,7 @@ report success having tested nothing, with one exception it found:
 - **R3-F3, F5, F6.** A wrong line reference (42 → 45); `cargo-mutants` pinned
   to **27.1.0** in `ci.yml`, since this script parses `--list`'s output format
   and depends on documented exit codes, neither a stable interface; and the
-  stale "21 mutants / 33 s" swept to **20 / ~31 s** (46 s on `ubuntu-24.04`)
+  stale "21 mutants / 33 s" swept to **20 / ~31-33 s** (three runs: 31.4, 31, 33 s; 46 s on `ubuntu-24.04`)
   across the script header, this entry, the task board and the PR body — 21 is
   what cargo-mutants lists, 20 is what runs after the equivalent one is
   excluded.

@@ -40,3 +40,10 @@ mining.conf
 # project. Shared, reviewable settings belong in `.claude/settings.json`, which
 # stays tracked.
 .claude/settings.local.json
+
+# cargo-mutants working directory. Untracked deliberately: a single run writes
+# ~25 files / 5.5 MB of build logs and per-mutant diffs, and `lock.json` records
+# the operator's hostname, username and absolute home paths — this repository is
+# public. `e3b339f` swept it in via a `git add -A` and PR #23 round 3 caught it.
+# The findings belong in `AUDIT.md`; the directory is scratch.
+mutants.out/

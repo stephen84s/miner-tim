@@ -5924,8 +5924,11 @@ without them.
 **The figure explaining that cost was wrong, and review caught it.** This entry
 said "the full lib suite is 48 s and every mutant pays it" — but 48 s is the
 **release** suite, and `cargo-mutants` builds and runs in **debug**, where the
-same suite measures **188 s** here. The arithmetic gives it away: 8 x 48 s is
-6.4 minutes, barely a fifth of the observed 28; 8 x 188 s is 25.1 minutes, which
+same suite measures **~190 s** here (188.0, 189.6, 191.9 and 192.6 s across
+four runs; an earlier draft quoted the single figure 188 s while
+`scripts/mutants.sh` quoted 192 s — one quantity, two numbers, R2-F5). The
+arithmetic gives it away: 8 x 48 s is
+6.4 minutes, barely a fifth of the observed 28; 8 x 190 s is 25.3 minutes, which
 reconciles once builds are added. The conclusion was right and the mechanism
 4x out, quoted from the wrong profile — MEM-01's release measurement, reused
 without checking it applied.
@@ -6021,10 +6024,82 @@ Both aborts restored the branch exactly and the remote was never touched.
 
 `CLAUDE.md`'s own protocol prefers a rebase, and the reason stands: it keeps the
 branch reviewable and the tested tree identical to the landed one. But the branch
-was one commit behind, the conflicts were a pure append in two documents, and a
+was one commit behind, the conflicts were in two documents, and a
 merge resolves that without a history rewrite that had already twice produced a
 tree missing the change under review. The cost is one merge commit in a branch
 that squash-merges anyway, so nothing reaches `main` either way.
 
 Recorded because the failure mode is worth knowing: a rebase that reports success
 while dropping the files under review is not a conflict you get asked about.
+
+**Review ledger (LEDGER-01).** `REVIEW_PR24.md` carried rounds 1-2 and is
+removed from the tree in this commit; retrieve it with
+`git show 75e178d:REVIEW_PR24.md` (round 2 built over `1d8fa4a` and `06dfb46`).
+
+**Round 2 also closed five smaller items in `scripts/mutants.sh`, one of which
+was the same defect this PR exists to prevent, shipping inside the fix for it.**
+
+- **R2-F1 (major).** The mutant count used `-F` alone while the real run adds
+  `-E "$EQUIVALENT"`, so the exclusion could empty the set: the script announced
+  "1 mutant(s)", tested **zero**, and exited **0**. Round 2 reproduced it with
+  `./scripts/mutants.sh 'replace \| with \^ in hex_decode' 'hex::'`. That is
+  round 1's own F11 — silent green — surviving inside the code written to close
+  it, the second occurrence in this one PR. The count now applies both filters
+  and reports "after exclusions"; the reproducer exits **3**.
+- **R2-F6, found while fixing F1.** Two further silences sat in the same lines:
+  `2>/dev/null` discarded cargo-mutants' diagnostics, and `set -e` (line 42)
+  killed the script at the failing call before any diagnostic could run — so a
+  malformed `-F` regex exited **1 printing nothing at all**. Piping `--list`
+  into `wc -l` also put cargo-mutants' status behind `wc`'s, which is always 0,
+  so a *failed* list would have been misreported as an *empty* one. All three
+  fixed; a bad regex now exits 3 quoting the parse error.
+- **R2-F3.** `EQUIVALENT` was an unanchored substring, silencing that mutation
+  in any file and any function whose name merely contains `hex_decode`. Now
+  anchored on file and full description, line and column left as wildcards so
+  ordinary edits do not turn the job red without cause. Verified: the anchored
+  form excludes exactly one mutant (21 → 20), a wrong-file anchor excludes none,
+  and `replace | with &` is untouched.
+- **R2-F4** was a symptom of F1 and closed with it: the script now prints 20
+  where it printed 21 above cargo-mutants' own "Found 20".
+- **R2-F5.** One quantity carried two numbers — `AUDIT.md` said the debug lib
+  suite takes 188 s, `scripts/mutants.sh` said ~192 s. Four measurements
+  (188.0, 189.6, 191.9, 192.6 s) put it at **~190 s**; both places now say that
+  and quote the spread.
+- **R2-F8 (nit).** The author-obligation paragraph added to
+  `_shared-context.md` had been inserted between "break-test your tests" and
+  "**This** is the one sanctioned exception", stealing the referent. The
+  sentence now names break-testing explicitly and the paragraph moved below it.
+
+**R2-F7 is settled, and it was the one round 2 could not verify.** The worry was
+that a job with `continue-on-error: true` might report SUCCESS when it fails,
+making the advisory gate invisible rather than merely non-blocking. It does not:
+on `fc35c12`, where this job genuinely failed, the check run the PR displays
+reads `conclusion=failure` while the five required contexts remain the only ones
+that gate. So a survivor shows red on the PR and still cannot block a merge,
+which is exactly the intended behaviour. Established from this repository's own
+check-run data, not from documentation.
+
+**Verification of the gate's exit codes**, all re-run on this head: green path
+exit **0** (20 mutants, 18 caught, 2 unviable, 31 s); real survivors exit **2**
+(break-tested by `#[ignore]`-ing three `hex.rs` tests → 4 missed; `src/hex.rs`
+restored byte-identical afterwards); filter emptied by the exclusion, unknown
+function, and malformed regex each exit **3** with a reason on stderr.
+
+**Correction (round 2, R2-F2): the append was not clean, and this entry said it
+was.** "A pure append in two documents" is withdrawn. The merge commit
+`77246b39` introduced three **blank lines** into the `CLAUDE.md` task board at
+what were then lines 211, 213 and 215 — present in neither parent, confirmed by
+`git blame`. A blank line terminates a GFM table, so GitHub rendered **42** rows
+here against **44** on `main`, dropping FIX-01, `Pending` and **PROC-06 — the
+row this PR exists to add** — out of the table and into paragraphs of literal
+pipes. Verified against GitHub's own renderer (`POST /markdown`, `mode: gfm`),
+before and after. This is DOC-02 round 3 recurring, and it happened
+independently on `security/bound-recv-buffer` in the same week, where the same
+resolution also left a duplicate SEC-03 row: the shared cause is resolving a
+task-board conflict by pasting rows rather than editing the table, and neither
+`make check` nor CI can see it because the file is documentation. What survives
+of the original claim is the part review confirmed by inspection: the merge lost
+nothing — `git diff` against both parents shows no deletions in either
+direction, and `src/`, `Cargo.*`, `ci.yml`, `mutants.sh`, `.gitignore` and
+`_shared-context.md` are identical to their sources. The damage was purely
+additive.

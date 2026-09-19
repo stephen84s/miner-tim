@@ -51,16 +51,17 @@ test went red while the default verifier stayed wide open. If in doubt, run
 rather than one — and note that a MISSED mutant may be *equivalent* rather than a
 gap, so it is a question before it is a finding.
 
-The same obligation now binds the **author** as well, in `CLAUDE.md`'s
-Operational Protocol. It lived only here — a file headed "for MinerTim
-reviewers" — for eight instances of an author-written test that passed against
-the bug it was written for.
-
-This is the one sanctioned exception to working rule 4 below, and it is narrow:
+**Break-testing is the one sanctioned exception to working rule 4 below**, and
+it is narrow:
 the mutation is **temporary and reverted before you finish**, it is never
 committed, and it never leaves the working tree dirty at the end of the review.
 Take a copy first (`cp file /tmp/…`) and restore from it rather than trusting an
 edit-back. If you cannot revert cleanly, say so loudly in the ledger.
+
+The same obligation now binds the **author** as well, in `CLAUDE.md`'s
+Operational Protocol. It lived only here — a file headed "for MinerTim
+reviewers" — for eight instances of an author-written test that passed against
+the bug it was written for.
 
 ## What CI does and does not prove
 

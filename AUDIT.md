@@ -6950,7 +6950,19 @@ mechanical heading check.
 
 **The major was in the `caffeinate` rule's own verification step**, and it was the exact failure that rule exists to warn about. The check read `pmset -g assertions | grep "pid $(cat /tmp/caffeinate.pid)"`, but **nothing in the documented procedure ever wrote that file**. Absent, the command collapses to `grep "pid "` and matches *every* assertion on the machine — review reproduced it matching an unrelated `sharingd` entry — so the check reports success while proving nothing. A check that cannot fail, sitting inside the paragraph that tells the operator not to be fooled by precisely that. The procedure now records both pids, guards on the pid file being non-empty, and anchors the match with a trailing `(`.
 
-**A minor that matters more than its grade: the claim that the wrapper form "does not survive being backgrounded" did not reproduce.** Review tried three constructions, including the documented pipeline with a continuously-writing payload to force a `SIGPIPE` had `tee` died, and `caffeinate` survived all three. What was actually observed here was a single instance of the wrapper being gone with the miner reparented to `launchd` — real, but **generalised into a rule from one observation**, which is this repo's signature defect committed by the author of the rule against it. The text now says the `-w` form is *preferred* because it makes the inhibitor's lifetime and pid explicit, not that the wrapper is broken, and records that the failure has not reproduced.
+**The wrapper claim was not merely unreproduced — it was false, and the cause
+is now known.** `caffeinate <utility>` forks a child to hold the assertions and
+`exec`s the utility in the original process, so the utility keeps the pid you
+launched and `caffeinate` appears as its **child**; under `nohup ... &` that
+utility legitimately has `ppid 1`. A process listing that missed the child was
+read as "the wrapper died and the miner was orphaned". Nothing had died —
+confirmed six hours into the live run, where the original wrapper (pid 99100,
+child of miner 99097) was still holding `PreventUserIdleSystemSleep` the whole
+time, alongside the redundant `-w` attachment added in response to the
+phantom. Review's "did not reproduce across three constructions" was the
+correct answer and the entry now says so.
+
+**As originally graded, a minor: the claim that the wrapper form "does not survive being backgrounded" did not reproduce.** Review tried three constructions, including the documented pipeline with a continuously-writing payload to force a `SIGPIPE` had `tee` died, and `caffeinate` survived all three. What was actually observed here was a single instance of the wrapper being gone with the miner reparented to `launchd` — real, but **generalised into a rule from one observation**, which is this repo's signature defect committed by the author of the rule against it. The text now says the `-w` form is *preferred* because it makes the inhibitor's lifetime and pid explicit, not that the wrapper is broken, and records that the failure has not reproduced.
 
 Three smaller corrections: the byte count (39,856 claimed, **40,381** measured), the file count ("37 created" — 37 were *migrated*, 38 created counting `DOC-04.md`), and a `Files changed` field reading "Current task section only" when the diff has four hunks and omitted 37 new files.
 

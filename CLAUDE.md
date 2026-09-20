@@ -288,14 +288,24 @@
       echo $! > /tmp/caffeinate.pid
       ```
 
-      *Why prefer it rather than require it:* during one backgrounded run the
-      wrapper form was found gone, with the miner reparented to `launchd` and
-      nothing holding an assertion. **That has not reproduced** — review tried
-      three constructions, including the documented pipeline with a
-      continuously-writing payload, and the wrapper survived all three. So the
-      wrapper is not known to be broken; the `-w` form is preferred because it
-      makes the inhibitor's lifetime and pid explicit, which is what the check
-      below needs.
+      *Why prefer it rather than require it:* **the wrapper form is not broken.**
+      It was once reported here as dying under `nohup`, leaving the miner
+      orphaned — that report was wrong, and the way it was wrong is worth
+      keeping. `caffeinate <utility>` **forks a child to hold the assertions and
+      `exec`s the utility in the original process**, so `ps` shows the utility
+      at the pid you launched, with `caffeinate` as its *child*:
+
+      ```
+      99097     1  ./target/release/minertim      <- the exec'd process, ppid 1 under nohup
+      99100 99097  caffeinate                     <- holds the assertions
+      ```
+
+      A `ppid` of 1 is therefore **normal** for `nohup ... &`, not evidence of
+      orphaning, and a process listing that misses the child reads as "the
+      wrapper died" when nothing died. Review could not reproduce the failure
+      across three constructions, which was the correct answer. The `-w` form is
+      preferred only because it makes the inhibitor's pid explicit and
+      recordable, which the check below needs — not because the wrapper fails.
 
       **Then verify, and note the check itself has a trap.** The assertions must
       be held by **your** `caffeinate`:

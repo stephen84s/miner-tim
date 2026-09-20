@@ -41,3 +41,4 @@ Newest last.
 - **[TEST-01](TEST-01.md)** — Issue #4's `debug_assert!` guards are exercised — proven, not asserted. *(Completed)*
 - **[PROC-07](PROC-07.md)** — No-ledgers-on-main rule enforced (#19). *(Completed)*
 - **[PROC-08](PROC-08.md)** — Delegate the mechanical work to Haiku; keep the judgement. *(Completed)*
+- **[DOC-04](DOC-04.md)** — Split the task board out of CLAUDE.md into tasks/. *(Completed)*

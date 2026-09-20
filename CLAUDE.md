@@ -375,8 +375,8 @@
 
 ## Current task
 
-**PROC-08 — delegation defaults: Haiku does the work, the lead plans and verifies.**
-Completed. See [`tasks/PROC-08.md`](tasks/PROC-08.md).
+**DOC-04 — Split the task board out of CLAUDE.md into tasks/.**
+Completed. See [`tasks/DOC-04.md`](tasks/DOC-04.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

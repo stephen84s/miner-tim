@@ -6922,3 +6922,28 @@ unestablished about Sonnet is narrower: three reviews, all on documentation or
 evidence claims, none on a silent-failure surface, and no instance yet of any
 tier missing something a later round found — except one, by Opus, on a
 mechanical heading check.
+
+### DOC-04 (2026-09-20): Split the task board out of CLAUDE.md into tasks/
+
+**Request.** User instruction. The task board had reached **38 rows and 42,921 bytes — 53% of `CLAUDE.md`**, a file every session reads before anything operational. Each row duplicated an `AUDIT.md` entry that said the same thing at greater length, with the longest rows exceeding 4,400 characters: audit entries wearing a table cell. It also broke **four times in one week**, because a single blank line terminates a GFM table and every task was required to append to it.
+
+**The cause was a rule, not carelessness.** Operational Protocol step 4 mandated updating that table for every task — the same shape as LEDGER-01, where thirteen review ledgers piled up because every reviewer obeyed correctly. Step 4 is rewritten so the rule no longer produces the problem.
+
+**Files changed:** `CLAUDE.md` (Current task section only), `.claude/agents/audit-writer.md` (rewritten — it described the table it must no longer produce), `tasks/DOC-04.md` (new), `tasks/README.md` (new line appended).
+
+**Behaviour changes:** No code change. Operational Protocol step 4 changed: the rule no longer mandates a task-board table row, and task status is now tracked in `tasks/<TASK-ID>.md` alongside the summary, with `tasks/README.md` indexing them newest-last. The Current task pointer at the top of `CLAUDE.md` is updated only for the newest task.
+
+**Result.** `CLAUDE.md` **81,147 → 39,856 bytes, 51% smaller**. Thirty-seven task files created (`tasks/SYS-01.md` through `tasks/PROC-08.md`), one per task, plus `tasks/README.md`. Each task file is a summary; the matching `AUDIT.md` entry is the authoritative record. `CLAUDE.md` now renders with 4 tables and 0 stray pipes.
+
+**Verification: content preservation.** All 37 titles and bodies — **41,521 characters** of description — were compared against `origin/main` normalised to alphanumerics (removing spaces, punctuation, case), with every one present verbatim in the new files. The lead's process identified and fixed a bug in the verifier: the first preservation check reported all 37 tasks missing, which was the **verifier's fault, not the split's**. It required the original description to appear contiguously, while a task file inserts a `**Status:**` line between title and body. Fixed by checking title and body separately; all 37 then passed. Worth recording because a check that fails for the wrong reason is as misleading as one that passes for the wrong reason — the repo has prior examples of the latter (R1-M1 in PROC-08).
+
+**Verification: caffeinate correction.** An observed failure during this session revealed that the documented launch shape — `caffeinate -dimsu <binary> ...` — **does not survive being backgrounded** under `nohup`. Launched that way, `caffeinate` exited immediately and the miner was reparented to `launchd` with **no sleep protection at all**. `CLAUDE.md` now documents the `-w <pid>` form for background runs, and instructs the operator to verify by checking `pmset -g assertions` — confirming that **their own** `caffeinate` pid holds the assertion. The note emphasizes that finding some *other* process holding `PreventUserIdleSystemSleep` is not evidence about the run, because an unrelated process with the inhibitor is exactly what masked the original failure.
+
+**Verification: test suite and rendering.** Ran `159 lib + 20 bin` tests (libtest count exact), all pass. `cargo clippy --all-targets --release -- -D warnings` clean. Re-rendered `CLAUDE.md` through GitHub's markdown API (`POST /markdown`, `mode: gfm`); confirmed **4 tables** and **0 stray pipes** — the claim recorded in PROC-08 (77,003 bytes) was about a stale tree; this is 39,856 bytes with step 4 rewritten and 37 task files extracted.
+
+**Not established.**
+
+- **Token cost reduction in practice.** `CLAUDE.md` is re-sent every request but it is **cached** (prompt-cache TTL), so the saving is smaller than raw byte count suggests. The stronger justifications are removing duplication with `AUDIT.md` and eliminating a markdown structure that broke four times (a blank line terminates a GFM table and every task was required to append to it). Not measured: whether the net effect on session window consumption is positive.
+- **Whether `tasks/` will itself accrete.** Today 160 KB across 38 files, unbounded by anything. LEDGER-01 already noted this same failure at the task-board level; the fix is architectural, not a behavioral change, so the risk remains open.
+
+**Review (tier and findings): not provided in the brief.** The brief contains no review information — no tier, no findings, no false-positive counts — and the agent instruction is to ask rather than guess or omit. Recorded as an open question: **What review tier examined this change, what did it find, what did it miss that was discovered later, and how many false positives did it raise?**

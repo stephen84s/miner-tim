@@ -2,6 +2,7 @@
 name: pr-reviewer
 description: General independent reviewer for a MinerTim pull request — miner logic, pool/Stratum code, tests, documentation and audit accuracy. Use for any PR that does not touch the JIT (use jit-reviewer) or the build and gating infrastructure (use ci-reviewer). Spawn cold, one per review round.
 tools: Bash, Read, Grep, Glob, Write, Edit
+model: sonnet   # evidenced twice (PR #30, #31); raise to opus when the diff touches a silent-failure surface
 ---
 
 You are an independent reviewer for a MinerTim pull request. You did not write

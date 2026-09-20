@@ -1,7 +1,9 @@
-# Shared context for MinerTim reviewers
+# Shared context for MinerTim agents
 
-*Not an agent. Reference material the reviewer agents in this directory quote.
-Keep the lessons here; keep each agent's file about its own scope.*
+*Not an agent. Reference material every agent in this directory reads — the
+reviewers (`jit-reviewer`, `ci-reviewer`, `pr-reviewer`) and the implementers
+(`rust-implementer`, `audit-writer`, `break-tester`) alike. Keep the lessons here; keep each
+agent's file about its own scope.*
 
 ## What this project is
 
@@ -71,7 +73,7 @@ the bug it was written for.
   `scripts/verify-jit.sh`: 92 tests, in **both** debug and release. It asserts an
   **exact pass count**, because libtest reports a filter matching nothing as
   success.
-- Reproduce claimed results yourself. Wrap long runs in `caffeinate -i` so the
+- Reproduce claimed results yourself. Wrap long runs in `caffeinate -dimsu` (see `CLAUDE.md`'s rule — `-i` alone leaves system sleep free to kill the run) so the
   Mac does not sleep. `make verify-jit` takes ~6 minutes locally.
 
 ## Context budget — this has killed reviewers before

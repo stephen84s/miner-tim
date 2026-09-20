@@ -277,31 +277,40 @@
           2>&1 | tee LIVE8H_RUN.log
       ```
 
-      **That shape does not survive being backgrounded**, which is how an agent
-      will usually start it. Launched under `nohup ... &`, `caffeinate` exited
-      immediately and the miner was reparented to `launchd` with **no sleep
-      protection at all** — observed, not theorised. For a background run, start
-      the miner first and attach by PID, so the inhibitor lives exactly as long
-      as the process it protects:
+      **For a background run, prefer attaching by PID** — start the process,
+      then point `caffeinate` at it, so the inhibitor lives exactly as long as
+      what it protects and its own pid is recorded for the check below:
 
       ```bash
       nohup ./target/release/minertim <pool> <wallet> <threads> >> run.log 2>&1 &
-      nohup caffeinate -dimsu -w $! >/dev/null 2>&1 &
+      echo $! > /tmp/miner.pid
+      nohup caffeinate -dimsu -w "$(cat /tmp/miner.pid)" >/dev/null 2>&1 &
+      echo $! > /tmp/caffeinate.pid
       ```
 
-      **Then verify, because both of the above have failed in practice.** A run
-      was once started with no inhibitor at all and survived only because the
-      host happened to be on mains with sleep disabled — luck, not design; and
-      the wrapper shape above died silently. `pmset -g assertions` must show the
-      assertions held by **your** `caffeinate` pid:
+      *Why prefer it rather than require it:* during one backgrounded run the
+      wrapper form was found gone, with the miner reparented to `launchd` and
+      nothing holding an assertion. **That has not reproduced** — review tried
+      three constructions, including the documented pipeline with a
+      continuously-writing payload, and the wrapper survived all three. So the
+      wrapper is not known to be broken; the `-w` form is preferred because it
+      makes the inhibitor's lifetime and pid explicit, which is what the check
+      below needs.
+
+      **Then verify, and note the check itself has a trap.** The assertions must
+      be held by **your** `caffeinate`:
 
       ```bash
-      pmset -g assertions | grep "pid $(cat /tmp/caffeinate.pid)"
+      test -s /tmp/caffeinate.pid || { echo "no caffeinate pid recorded"; exit 1; }
+      pmset -g assertions | grep "pid $(cat /tmp/caffeinate.pid)("
       ```
 
-      Finding some *other* process holding `PreventUserIdleSystemSleep` is not
-      evidence about your run — that is exactly what masked the failure the
-      first time.
+      The guard and the trailing `(` are both load-bearing. With the pid file
+      missing the command collapses to `grep "pid "`, which matches **every**
+      assertion on the machine and reports success — review reproduced exactly
+      that, matching an unrelated `sharingd` entry. Finding some *other* process
+      holding `PreventUserIdleSystemSleep` is not evidence about your run; that
+      is what masked the original failure.
 
     - **Break-testing binds you, not just the reviewer.** If you write a test to
       cover a specific defect, **reintroduce that defect and watch the test

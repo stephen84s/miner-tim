@@ -1,0 +1,9 @@
+# DOC-02 — Manual JIT gate retired in prose; a false safety claim corrected.
+
+**Status:** Completed
+
+CI-03 left three places saying the gate runs "every push" when the workflows now trigger on `pull_request` + `workflow_dispatch` only — including Operational Protocol step 6, which told a future session CI had taken the duty over. It had not: **a push to a branch with no open PR is checked by nothing.** Step 6 now states that window and inverts the advice (run it locally *more*, not less). Issue #6's retirement items done: "mandatory" dropped from the `Makefile` help text, the paste-into-MR requirement removed from the `Makefile` comment and from `verify-jit.sh`'s final `echo`, and the stale "Issue #9 tracks replacing this" deleted rather than renumbered. Both make targets kept, demoted to useful. `README.md` deliberately unchanged — "on every change ... blocks the change" got *more* accurate under CI-03. Closes #6 — but only after review found box 4 unmet (step 6 still read "must pass `make verify-jit`" and had been *strengthened*, not demoted) and five more live GitLab `#9` references, including one in `verify-jit.sh`'s own header. #2 closed separately, and one carve-out is recorded rather than hidden: `RELEASING.md` still contradicts `release.yml`, filed as #11. Three review rounds, each reviewing the previous round's *fixes*: round 2 found the same stale-numbering defect surviving inside the file the fix had rewritten, plus a "~8 minutes" figure that does not reproduce (`jit-macos` is 14.08 min, n=8); round 3 found the numbering fix had broken the very table its convention note documented — GitHub swallowed the whole task board into the blockquote, confirmed against the markdown API. Ledger: `REVIEW_PR10.md` (removed from the tree; retrieval sha in LEDGER-01).
+
+---
+
+*Full record: the `DOC-02` entry in [`AUDIT.md`](../AUDIT.md), which is authoritative. This file is the summary.*

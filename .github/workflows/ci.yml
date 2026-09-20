@@ -128,6 +128,15 @@ jobs:
           restore-keys: |
             ${{ env.CACHE_EPOCH }}-target-lint-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
 
+      - name: no review ledgers in the tree
+        run: |
+          set -euo pipefail
+          if ls -d REVIEW_*.md >/dev/null 2>&1; then
+            echo "Review ledgers must be stripped before merge (LEDGER-01):"
+            ls -d REVIEW_*.md
+            exit 1
+          fi
+
       # No `cargo fmt --check` gate, and this is a decision rather than an
       # omission (inherited verbatim in spirit from `.gitlab-ci.yml`): the
       # RandomX/JIT sources use intentional custom formatting — aligned emitter

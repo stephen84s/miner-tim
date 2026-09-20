@@ -6710,7 +6710,7 @@ Haiku subagent costs less, then asked to make the cheaper one the default.
 **Answer, from this session's own numbers rather than intuition.** Supervising
 is cheaper, for two compounding reasons. Haiku tokens are weighted far below
 Opus against the usage window; and `CLAUDE.md` is **62,625 bytes on `main`** and
-is re-sent on every turn the lead takes (59,967 when this was drafted, two
+rides along on every request the lead makes (59,967 when this was drafted, two
 merges ago — the figure moves, which is itself the point), so the lead's cost *per tool call* is
 high while a cold subagent's is low. Counted from this session's task
 notifications: Haiku implementations ran **101,608** and **111,957** subagent
@@ -6862,6 +6862,20 @@ point is one the rule's author did not know.
 Recorded for the series: **Opus, 11 findings, 11 reproduced, 0 false
 positives**, 97,823 subagent tokens. Ledger: `REVIEW_PR29.md`, removed per
 LEDGER-01; retrieve with `git show 5d1b51b:REVIEW_PR29.md`.
+
+**Correction to this entry's own premise, prompted by the user asking whether
+`CLAUDE.md` is sent back every time.** It is — it rides on every request — but
+it is **cached**: sessions run with a prompt-cache TTL, so after the first
+request that repeated prefix is billed at cache-read rates rather than
+fresh-input rates, roughly an order of magnitude cheaper. So "the lead's cost
+per tool call is high because this file is re-sent" was **overstated**, and it
+was the stated premise of the whole rule. What survives is the part that does
+not depend on it: **Haiku's weighting against the usage window is the dominant
+term**, and a cold subagent carries a far smaller context than the lead
+regardless of caching. The rule stands; one of its two reasons was weaker than
+written, and is now written as it is. Caught by a question, not by review — the
+reviewer checked the byte count and the token figures, both of which were
+about *size*, while the unexamined claim was about *billing*.
 
 **This entry's own cost, stated because the rule turns on it.** `CLAUDE.md`
 goes from **62,625** bytes to **77,003**, **+23%**, in the change whose premise

@@ -1,0 +1,9 @@
+# PERF-02 — #1 measured and reverted — null result.
+
+**Status:** Completed
+
+Giving `emit_cvt_packed_int` explicit destinations lets the f-load convert straight into `f_regs(i)`, dropping 2 FMOVs per lane. **Instruction saving exact and confirmed**: `iter_pre` 111->103, **131,072 fewer per hash**, matching the issue's arithmetic. **Time saving not measurable.** The criterion was committed *before* the first run — which earned its keep, because the write-up then got the verdict wrong twice and review caught both. First it claimed a *regression* at 11 threads; `main`'s own three runs span 0.29 pp on unmodified code against a 0.31 pp separation, so that was noise. Then it reported "all three criteria fail" while endorsing a gate that discards the runs producing two of those failures — on the admissible three runs criteria 1 and 2 are **unevaluable** rather than failed — criterion 2 would even read as passing at n=2 vs n=1 — while criterion 3, which carries no sample-size clause, still fails. The revert stands regardless: the rule is keep-only-if-all-hold, and a change that cannot be shown to clear the bar is not kept. `compiler.rs` byte-identical to `main`; the change was *correct* (`verify-jit` 92/92 both profiles) and bought nothing. Raw data committed as `PERF1_RUNS.log`. Same outcome as `emit_mem_addr`. Reviewed over several cold rounds (count in the ledger, retrieval sha in LEDGER-01): round 1 found a defect in the original write-up, and every round after it found one in the previous round's *correction* — including that `main` was the hotter (slower) arm in **all three** rounds and always ran second, so arm identity was confounded with warm-up **by construction**. Ledger: `REVIEW_PR15.md` (removed from the tree; retrieval sha in LEDGER-01).
+
+---
+
+*Full record: the `PERF-02` entry in [`AUDIT.md`](../AUDIT.md), which is authoritative. This file is the summary.*

@@ -34,15 +34,14 @@ back**. Do not quietly fix it and do not quietly write around it.
   heading style, its own depth and a dash instead of a colon. The heading is
   how entries are found later; an off-format one is effectively unfiled.
   It is **not** a table.
-- `CLAUDE.md`'s Current Task Board **is** a GitHub-flavoured markdown table.
-  Add one row immediately after the last `| **Completed** |` row and before the
-  `| **Pending** |` row. **Never leave a blank line between rows** — a blank
-  line terminates a GFM table, and this has silently dropped rows out of the
-  rendered board more than once. Escape any literal `|` inside a cell as `\|`.
-- Verify the board afterwards, do not eyeball it:
-  `gh api --method POST /markdown -f mode=gfm -f text="$(cat CLAUDE.md)"` and
-  compare the `<tr>` count against `git show origin/main:CLAUDE.md` rendered the
-  same way. It should differ by exactly the rows you added.
+- **There is no task table in `CLAUDE.md` any more.** Each task has its own
+  file, `tasks/<TASK-ID>.md`: a title line, `**Status:**`, the summary, and a
+  pointer back to the `AUDIT.md` entry. Add the task's line to
+  `tasks/README.md` as well, and update the **Current task** pointer at the top
+  of `CLAUDE.md` only when this task is the newest one.
+- Keep the task file a **summary**. The `AUDIT.md` entry is the full record;
+  copying it into `tasks/` recreates the duplication that grew the old table to
+  53% of `CLAUDE.md` and broke its markdown four times in a week.
 
 ## What a good entry contains
 

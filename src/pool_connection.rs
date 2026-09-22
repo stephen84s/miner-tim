@@ -552,6 +552,9 @@ impl PoolConnection {
                 }
                 match self.relogin_as(&addr) {
                     Ok(()) => {
+                        // A successful relogin performs a real read, which
+                        // proves the peer is alive — count it (R1-F1b).
+                        last_recv = Instant::now();
                         pending.clear();
                         continue;
                     }
@@ -605,6 +608,13 @@ impl PoolConnection {
                             if !self.reconnect() {
                                 return;
                             }
+                            // After, not before. `Ok(n)` already refreshed
+                            // `last_recv` when these bytes arrived, but
+                            // `reconnect()` retries without a bound — if it
+                            // takes longer than the silence window, the very
+                            // next iteration would fire the check against a
+                            // healthy new connection (R1-F1a).
+                            last_recv = Instant::now();
                         }
                     }
                 }
@@ -1060,14 +1070,6 @@ mod tls_tests {
     /// production call site is mutated away — so this drives the real
     /// `receiver_loop` over a real socket.
     ///
-    /// A local listener accepts, then sends a megabyte and a half with no
-    /// newline. If the buffer is bounded, the loop gives up on the stream and
-    /// calls `reconnect`, which the listener observes as a **second accept**. If
-    /// it is unbounded, the loop simply keeps buffering and no second connection
-    /// ever arrives.
-    ///
-    /// Hermetic: `127.0.0.1` on an ephemeral port — which is not in `TLS_PORTS`,
-    /// so this is plain TCP and no certificate is involved.
     /// A pool that accepts the connection, answers the login, and then says
     /// **nothing** must be detected as dead and reconnected to.
     ///
@@ -1145,6 +1147,14 @@ mod tls_tests {
         let _ = server.join();
     }
 
+    /// A local listener accepts, then sends a megabyte and a half with no
+    /// newline. If the buffer is bounded, the loop gives up on the stream and
+    /// calls `reconnect`, which the listener observes as a **second accept**. If
+    /// it is unbounded, the loop simply keeps buffering and no second connection
+    /// ever arrives.
+    ///
+    /// Hermetic: `127.0.0.1` on an ephemeral port — which is not in `TLS_PORTS`,
+    /// so this is plain TCP and no certificate is involved.
     #[test]
     fn the_receiver_loop_really_drops_a_newline_free_stream() {
         use std::io::Write as _;

@@ -7010,6 +7010,19 @@ Review also self-corrected a wrong first draft, where it had **substituted the s
 
 **Ledger:** `REVIEW_PR35.md` carried round 1 and is removed from the tree in this commit; retrieve with `git show c83938c:REVIEW_PR35.md`. The sha is **the corrected version**, where the substitution error was acknowledged — `910b55d` carried the wrong first draft and is left in history as the record that even cold review can misread a block of resets.
 
+**An agent deviation caught and fixed, recorded per the standing rule.** The
+`audit-writer` agent wrote and committed this very entry **straight onto `main`
+in the primary checkout**, while its brief named a worktree — breaking worktree
+isolation and the branch-and-PR rule at once. Local only, and recovered by
+cherry-picking onto the branch and resetting `main` to `origin/main`; a push
+would have made it far worse. It was caught by its own report, which listed
+primary-checkout paths when the brief named a worktree and claimed the branch
+was 1 commit ahead when it was 4 — the report's honesty is what exposed it.
+`audit-writer.md` now requires checking `pwd` and the branch before the first
+edit and again before committing, stopping rather than working where it landed,
+and reporting paths as seen. Third deviation folded back into an agent file
+this session.
+
 **Not established.**
 
 - **No live run against a pool that actually goes silent.** The condition is reproduced by a local listener only. The next 8-hour run is the real test.

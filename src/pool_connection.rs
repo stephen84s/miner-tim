@@ -21,6 +21,24 @@ use serde_json::Value;
 const RECV_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Stratum keepalive interval.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long the pool may say **nothing** before we treat the connection as
+/// dead and reconnect.
+///
+/// Keepalives are *writes*: they prove the socket is still writable, which a
+/// half-dead connection remains. Nothing watched the **receive** side, so a
+/// pool that simply stopped talking left the miner hashing a job the pool had
+/// long since replaced — every share found in that window submitted into a
+/// connection that never answered, and discarded with no error, no warning and
+/// no counter. Measured on a live run (GitHub #34): two windows of **121 and
+/// 88 minutes**, about 60% of the session, ending only when the pool itself
+/// closed the socket.
+///
+/// Three keepalive intervals. Real jobs arrive roughly every 15 s, so three
+/// minutes of total silence is two orders of magnitude past normal and cannot
+/// be mistaken for a quiet pool; anything much tighter would reconnect on an
+/// ordinary lull.
+const POOL_SILENCE_TIMEOUT: Duration = Duration::from_secs(3 * KEEPALIVE_INTERVAL.as_secs());
 /// Delay between reconnection attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
@@ -254,6 +272,13 @@ pub struct PoolConnection {
     session_id: Mutex<String>,
     accepted_shares: AtomicU32,
     rejected_shares: AtomicU32,
+    /// How long the pool may be silent before the connection is treated as
+    /// dead, in **milliseconds**. Defaults to `POOL_SILENCE_TIMEOUT`; tests
+    /// shorten it so the real `receiver_loop` can be driven to the timeout in
+    /// a second rather than three minutes. Exercising the loop itself is the
+    /// point — a test that called a helper would pass while the wiring was
+    /// broken, which is how PR #22 shipped green three times.
+    silence_timeout_ms: AtomicU64,
 }
 
 impl Default for PoolConnection {
@@ -313,6 +338,7 @@ impl PoolConnection {
             session_id: Mutex::new(String::new()),
             accepted_shares: AtomicU32::new(0),
             rejected_shares: AtomicU32::new(0),
+            silence_timeout_ms: AtomicU64::new(POOL_SILENCE_TIMEOUT.as_millis() as u64),
         }
     }
 
@@ -498,6 +524,10 @@ impl PoolConnection {
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         let mut last_keepalive = Instant::now();
+        // Last time the pool sent us anything at all. Not "last job" — any
+        // byte counts, so a chatty pool that happens not to be rotating jobs
+        // does not trip the silence check.
+        let mut last_recv = Instant::now();
 
         // Donation schedule reference point; the initial login is the user, so
         // we start in the User slice.
@@ -552,9 +582,11 @@ impl PoolConnection {
                     if !self.reconnect() {
                         return;
                     }
+                    last_recv = Instant::now();
                     pending.clear();
                 }
                 Ok(n) => {
+                    last_recv = Instant::now();
                     pending.extend_from_slice(&chunk[..n]);
                     match take_complete_lines(&mut pending) {
                         Ok(lines) => {
@@ -582,6 +614,7 @@ impl PoolConnection {
                     if !self.reconnect() {
                         return;
                     }
+                    last_recv = Instant::now();
                     pending.clear();
                 }
             }
@@ -590,8 +623,37 @@ impl PoolConnection {
                 last_keepalive = Instant::now();
                 let sid = self.session_id.lock().map(|s| s.clone()).unwrap_or_default();
                 if let Err(e) = self.send_message("keepalived", serde_json::json!({ "id": sid })) {
-                    log::warn!("Keepalive failed: {}", e);
+                    // Previously this only warned and carried on. A keepalive
+                    // that cannot be written is a connection that cannot carry
+                    // a share submission either, so treat it as lost (#34).
+                    log::warn!("Keepalive failed, reconnecting: {}", e);
+                    if !self.reconnect() {
+                        return;
+                    }
+                    last_recv = Instant::now();
+                    pending.clear();
+                    continue;
                 }
+            }
+
+            // The pool has said nothing for too long. See POOL_SILENCE_TIMEOUT:
+            // the socket may still be writable, so only the receive side can
+            // tell us this connection is finished.
+            let silence_limit =
+                Duration::from_millis(self.silence_timeout_ms.load(Ordering::Relaxed));
+            if last_recv.elapsed() >= silence_limit {
+                log::warn!(
+                    "No data from pool for {}s (limit {}s) — treating the connection \
+                     as dead and reconnecting. Shares found against the current job \
+                     cannot be submitted on a dead connection.",
+                    last_recv.elapsed().as_secs(),
+                    silence_limit.as_secs()
+                );
+                if !self.reconnect() {
+                    return;
+                }
+                last_recv = Instant::now();
+                pending.clear();
             }
         }
     }
@@ -1006,6 +1068,83 @@ mod tls_tests {
     ///
     /// Hermetic: `127.0.0.1` on an ephemeral port — which is not in `TLS_PORTS`,
     /// so this is plain TCP and no certificate is involved.
+    /// A pool that accepts the connection, answers the login, and then says
+    /// **nothing** must be detected as dead and reconnected to.
+    ///
+    /// This is GitHub #34, observed live: the socket stays open and writable,
+    /// so keepalives keep succeeding and prove nothing, while the miner hashes
+    /// a job the pool replaced long ago and every share it finds is submitted
+    /// into a connection that never answers. Two windows of 121 and 88 minutes
+    /// in one session, ending only when the pool finally closed the socket.
+    ///
+    /// The listener holds every socket open for the life of the test. That is
+    /// the load-bearing detail: if the server dropped the first socket the
+    /// miner would see EOF and reconnect for that reason instead, and the test
+    /// would pass against the unfixed code — exactly how the first attempt at
+    /// the flood test below was worthless. Here the **only** route to a second
+    /// accept is the silence timeout firing.
+    ///
+    /// Hermetic: `127.0.0.1` on an ephemeral port, which is not in `TLS_PORTS`,
+    /// so this is plain TCP with no certificate involved.
+    #[test]
+    fn a_silent_pool_is_detected_and_reconnected_to() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = tx.send(n as u8);
+                // Answer the login so the miner reaches its receive loop, then
+                // go quiet for good. Never close: silence, not EOF, is the
+                // condition under test.
+                let _ = sock.write_all(
+                    b"{\"id\":1,\"result\":{\"id\":\"sess\",\"job\":{\"blob\":\"00\",\
+                      \"job_id\":\"j1\",\"target\":\"ffffffff\"},\"status\":\"OK\"}}\n",
+                );
+                let _ = sock.flush();
+                held.push(sock);
+                if n >= 1 {
+                    // Second connection observed — that is the assertion.
+                    thread::sleep(Duration::from_millis(300));
+                    return;
+                }
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        // Drive the real loop to the timeout in about a second rather than
+        // three minutes. Only the window changes; the code under test is the
+        // shipping `receiver_loop`.
+        conn.silence_timeout_ms.store(600, Ordering::Relaxed);
+        conn.connect(&addr).expect("connect to the local listener");
+        // reconnect() needs both recorded, or it bails without retrying.
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(20)),
+            Ok(1),
+            "a pool that goes silent past the timeout must be treated as dead and \
+             reconnected to; no second connection means the silence went undetected, \
+             which is #34"
+        );
+        let _ = server.join();
+    }
+
     #[test]
     fn the_receiver_loop_really_drops_a_newline_free_stream() {
         use std::io::Write as _;

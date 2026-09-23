@@ -512,16 +512,6 @@ impl PoolConnection {
             "result": result
         });
 
-        // The id must be registered in `pending_shares` *before* the request
-        // is written, not after. The write releases
-        // the stream lock before returning; if the insert happened only once
-        // that call returned, the receiver thread could read and process the
-        // pool's reply for this exact id in the gap, find nothing pending,
-        // discard it uncounted, and then have this function insert an entry
-        // for a submission that had already been fully answered — later
-        // drained and miscounted as "lost" even though the pool responded.
-        // Registering first closes that window; on a write failure the entry
-        // is removed again, since the request never left the machine.
         let rpc_id = self.next_request_id();
 
         // Write and register under the STREAM lock, as one step. Two earlier
@@ -539,9 +529,17 @@ impl PoolConnection {
         // Holding the stream lock across both closes each: the receiver reads
         // under this same lock, so no reply can be handled before the entry
         // exists; and `reconnect()`/`relogin_as()` must take this lock to null
-        // the stream, so a drain can only run wholly before (we see no stream
-        // and insert nothing) or wholly after (the entry was written to the old
+        // the stream, so a drain runs wholly before (we see no stream and
+        // insert nothing) or wholly after (the entry was written to the old
         // stream, where no reply will ever be read, so "lost" is correct).
+        //
+        // What this does NOT close: `sid` above is read before any lock, and
+        // `connect()` installs the new stream before `login()` updates the
+        // session id. A submit that takes the lock in that window goes out on
+        // the new connection with the old session id. It IS registered, so the
+        // pool's answer is paired and counted — normally as a rejection, which
+        // is the pool's real verdict on it. The miscounting is closed; the
+        // stale id is not (review round 3, R3-1).
         //
         // Lock order is stream -> pending_shares. Nothing takes them the other
         // way: `drain_pending_shares` and `handle_pool_message` take
@@ -2149,6 +2147,57 @@ mod tls_tests {
             "a submission that never left the machine must not leave an orphan entry \
              in pending_shares"
         );
+    }
+
+    /// The complement of the test below: this one pins round 1's ordering.
+    /// Round 1 found that writing, releasing the stream lock, and only then
+    /// registering let the receiver handle the reply in the gap. So registration
+    /// must happen while the stream lock is still held. Hold `pending_shares`
+    /// so the submission blocks exactly at its insert, wait until the request
+    /// has reached the wire, and check the stream is still locked at that
+    /// moment. Under round 1's ordering the stream is already released there.
+    /// (Approach from review round 3, which prototyped it; R3-3.)
+    #[test]
+    fn a_submission_still_holds_the_stream_while_it_registers() {
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (read_tx, read_rx) = mpsc::channel::<()>();
+        let _server = thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("accept");
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut line = String::new();
+            let _ = BufReader::new(sock).read_line(&mut line);
+            let _ = read_tx.send(());
+            thread::sleep(Duration::from_secs(2));
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        let pending_guard = conn.pending_shares.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter =
+            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+
+        read_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the submission should reach the wire");
+        thread::sleep(Duration::from_millis(100)); // let it arrive at the insert
+
+        assert!(
+            conn.stream.try_lock().is_err(),
+            "the stream must still be locked while the share is being registered — \
+             releasing it first lets the receiver handle the reply before the entry \
+             exists, so it goes uncounted and the share is later counted lost"
+        );
+
+        drop(pending_guard);
+        submitter.join().expect("submitter thread").expect("submit succeeds");
+        assert_eq!(conn.pending_shares.lock().unwrap().len(), 1);
     }
 
     /// Round 2 of review found that registering a share *before* writing it

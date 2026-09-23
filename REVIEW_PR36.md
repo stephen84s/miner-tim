@@ -602,3 +602,16 @@ The `send_message` doc comment was updated correctly and still belongs to `send_
 Safe to run live tonight: the locking is deadlock-free, the receiver's liveness is unchanged, and every interleaving I could construct either counts correctly or is a pre-existing stale-session submit that the pool rejects visibly. If R3-2 is fixed before the run, the fix is comment-only and needs no re-review.
 
 Not verified: any timing-forced reproduction of R3-1 (a)/(b) (reasoned from the code, not executed); real pool behaviour toward a submit on an unauthenticated connection (reply vs close) — which decides whether (a) produces a login error or an EOF.
+
+### Correction to R3-1 (a) (appended; the text above is left as committed in b2c5420)
+The consequence I gave for sub-case (a) — "relogin falls to `reconnect()` (5 s)" — is wrong for the `relogin_as` path. By reading, not executed:
+- `relogin_as` runs `self.connect(&address)?` (new stream installed) then `self.login(wallet)?`. When `login` returns `Err` it returns early **without nulling the stream**, and also **skips** `set_read_timeout(RECV_POLL_INTERVAL)`.
+- `receiver_loop`'s `Err(e)` arm for the donation switch only warns; its comment ("Stream is torn down; the read below yields NotConnected") is false in this case. The loop proceeds to read from the live stream.
+- In (a) `login`'s `read_line` consumed the pool's reply to the stray submit, so the **login reply is still unread**. The receiver reads it, and `handle_pool_message` installs `result.job` — workers resume — but `session_id` is set only inside `login()`, so it stays at the **previous session's id**. Every later submit carries the stale sid (pool rejects, counted rejected and logged) until something forces a reconnect.
+- The receiver now reads with the 30 s timeout left by `connect`/`send_request`, holding the stream lock across each read, so submits and keepalives can queue behind it for up to 30 s per read.
+
+So (a)'s real outcome is a live session with a stale sid and a long read timeout, not a 5 s reconnect. This relogin fall-through (login fails after connect succeeded, stream left installed) is **pre-existing and outside this diff** — it applies to any failed donation relogin, not only this interleaving. Severity of R3-1 unchanged (minor): reachable only through the microsecond connect->login gap, or a pool that answers a failed login and keeps the socket open; the resulting rejects are counted and logged, not silent. Worth its own issue: `relogin_as` should null the stream on a `login` failure so the documented fall-through to `reconnect()` actually happens.
+
+### Verdict, stated as two questions
+- **Merge:** MERGEABLE, with three minors, all ACTIONABLE (R3-1 comment/optional generation check; R3-2 delete the stale comment — two minutes, arguably before merge; R3-3 optional round-1 ordering test). Merge remains gated on PR #35, which this is stacked on.
+- **Live run tonight:** safe. No deadlock, receiver liveness unchanged by this diff, and no interleaving loses a share from the ledger.

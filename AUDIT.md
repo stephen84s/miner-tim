@@ -7058,11 +7058,11 @@ this session.
 
 **Files changed:** `src/pool_connection.rs` (`pending_shares` map keyed by rpc id, share tracking and draining, logging updates, four new tests), `src/miner.rs` (stats counters for `lost_shares` and `pending_shares`), `src/bin/minertim.rs` (stats line formatting to show `(lost:N)` and `(pending:N)` when non-zero, final-line formatting).
 
-**Review (Sonnet, round 1): NOT MERGEABLE — 1 major, 2 minors, no blockers, 0 false positives.**
+**Review (Sonnet, round 1): NOT MERGEABLE — 1 major, 2 minors, no blockers, 0 false positives.** (93,910 subagent tokens, from the task notification.)
 
-**Review (Sonnet, round 2): NOT MERGEABLE — 1 major, 3 minors, no blockers, 0 false positives.**
+**Review (Sonnet, round 2): NOT MERGEABLE — 1 major, 3 minors, no blockers, 0 false positives.** (127,596 subagent tokens, from the task notification.)
 
-**Review (Opus, round 3): MERGEABLE — 0 blockers, 0 majors, 3 minors, 0 false positives.**
+**Review (Opus, round 3): MERGEABLE — 0 blockers, 0 majors, 3 minors, 0 false positives.** (77,269 subagent tokens, from the task notification.)
 
 **Not established.**
 

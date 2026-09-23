@@ -286,7 +286,7 @@ pub struct PoolConnection {
     accepted_shares: AtomicU32,
     rejected_shares: AtomicU32,
     /// Submissions written to the pool but not yet answered, keyed by the
-    /// JSON-RPC id `send_message_with_id` returned when they were sent. A
+    /// JSON-RPC id they were written with. A
     /// response is only ever counted against `accepted_shares` /
     /// `rejected_shares` if its id is found — and removed — here, which is
     /// what stops a keepalive response (or a late reply from a connection
@@ -513,7 +513,7 @@ impl PoolConnection {
         });
 
         // The id must be registered in `pending_shares` *before* the request
-        // is written, not after. `send_message_with_id` writes and releases
+        // is written, not after. The write releases
         // the stream lock before returning; if the insert happened only once
         // that call returned, the receiver thread could read and process the
         // pool's reply for this exact id in the gap, find nothing pending,
@@ -1046,25 +1046,20 @@ impl PoolConnection {
     }
 
     /// Write-only send — responses are handled by the receiver thread.
+    ///
+    /// The id is allocated here and deliberately not returned: callers of this
+    /// (keepalive) never register it, which is exactly why their responses are
+    /// *not* found in `pending_shares`. `submit_share` allocates its own id and
+    /// calls `write_with_id` directly, because it must register the id before
+    /// the write — see the comment there.
     fn send_message(&self, method: &str, params: Value) -> Result<(), String> {
-        self.send_message_with_id(method, params).map(|_id| ())
-    }
-
-    /// Like `send_message`, but returns the JSON-RPC id the request was sent
-    /// with, so the caller can pair a later response to it (used by
-    /// `submit_share` to key `pending_shares`; keepalive uses plain
-    /// `send_message` and never registers an id, which is exactly why its
-    /// responses are *not* found in `pending_shares`).
-    fn send_message_with_id(&self, method: &str, params: Value) -> Result<u64, String> {
-        let id = self.next_request_id();
-        self.write_with_id(id, method, params)?;
-        Ok(id)
+        self.write_with_id(self.next_request_id(), method, params)
     }
 
     /// Write a request with a caller-supplied id, rather than allocating one
     /// of its own. `submit_share` needs this: it must register the id in
     /// `pending_shares` *before* the write happens (see the comment there),
-    /// so it cannot let `send_message_with_id` pick the id after the fact.
+    /// so it cannot let the id be picked after the fact.
     fn write_with_id(&self, id: u64, method: &str, params: Value) -> Result<(), String> {
         let mut stream_guard = self
             .stream
@@ -2009,9 +2004,10 @@ mod tls_tests {
     // `handle_pool_message`/`drain_pending_shares` directly — none of them
     // calls `submit_share`, so none of them could ever notice a defect in
     // how it registers or writes a submission. Mutation testing confirmed
-    // the gap: `./scripts/mutants.sh 'submit_share|send_message_with_id'
-    // 'pool_connection::'` found 3 MISSED mutants that gutted `submit_share`
-    // and `send_message_with_id` to a no-op `Ok(...)` — i.e. nothing written
+    // the gap: `./scripts/mutants.sh 'submit_share|send_message_with_id'` (a
+    // helper since folded into `send_message`)
+    // with `'pool_connection::'` found 3 MISSED mutants that gutted `submit_share`
+    // and that helper to a no-op `Ok(...)` — i.e. nothing written
     // to the socket, no `pending_shares` entry ever created — and the full
     // suite stayed green. These tests close that: they call `submit_share`
     // itself, against a real local socket.
@@ -2067,6 +2063,36 @@ mod tls_tests {
         });
         assert_eq!(entry.job_id, "job-wire");
         assert_eq!(entry.nonce, "deadbeef");
+    }
+
+    /// `send_message` is the write path keepalives take. Mutation testing
+    /// showed it could be replaced by a no-op `Ok(())` with the whole suite
+    /// still green — nothing checked that a keepalive actually reaches the
+    /// wire, and a silent keepalive is half of what #34 was about.
+    #[test]
+    fn send_message_writes_a_request_to_the_wire() {
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("accept");
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut line = String::new();
+            BufReader::new(sock).read_line(&mut line).expect("a request line");
+            line
+        });
+
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect to the local listener");
+        conn.send_message("keepalived", serde_json::json!({ "id": "sess" }))
+            .expect("write");
+
+        let line = server.join().expect("server thread");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
+        assert_eq!(v["method"], "keepalived", "the request must reach the wire: {line}");
+        assert!(v["id"].is_u64(), "every request carries a numeric JSON-RPC id: {line}");
     }
 
     #[test]

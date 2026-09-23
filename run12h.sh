@@ -17,7 +17,7 @@ strings "$BIN" | grep -c 'No data from pool for' >/dev/null || {
     exit 1
 }
 # And the #17 share-reply pairing, since tonight's run is meant to carry both.
-strings "$BIN" | grep -q 'Share lost: rpc_id' || {
+strings "$BIN" | grep -c 'Share lost: rpc_id' >/dev/null || {
     echo "REFUSING: $BIN has no share-reply pairing (#17); build from fix/share-response-ids." >&2
     exit 1
 }

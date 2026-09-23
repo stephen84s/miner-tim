@@ -536,3 +536,17 @@ R2-1 over a live or even loopback socket under scheduler load (same
 limitation round 1 stated for its own finding, and for the same reason); the
 actual wire shape of a keepalive reply or an accepted-share reply from any
 specific real pool, including the one intended for tonight's run.
+
+## Round 3
+
+Reviewer: fresh `pr-reviewer`, raised to Opus (locking design). Scope: `036d16b..33a498a`
+(one commit, `src/pool_connection.rs` only — no JIT/bench/CI paths, nothing to hand off).
+
+### Coverage ledger
+- [ ] 1. Interleavings (submit / receiver / reconnect / relogin / connect / login)
+- [ ] 2. Lock order / deadlock
+- [ ] 3. Liveness (stream lock across blocking write)
+- [ ] 4. New deterministic test — break-tests (round-1 and round-2 orderings)
+- [ ] 5. mutants.sh reproduction
+- [ ] 6. Docs/comments accuracy
+- [ ] 7. cargo test --release, clippy

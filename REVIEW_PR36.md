@@ -543,10 +543,62 @@ Reviewer: fresh `pr-reviewer`, raised to Opus (locking design). Scope: `036d16b.
 (one commit, `src/pool_connection.rs` only — no JIT/bench/CI paths, nothing to hand off).
 
 ### Coverage ledger
-- [ ] 1. Interleavings (submit / receiver / reconnect / relogin / connect / login)
-- [ ] 2. Lock order / deadlock
-- [ ] 3. Liveness (stream lock across blocking write)
-- [ ] 4. New deterministic test — break-tests (round-1 and round-2 orderings)
-- [ ] 5. mutants.sh reproduction
-- [ ] 6. Docs/comments accuracy
-- [ ] 7. cargo test --release, clippy
+- [x] 1. Interleavings (submit / receiver / reconnect / relogin / connect / login) — R3-1
+- [x] 2. Lock order / deadlock — sound
+- [x] 3. Liveness (stream lock across blocking write) — not new, sound
+- [x] 4. New deterministic test — break-tested both orderings; R3-3
+- [x] 5. mutants.sh reproduction — reproduced exactly
+- [x] 6. Docs/comments accuracy — R3-2
+- [x] 7. cargo test --release, clippy — green
+
+### 7. Suite and lint (reproduced)
+- `rtk proxy cargo test --release` -> lib **170 passed**, 2 ignored; bin 20 passed; 0 failed.
+- `cargo clippy --all-targets --release -- -D warnings` -> clean.
+
+### 2. Lock order — sound
+Every acquisition of `stream` and `pending_shares` read in the file:
+- `submit_share`: `stream` then `pending_shares` inside the scope (the one nested pair). `session_id` is taken and released *before* `stream` (temporary dropped at the end of the `let sid` statement).
+- `send_message`, `send_request`, `set_read_timeout`, `connect`: `stream` alone.
+- `receiver_loop` read: `stream` alone, guard dropped at the end of the `read_result` block; `handle_pool_message` runs after, taking `pending_shares` alone.
+- `reconnect` / `relogin_as`: `stream` in an `if let` block (guard dropped at the block end), *then* `drain_pending_shares` taking `pending_shares` alone. Same for reconnect's retry-loop null.
+- `get_pending_shares`, `drain_pending_shares`, `handle_pool_message`: `pending_shares` alone, never calling out while holding it.
+- Tests: the new test holds `stream` then locks `pending_shares` (same order); all other tests take `pending_shares` alone.
+No path takes `pending_shares` then `stream`. No deadlock.
+
+### 3. Liveness — not new
+Round 2's `write_with_id` (and the pre-PR `send_message`) already held the stream lock across the blocking `write_all`/`flush` (10 s write timeout from `connect`). The only thing added under the lock is one uncontended-in-practice `HashMap::insert`; every other `pending_shares` holder is O(map) at worst and never blocks. Nothing can stall the receiver that could not before.
+
+### 1. Interleavings
+Traced submit (S) against receiver read (R), reconnect/relogin null+drain (D), `connect` install (C), `login` (L):
+- S vs R: the reply can only be read by a `stream.lock()` holder after the bytes are written; S writes and inserts inside one guard, so the entry exists before any read that could return the reply. Round 1 closed. Correct.
+- S vs D: D's null takes `stream`; S either sees `None` (returns `Err("Not connected")`, inserts nothing, counted nowhere — the documented found!=submitted population) or finishes write+insert on the old stream before D nulls it, and D then drains it as lost. Correct, and round 2's *drain-before-write* miscount is closed.
+
+**R3-1 (minor, pre-existing, ACTIONABLE as a comment fix; code fix optional).** The new comment claims the drain "can only run wholly before (we see no stream and insert nothing) or wholly after". There is a third outcome it omits: S takes the lock **after C has installed the new stream**. Then S writes on the *new* connection with the `sid` it read at the top of `submit_share`, *outside* any lock, and the job_id of the job it was mining. Two sub-cases, by reading:
+  - (a) S lands after C, before L's `send_request` takes the lock (a microsecond gap in `relogin_as`, which has no `RECONNECT_DELAY`). The submit goes out on an unauthenticated connection; `login`'s `read_line` then reads the pool's reply **to the submit** as the login response -> `Err("Login error: ...")` (or "Unexpected login response") -> relogin falls to `reconnect()` (5 s). The pending entry registered by S is not drained by reconnect's retry loop, so it sits in `pending_shares` until the next drain, then counts as lost. Ledger still balances (pending is counted); cost is one failed login.
+  - (b) S blocks on the lock while L holds it (TLS handshake + login RTT, since `StreamOwned` handshakes on first write), having already read the **old** sid. It then writes the old sid and old job_id on the new, logged-in session; the pool rejects it and it is counted **rejected**, which is the pool's true answer.
+  So the part of R2-1 that said "the write would then go out on the NEW connection with the old session id" is **not** closed — only the *miscounting* half is. Neither sub-case loses a share from the ledger or deadlocks, and both existed identically before PR #36 (the pre-PR `send_message` had the same window), so this is not a regression and not a blocker. Reachability is low: workers poll `get_work()` every hash and idle within one hash of `current_job = None`; a stale share must be found on the in-flight hash and its verify+submit must outlast the TCP connect in `relogin_as`. Donation rotations are the realistic trigger.
+  Fix direction if wanted: tag each `Job` with a connection generation bumped by `connect()`, and have `submit_share` refuse (under the stream lock) a job whose generation is not current — refusing is the correct outcome, the share belonged to a dead session. At minimum, correct the comment so it does not claim two outcomes where there are three.
+
+### 6. Docs
+**R3-2 (minor, ACTIONABLE).** The round-2 comment in `submit_share` (lines 514-523) was **not removed**. It sits directly above the new one and states the opposite design: "The id must be registered in `pending_shares` *before* the request is written, not after ... on a write failure the entry is removed again". Both are now false — the insert is after the write and nothing is ever removed. The function's own commentary argues with itself, which is exactly the stale-section failure `_shared-context.md` lists. Delete lines 514-523.
+
+The `send_message` doc comment was updated correctly and still belongs to `send_message`. No references to `write_with_id` remain in `src/`.
+
+### 4. The new test — break-tested
+- **Round-2 ordering** (insert before the lock, remove on write failure): `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes` **FAILED** at its first assertion (pending non-empty during the wait), 3/3 runs. (`submit_share_write_failure_leaves_nothing_pending` also failed, but only because my mutation let the `"Not connected"` early return skip the remove — an artefact, not evidence.)
+- **Round-1 ordering** (write under the lock, release, then insert): **the whole `pool_connection::` suite passes, 33/33.** No test pins that the insert happens *under* the stream lock. The new test's doc comment says so honestly ("is not what this test exercises"), so this is a gap, not a misrepresentation.
+- **Flakiness:** on the shipped code every assertion is timing-independent (the submitter is necessarily blocked while the test holds the guard; after the null it necessarily sees `None`). The 200 ms sleep can only produce a false *pass* under a round-2 regression on a badly overloaded host, never a false failure. Acceptable.
+
+**R3-3 (minor, ACTIONABLE, optional).** The round-1 regression can be pinned deterministically by the mirror image of the new test: hold `pending_shares`, start a submission, wait until a local server has *read the submit line*, then assert `conn.stream.try_lock().is_err()` (the submitter must still hold the stream while blocked on the insert); release, join, assert one entry pending. I prototyped this as a temporary test: **passes on `33a498a`, fails on the round-1 ordering** (panic at the `try_lock` assertion). Reverted; tree byte-identical to the copy taken before (`cmp` clean, `git status` clean).
+
+### 5. mutants.sh — reproduced
+`./scripts/mutants.sh 'submit_share|send_message|handle_pool_message|drain_pending_shares' 'pool_connection::'` -> **12 mutants: 7 caught, 4 unviable, 1 missed** — `pool_connection.rs:973:27: replace == with != in handle_pool_message` (the `KEEPALIVED` debug/warn log-level choice; affects no counter). Matches the author's report. The `!error.is_null()` survivor from round 2 is now killed by `a_success_reply_carrying_error_null_is_accepted_not_rejected`. Note the tool cannot express R3-1 or the round-1 ordering (a block-boundary move is not a mutant it generates).
+
+### Verdict (round 3)
+**MERGEABLE** for the purpose of tonight's run — no blocker, no major. Three minors, all ACTIONABLE, none affecting the share ledger's balance:
+- R3-1: the comment overclaims; submits can still reach a freshly installed connection with a stale sid (pre-existing, counted rejected or eventually lost, never vanishing).
+- R3-2: stale round-2 comment contradicts the code directly above it — delete it.
+- R3-3: round-1 ordering is unpinned by any test; a deterministic probe exists and was verified.
+Safe to run live tonight: the locking is deadlock-free, the receiver's liveness is unchanged, and every interleaving I could construct either counts correctly or is a pre-existing stale-session submit that the pool rejects visibly. If R3-2 is fixed before the run, the fix is comment-only and needs no re-review.
+
+Not verified: any timing-forced reproduction of R3-1 (a)/(b) (reasoned from the code, not executed); real pool behaviour toward a submit on an unauthenticated connection (reply vs close) — which decides whether (a) produces a login error or an EOF.

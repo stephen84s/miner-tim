@@ -173,6 +173,7 @@ fn main() {
         let accepted = miner.get_accepted_shares();
         let rejected = miner.get_rejected_shares();
         let lost = miner.get_lost_shares();
+        let pending = miner.get_pending_shares();
         let verify_failures = miner.get_verify_failures();
         let difficulty = miner.get_difficulty();
         let best = miner.get_best_hash_val();
@@ -238,14 +239,24 @@ fn main() {
             String::new()
         };
 
+        // Shown only when non-zero, same reasoning as `lost_str`: an
+        // outstanding submission is the normal, momentary state between
+        // write and response, not something worth a line on every tick.
+        let pending_str = if pending > 0 {
+            format!(" (pending:{})", pending)
+        } else {
+            String::new()
+        };
+
         log::info!(
-            "H/s 1m:{} 5m:{} 10m:{} | Shares: {}/{}{} (found:{}) | Diff: {} | {} elapsed ({}, avg {}) | {}",
+            "H/s 1m:{} 5m:{} 10m:{} | Shares: {}/{}{}{} (found:{}) | Diff: {} | {} elapsed ({}, avg {}) | {}",
             fmt_rate(snap.rate_1m),
             fmt_rate(snap.rate_5m),
             fmt_rate(snap.rate_10m),
             accepted,
             rejected,
             lost_str,
+            pending_str,
             share_stats.total_found,
             difficulty,
             elapsed_str,
@@ -256,8 +267,13 @@ fn main() {
     }
 
     miner.stop();
-    log::info!("Miner stopped. Final stats: {} accepted, {} rejected, {} lost",
-        miner.get_accepted_shares(), miner.get_rejected_shares(), miner.get_lost_shares());
+    log::info!(
+        "Miner stopped. Final stats: {} accepted, {} rejected, {} lost, {} pending",
+        miner.get_accepted_shares(),
+        miner.get_rejected_shares(),
+        miner.get_lost_shares(),
+        miner.get_pending_shares(),
+    );
 }
 
 /// Parse `--donate-level N` or `--donate-level=N` from the args, defaulting to

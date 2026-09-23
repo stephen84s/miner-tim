@@ -8,12 +8,17 @@ No JIT/`vm.rs` native-loop/`benches/`/CI files touched — nothing to hand off t
 ## Coverage ledger
 
 1. Concurrency/ordering (insert-vs-response race) — DONE, finding below
-2. Accounting identity (found = accepted+rejected+lost+pending) — IN PROGRESS
-3. Break-test — IN PROGRESS (author's mutants scope reproduced; registration
-   path not yet mutated)
+2. Accounting identity (found = accepted+rejected+lost+pending) — DONE
+3. Break-test — DONE (author's mutants scope reproduced exactly; broader
+   scope on `submit_share|send_message_with_id` run separately — 3 MISSED,
+   see below)
 4. Drain sites (`reconnect`/`relogin_as` only) — DONE, confirmed by reading
 5. Logging levels/volume — DONE
 6. AUDIT.md / record — DONE (no entry yet, as expected; noted what's needed)
+7. Lock ordering / deadlock — DONE, confirmed by reading `receiver_loop`
+   (stream guard scope ends before `handle_pool_message` is called) and the
+   two `relogin_as`/`reconnect` call sites (both driven from the single
+   receiver thread, never concurrently with each other)
 
 ## Established so far
 
@@ -188,24 +193,48 @@ real code is untested by design, not merely uncovered by accident.
 
 Ran the broader scope suggested:
 `./scripts/mutants.sh 'submit_share|send_message_with_id' 'pool_connection::'`
-— see run log below.
+→ **3 mutants, 0 caught, 3 MISSED**:
+```
+MISSED src/pool_connection.rs:504:9: replace submit_share -> Result<(), String> with Ok(())
+MISSED src/pool_connection.rs:993:9: replace send_message_with_id -> Result<u64, String> with Ok(0)
+MISSED src/pool_connection.rs:993:9: replace send_message_with_id -> Result<u64, String> with Ok(1)
+```
+Every mutant that guts `submit_share`/`send_message_with_id` to a no-op
+`Ok(...)` — i.e. the request is never written to the socket at all, and no
+`pending_shares` entry is ever created — survives the full `pool_connection::`
+test module untouched. No test in the suite calls `submit_share` and checks
+its effect on the wire, on `pending_shares`, or on the counters; the four new
+tests all construct `PendingShare` and drive `handle_pool_message` /
+`drain_pending_shares` directly. This confirms the registration path (the
+exact code Finding 1 is about) is untested "by design," not merely
+uncovered — the PR's break-testing claim covers `handle_pool_message` and
+`drain_pending_shares` only, never the function where the bug lives. I am
+treating this MISSED result as corroborating evidence for Finding 1 rather
+than a separate finding, per the advisor's framing: one root cause
+(insert-after-send, entirely untested), one Major.
 
 ## Deadlock / lock ordering (priority 1, second half)
 
 `send_message_with_id` locks only `stream`, writes, and drops the guard
 before returning — it never holds `stream` and `pending_shares` at once.
-`submit_share` then locks `pending_shares` alone. `handle_pool_message` reads
-the line already extracted by the receiver loop (stream lock released before
-`handle_pool_message` is called — confirmed by reading the loop around line
-640-750, and line 950's `if let Ok(guard) = self.stream.lock()` guards a
-separate, narrow operation unrelated to message handling) and locks only
-`pending_shares`. `drain_pending_shares` locks only `pending_shares`.
-`reconnect`/`relogin_as` lock `stream` (to null it) and then, separately,
-`pending_shares` (via `drain_pending_shares`), never both at once. No
-code path acquires `stream` and `pending_shares` nested inside one another in
-either order — I did not find a deadlock. (Verified by reading; did not
-attempt to force a livelock/deadlock experimentally, since no nested
-acquisition exists to race.)
+`submit_share` then locks `pending_shares` alone. In `receiver_loop`, the
+stream guard is scoped to a block (`let read_result = { let mut guard = ...
+}`) that ends *before* `self.handle_pool_message(&line)` is called a few
+lines later — confirmed by reading; the stream lock is fully released while
+`handle_pool_message` (which locks only `pending_shares`) runs. Line 950's
+`if let Ok(guard) = self.stream.lock()` guards an unrelated, narrow write
+(keepalive), also never nested with `pending_shares`. `drain_pending_shares`
+locks only `pending_shares`. `reconnect`/`relogin_as` lock `stream` (to null
+it), release it, and only then call `drain_pending_shares` (a separate,
+non-nested acquisition of `pending_shares`). Also confirmed: `relogin_as` is
+called from inside `receiver_loop` itself (the donation-rotation check near
+the top of that loop), and `reconnect()` is called from several places
+within the same loop — both run on the single receiver thread, never
+concurrently with each other. No code path acquires `stream` and
+`pending_shares` nested inside one another in either order — I did not find
+a deadlock. (Verified by reading; did not attempt to force a
+livelock/deadlock experimentally, since no nested acquisition exists to
+race.)
 
 ## Stats-line format (checked per advisor prompt)
 

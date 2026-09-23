@@ -576,6 +576,10 @@ impl PoolConnection {
     pub fn reset_share_counters(&self) {
         self.accepted_shares.store(0, Ordering::SeqCst);
         self.rejected_shares.store(0, Ordering::SeqCst);
+        // Accepted, rejected and lost are one ledger: found = all three plus
+        // whatever is still outstanding. Resetting two of them would let the
+        // arithmetic that exposed #34 silently stop balancing.
+        self.lost_shares.store(0, Ordering::SeqCst);
     }
 
     /// Spawn the receiver thread. It polls the shared stream with a short

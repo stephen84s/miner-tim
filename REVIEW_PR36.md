@@ -276,3 +276,263 @@ not a new entry). When written, it must state:
 Not verified / could not check: a genuine forced-timing reproduction of
 Finding 1 over a real (even loopback) socket under load; whether any of the
 user's external tooling parses the stats line.
+
+## Round 2
+
+Fresh reviewer, no memory of round 1's session. Reviewed `git diff
+25ab890..HEAD` (three commits: `ae9cbf2` reorders `submit_share` and adds two
+tests, `8ee12ca` adds `get_pending_shares()` + stats-line wiring, `c8bd1c0`
+folds `send_message_with_id` into `send_message`/`write_with_id` and adds a
+keepalive wire test). Round 1's ledger (`REVIEW_PR36.md` as of `25ab890`)
+reviewed for context only, not trusted for this round's claims.
+
+### Coverage ledger
+
+1. The reorder (insert-then-write) vs. `reconnect()`/`relogin_as()` interleaving — DONE, **new Major finding below**
+2. The deliberately-unshipped ordering test — DONE, judged sound
+3. Unmatched-reply logging (warn vs debug, flooding risk) — DONE, no flooding path found, but see the KEEPALIVED-heuristic note under mutants
+4. Unrecognised status counted as rejected — DONE, no counter-evidence either way (unverified against a live pool, as round 1 already flagged for the pre-existing `status=="OK"` check)
+5. `send_message_with_id` fold + keepalive wire test — DONE, sound
+6. Break-test via `./scripts/mutants.sh 'submit_share|write_with_id|send_message|handle_pool_message|drain_pending_shares' 'pool_connection::'` — DONE, 2 MISSED (both discussed below, neither is the live defect this round found)
+7. Full suite + clippy reproduced myself — DONE
+
+### Finding R2-1 (Major): the reorder trades round 1's race for a differently-shaped one — a reconnect landing between `submit_share`'s insert and its write causes a false "lost" count *and* leaks the stale request onto the new connection
+
+`submit_share` (pool_connection.rs:498-553) now:
+1. reads `session_id` into `params` (line 504-513) — **before** anything else
+2. allocates `rpc_id` (525)
+3. locks `pending_shares`, inserts the entry (527-536)
+4. calls `write_with_id(rpc_id, "submit", params)` (538) — a **separate**
+   acquisition of `self.stream`'s lock, released the instant the write
+   returns
+5. on a write error only, removes the entry again (539-542)
+
+Both `reconnect()` (784-827) and `relogin_as()` (842-866) run on the single
+receiver thread and do, in this order: null `self.stream` under its own lock
+→ **`drain_pending_shares()`** (which drains and counts-as-lost *everything*
+currently in `pending_shares`, regardless of whether it has ever been
+written to a socket) → reconnect the stream (possibly establishing a **new**
+live connection) → (for `relogin_as`/donation rotation, and for the retry
+loop in `reconnect`) log in again, which updates `session_id`.
+
+If step 3 above (the insert) completes and then the submitting thread is
+scheduled out before step 4 (the write) runs, and a reconnect's
+null+drain fires in that gap, `drain_pending_shares` removes the just-inserted
+entry — for a request that **has not been written to any socket yet** — and
+logs+counts it `lost_shares += 1`. Unlike round 1's race, this window's
+*consequence* is not bounded to CPU-instruction scale: if the reconnect
+subsequently succeeds (RECONNECT_DELAY + a real TCP connect + login,
+typically on the order of seconds), `self.stream` becomes `Some(new_stream)`
+again, and step 4 — which has no idea any of this happened — goes on to
+**write the original request onto the new connection**, carrying:
+- the **pre-reconnect** `session_id` captured back in step 1 (now stale —
+  `login()` on the new connection assigns a fresh one), and
+- `rpc_id`, which is never re-inserted into `pending_shares` (the code only
+  removes on a write *error*, never re-registers on success after an earlier
+  removal), so any reply the pool sends for this exact write can only ever
+  land in `handle_pool_message`'s unmatched-reply branch — discarded, now at
+  `warn` rather than round 1's `debug`, but still uncounted.
+
+Net effect: a share that was in fact written to a live connection (just the
+wrong one, under a session id that connection never issued) is permanently
+mis-bucketed as `lost` rather than `accepted`/`rejected`, with no way for
+the accounting to ever correct itself. The `submitted ==
+accepted+rejected+lost+pending` **identity still holds** — every id is
+removed from `pending_shares` exactly once, either by the drain or by a
+matched reply — so this is not an arithmetic corruption of round 1's kind.
+It is a mislabeling defect in exactly the population this PR exists to get
+right, and — unlike round 1's race, whose trigger was "an implausibly fast
+pool reply" — this one's trigger is **a reconnect**, which is not a rare
+event in tonight's run: donation rotation (`relogin_as`, on the schedule in
+`donate.rs`) calls `drain_pending_shares()` on every rotation, and #34's own
+silence-detection plus ordinary `Ok(0)`/read-error paths call `reconnect()`
+on every connection hiccup. Any `submit_share` call whose insert-to-write gap
+overlaps one of those events hits this.
+
+**Demonstrated** (not a genuine timing race over a real socket, for the same
+reason round 1 didn't force one — the gap is a handful of instructions and
+cannot be manufactured through socket timing). Temporarily added a test that:
+1. inserts a `PendingShare` directly (the state right after `submit_share`'s
+   insert, line 536)
+2. calls `drain_pending_shares()` (simulating a reconnect's drain landing in
+   the gap) — confirmed `lost_shares == 1`, `pending_shares` empty
+3. connects to a *second*, fresh local listener (simulating the stream
+   `reconnect()` installed) and calls `write_with_id` with the same
+   `rpc_id` and a `params` blob carrying an old, made-up session id
+   (simulating the delayed write from the original `submit_share` call)
+4. confirmed the write **succeeds**, the bytes (including the stale session
+   id) **reach the new listener**, `pending_shares` is still empty, and
+   `lost_shares` is still `1`
+
+Reverted before finishing: `diff /tmp/pool_connection.rs.orig_r2
+src/pool_connection.rs` empty, `git status --short` clean.
+
+**Suggested fix direction** (not required of me, but cheaper than it looks):
+have `submit_share` acquire the **stream** lock first, do the write, and
+*while still holding that same lock* insert into `pending_shares`, releasing
+only after both. `reconnect()`/`relogin_as()` already null `self.stream`
+under that same lock before calling `drain_pending_shares()` separately, so
+this ordering makes the two operations mutually exclusive: either the whole
+write+insert happens-before the null+drain, or the null (stream now `None`)
+happens-before the write even starts, in which case `write_with_id` fails
+cleanly with "Not connected" and nothing is written or registered. This adds
+no new stalling beyond what already exists — `write_with_id` already holds
+the stream lock for the I/O regardless; the only change is that the
+(non-blocking, non-I/O) `pending_shares` insert happens before that lock is
+released rather than after. No other code path acquires `pending_shares` and
+then `stream` in the opposite order (`handle_pool_message` and
+`drain_pending_shares` each take only `pending_shares`), so this does not
+introduce a lock-ordering deadlock.
+
+**Reachability, honestly stated, same register round 1 used:** I did not
+observe this fire against a real pool tonight and would not predict it does
+on any single share. But donation rotation is scheduled, not probabilistic —
+it *will* call `relogin_as`/`drain_pending_shares` repeatedly over 12 hours —
+and the insert-to-write gap in `submit_share` exists on every one of the
+thousands of shares that run will submit. I am treating this the same way
+round 1 treated its finding: a real, correctly-shaped, cheaply-fixed race
+that directly undermines this PR's stated purpose, on a run whose entire
+point is trustworthy share-loss evidence.
+
+### Finding R2-2 (confirmed sound): the deliberately-unshipped ordering test
+
+The comment at the end of `tls_tests` (pool_connection.rs, final block)
+explains that a socket-level "does accepted==1 after the fix" test was tried
+and found to pass identically against the pre-fix (write-then-insert)
+ordering, because `receiver_loop`'s 50ms poll interval plus a loopback round
+trip is many orders of magnitude larger than the insert/write gap it would
+need to catch. I agree with this reasoning and re-derive the same conclusion
+independently: `RECV_POLL_INTERVAL` (50ms, referenced at pool_connection.rs
+line ~811 and in the receiver loop) cannot observe an ordering gap that is
+itself sub-microsecond. Shipping a test that passes on both the fixed and
+the broken code would be exactly the failure mode `_shared-context.md`
+names. Leaving a documented comment plus the two narrower tests
+(`submit_share_registers_the_same_id_it_writes_to_the_wire`,
+`submit_share_write_failure_leaves_nothing_pending`) is the right call here.
+Worth noting for the record: my own R2-1 demonstration above *does* reach
+the reorder's actual defect deterministically, by driving the two halves
+(`drain_pending_shares`, `write_with_id`) directly rather than trying to
+force a genuine race — the same technique round 1 used for its own Finding
+1. That is why it caught something the author's mutation run (scoped to
+`submit_share|send_message_with_id`, which doesn't call `drain_pending_shares`
+or trigger a reconnect at all) could not have found: the defect is a *cross-
+function* interleaving, not a bug reachable by mutating `submit_share` in
+isolation.
+
+### Finding R2-3 (minor, logging): non-KEEPALIVED unmatched replies do not flood the log — but the KEEPALIVED classification itself is unverified against a live pool
+
+Traced every call site that writes to the pool: `login()` uses the
+synchronous `send_request`, which holds the stream lock across its own
+write+read and consumes the reply line directly — it never reaches
+`handle_pool_message`, confirmed by reading (and matches the code comment at
+pool_connection.rs ~926). Donation relogin (`relogin_as`) calls `login()`,
+same path. So neither ordinary logins nor donation rotations can trigger the
+new `warn` branch — only a genuinely unmatched id (a keepalive reply, or
+R2-1's race) can. Keepalive replies are told apart from everything else
+by `result.status == "KEEPALIVED"` (pool_connection.rs:948), a string
+literal introduced fresh in this round (`git log -p -S'"KEEPALIVED"'` shows
+only commit `ae9cbf2`, this round's fix commit — no prior test or comment in
+the repo pins this shape). I could not find any log in this worktree
+(`LIVE8H_RUN.log`, `LIVE6H_TLS_RUN.log`, `LIVE6H_TLS_NEGATIVE.log`) with a
+`RUST_LOG=debug` "Pool recv" line showing an actual keepalive reply from a
+real pool — all were run at the default `info` level, which does not print
+raw wire lines. If the pool used tonight replies to `keepalived` with any
+shape other than `{"result":{"status":"KEEPALIVED"}}` (e.g. `{"status":"OK"}`,
+matching a share accept, or no `status` field at all), every keepalive reply
+— once every `KEEPALIVE_INTERVAL` (60s), ~720 times over 12h — would land in
+the `warn` branch instead of `debug`. That is a steady drumbeat, not a
+flood, and it would not corrupt any counter (keepalive replies are never in
+`pending_shares` either way), but it would add noise to exactly the log this
+run exists to produce as evidence, and would look like 720 instances of
+"a share response was silently dropped" to anyone reading it without this
+context. Minor, not blocking — but worth a note in the AUDIT.md entry as an
+unverified assumption, same category as round 1's own "distinguishing a
+keepalive reply from a submit reply by shape alone... I did not verify."
+
+### Finding R2-4 (minor, evidence): unrecognised-status-as-rejected — no counter-evidence found either way
+
+Same conclusion round 1 reached for the pre-existing `status=="OK"` check:
+I have no live-pool evidence of an alternate "accepted" status string. The
+standard Monero-pool/XMRig-compatible protocol shape is `error` for
+rejection or `{"result":{"status":"OK"}}` for acceptance; I am not aware of
+(and did not find in this repo) any pool that signals acceptance with a
+different `status` value. Treating "neither an error nor `status=="OK"`" as
+rejected is the conservative choice and I cannot construct a plausible real
+pool response it would miscount as rejected-when-actually-accepted. Not
+independently verified against a live pool tonight.
+
+### `send_message_with_id` fold + keepalive wire test (priority 5)
+
+`send_message` now calls `write_with_id(self.next_request_id(), ...)`
+directly — same behaviour as the old `send_message_with_id(...).map(|_id|
+())`, just without the now-unnecessary intermediate function. No functional
+change for the keepalive path. `send_message_writes_a_request_to_the_wire`
+closes exactly the gap the author's own commit message names (`send_message`
+mutable to a no-op `Ok(())` survived the suite before this test existed) —
+reran the mutants scope below and confirmed it no longer survives.
+
+### Break-testing (priority 6)
+
+`./scripts/mutants.sh 'submit_share|write_with_id|send_message|handle_pool_message|drain_pending_shares' 'pool_connection::'`
+→ **13 mutants: 7 caught, 4 unviable, 2 MISSED**:
+```
+MISSED src/pool_connection.rs:948:27: replace == with != in handle_pool_message
+MISSED src/pool_connection.rs:965:20: delete ! in handle_pool_message
+```
+- Line 948 (`status == Some("KEEPALIVED")` → `!=`): flips which branch logs at
+  `debug` vs `warn`. Purely a log-level cosmetic difference — no test asserts
+  on it, no counter is touched by either branch, so this mutant is
+  legitimately outside what the current test suite can or should be expected
+  to catch without a log-capturing test. Not a bug; a documented gap.
+- Line 965 (`!error.is_null()` → `error.is_null()`): changes which messages
+  take the "Share rejected: ... {err_msg}" path. I traced the consequence: a
+  reply shaped `{"error":null,"result":{"status":"OK"}}` — a common JSON-RPC
+  2.0 convention for a *successful* response, and plausible from a real pool
+  — is handled **correctly** by the current (unmutated) code: `error` is
+  `Some(Value::Null)`, `!error.is_null()` is `false`, so the reject branch is
+  skipped and `status=="OK"` is reached normally, incrementing
+  `accepted_shares`. No test in the suite sends this exact shape, which is
+  why the mutant survives — it is a real test-coverage gap for a plausible
+  real-world message shape, but I confirmed by reading (not just by the
+  mutant surviving) that the shipped code handles it correctly today. Minor:
+  worth a test, not a live defect.
+
+Neither MISSED mutant is R2-1 — R2-1 is a cross-function interleaving this
+mutation scope cannot express (mutating `submit_share`/`write_with_id`/
+`drain_pending_shares` individually doesn't reproduce a race between them).
+
+### Verification reproduced myself
+
+- `rtk proxy cargo test --release` → 168 lib (2 ignored) + 20 bin pass, no
+  failures. Matches the +4 new tests over round 1's 164.
+- `cargo clippy --all-targets --release -- -D warnings` → clean.
+- `git status --short` clean at the end (temporary R2-1 demonstration test
+  fully reverted, confirmed byte-identical against `/tmp/pool_connection.rs.orig_r2`).
+
+### Verdict
+
+**NOT MERGEABLE, ACTIONABLE.**
+
+- Finding R2-1 (Major): the reorder closes round 1's race but opens a
+  differently-shaped one — a reconnect (donation rotation or #34's own
+  silence-detection reconnect, both of which *will* occur repeatedly over 12
+  hours) landing between `submit_share`'s insert and its write causes a
+  share to be falsely counted `lost` before it was ever sent, and then
+  written onto the *new* connection carrying a stale session id, with any
+  reply to that write permanently unmatchable. This is the same category of
+  defect round 1 blocked on, in the same function, one fix later — it is
+  cheap to close (see suggested fix direction above) and I would not ship it
+  into tonight's evidence run.
+- Findings R2-3 and R2-4 are minor and not blocking, but belong in the
+  AUDIT.md entry as documented, unverified-against-a-live-pool assumptions,
+  consistent with round 1's own standard for such claims.
+- Everything else — the deliberately-unshipped ordering test's reasoning,
+  the `send_message_with_id` fold, the keepalive wire test, clippy, the full
+  suite, the `warn`-vs-flooding analysis for logins/relogins — checks out as
+  claimed.
+
+Not verified / could not check: a genuine forced-timing reproduction of
+R2-1 over a live or even loopback socket under scheduler load (same
+limitation round 1 stated for its own finding, and for the same reason); the
+actual wire shape of a keepalive reply or an accepted-share reply from any
+specific real pool, including the one intended for tonight's run.

@@ -16,6 +16,11 @@ strings "$BIN" | grep -q 'No data from pool for' || {
     echo "REFUSING: $BIN has no silence detection; rebuild from the fix branch." >&2
     exit 1
 }
+# And the #17 share-reply pairing, since tonight's run is meant to carry both.
+strings "$BIN" | grep -q 'Share lost: rpc_id' || {
+    echo "REFUSING: $BIN has no share-reply pairing (#17); build from fix/share-response-ids." >&2
+    exit 1
+}
 
 POOL=$(grep '^POOL='    ../../../mining.conf | cut -d= -f2)
 WALLET=$(grep '^WALLET=' ../../../mining.conf | cut -d= -f2)

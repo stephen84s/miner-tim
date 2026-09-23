@@ -524,22 +524,47 @@ impl PoolConnection {
         // is removed again, since the request never left the machine.
         let rpc_id = self.next_request_id();
 
-        if let Ok(mut pending) = self.pending_shares.lock() {
-            pending.insert(
-                rpc_id,
-                PendingShare {
-                    job_id: job_id.to_string(),
-                    nonce: nonce.to_string(),
-                    sent_at: Instant::now(),
-                },
-            );
-        }
-
-        if let Err(e) = self.write_with_id(rpc_id, "submit", params) {
+        // Write and register under the STREAM lock, as one step. Two earlier
+        // orderings each left a race, both found by review:
+        //
+        //   write, then insert (round 1): the receiver could read and handle
+        //     the reply in the gap, find nothing pending, discard it uncounted
+        //     — and the entry inserted afterwards was later drained as "lost"
+        //     although the pool had answered it.
+        //   insert, then write (round 2): a reconnect could null the stream and
+        //     drain the fresh entry as "lost" in the gap, and the write would
+        //     then go out on the NEW connection with the old session id and no
+        //     entry left to pair its reply with.
+        //
+        // Holding the stream lock across both closes each: the receiver reads
+        // under this same lock, so no reply can be handled before the entry
+        // exists; and `reconnect()`/`relogin_as()` must take this lock to null
+        // the stream, so a drain can only run wholly before (we see no stream
+        // and insert nothing) or wholly after (the entry was written to the old
+        // stream, where no reply will ever be read, so "lost" is correct).
+        //
+        // Lock order is stream -> pending_shares. Nothing takes them the other
+        // way: `drain_pending_shares` and `handle_pool_message` take
+        // `pending_shares` alone, after the stream guard has been released.
+        {
+            let mut stream_guard = self
+                .stream
+                .lock()
+                .map_err(|_| "Stream mutex poisoned".to_string())?;
+            let stream = stream_guard
+                .as_mut()
+                .ok_or_else(|| "Not connected".to_string())?;
+            write_request(stream, rpc_id, "submit", params)?;
             if let Ok(mut pending) = self.pending_shares.lock() {
-                pending.remove(&rpc_id);
+                pending.insert(
+                    rpc_id,
+                    PendingShare {
+                        job_id: job_id.to_string(),
+                        nonce: nonce.to_string(),
+                        sent_at: Instant::now(),
+                    },
+                );
             }
-            return Err(e);
         }
 
         log::info!(
@@ -1049,28 +1074,17 @@ impl PoolConnection {
     ///
     /// The id is allocated here and deliberately not returned: callers of this
     /// (keepalive) never register it, which is exactly why their responses are
-    /// *not* found in `pending_shares`. `submit_share` allocates its own id and
-    /// calls `write_with_id` directly, because it must register the id before
-    /// the write — see the comment there.
+    /// *not* found in `pending_shares`. `submit_share` does its own write,
+    /// because it must register the id under the stream lock — see there.
     fn send_message(&self, method: &str, params: Value) -> Result<(), String> {
-        self.write_with_id(self.next_request_id(), method, params)
-    }
-
-    /// Write a request with a caller-supplied id, rather than allocating one
-    /// of its own. `submit_share` needs this: it must register the id in
-    /// `pending_shares` *before* the write happens (see the comment there),
-    /// so it cannot let the id be picked after the fact.
-    fn write_with_id(&self, id: u64, method: &str, params: Value) -> Result<(), String> {
         let mut stream_guard = self
             .stream
             .lock()
             .map_err(|_| "Stream mutex poisoned".to_string())?;
-
         let stream = stream_guard
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
-
-        write_request(stream, id, method, params)
+        write_request(stream, self.next_request_id(), method, params)
     }
 
     fn next_request_id(&self) -> u64 {
@@ -1903,6 +1917,27 @@ mod tls_tests {
         );
     }
 
+    /// Many pools answer an accepted share with `"error": null` alongside the
+    /// result. That is a success, and must not be read as a rejection just
+    /// because an `error` key is present. Round 2's mutation run showed this
+    /// was handled correctly but untested: deleting the `!` in
+    /// `!error.is_null()` left the suite green.
+    #[test]
+    fn a_success_reply_carrying_error_null_is_accepted_not_rejected() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.pending_shares
+            .lock()
+            .unwrap()
+            .insert(9, pending_share("job-n", "01020304"));
+
+        conn.handle_pool_message(
+            r#"{"id":9,"jsonrpc":"2.0","error":null,"result":{"status":"OK"}}"#,
+        );
+
+        assert_eq!(conn.get_accepted_shares(), 1, "error:null with status OK is an accept");
+        assert_eq!(conn.get_rejected_shares(), 0, "error:null must not count as a rejection");
+    }
+
     #[test]
     fn an_error_response_with_a_pending_id_is_rejected() {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
@@ -2116,33 +2151,64 @@ mod tls_tests {
         );
     }
 
-    // Ordering test (review Finding 1, item 2c): deliberately NOT shipped.
-    //
-    // Tried a "structural" version first — a listener that echoes the id
-    // back the instant it reads the line, run against the receiver_loop,
-    // asserting accepted==1 and lost==0 after a drain, exactly as 2c
-    // suggests as a fallback. Empirically it does not distinguish the fixed
-    // ordering from the pre-fix one: with the old insert-after-write order
-    // restored by hand (`self.write_with_id(...)?;` before the insert, the
-    // review's exact mutation), the test still passed, five runs in a row.
-    // The reason is a scale mismatch, not a flaw in the setup — the gap
-    // between `write_with_id` returning and `pending_shares.lock().insert`
-    // completing is a handful of CPU instructions (nanoseconds), while
-    // `receiver_loop` cannot even attempt to read the reply until its next
-    // `RECV_POLL_INTERVAL` tick (50ms) after the bytes have made a full
-    // loopback round trip. That is many orders of magnitude larger than the
-    // window Finding 1 describes, so a socket-level test can never force the
-    // interleaving; the race is real (see the review's own reachability
-    // discussion — ordinary thread scheduling under sustained load, not
-    // instruction count) but only reachable under genuine OS preemption
-    // between those two lines, which this test cannot manufacture without
-    // instrumenting `submit_share` itself, and the plan did not ask for
-    // that. Shipping the test anyway would be exactly the failure mode
-    // `_shared-context.md` warns about: a test that passes on both the fixed
-    // and the broken code proves nothing and would misrepresent the
-    // ordering as covered. So, per 2c's explicit fallback: relying on (a)
-    // `submit_share_registers_the_same_id_it_writes_to_the_wire` and (b)
-    // `submit_share_write_failure_leaves_nothing_pending`, plus the ordering
-    // comment on `submit_share` itself, rather than a test that cannot
-    // actually catch the defect.
+    /// Round 2 of review found that registering a share *before* writing it
+    /// let a reconnect drain the entry as "lost" in the gap, after which the
+    /// write went out on the new connection with nothing left to pair its
+    /// reply with. The fix does write-and-register as one step under the
+    /// stream lock — which, unlike the earlier orderings, can be tested
+    /// deterministically: stand in for `reconnect()` by holding that lock,
+    /// start a submission that has to block on it, and check nothing is
+    /// registered while it waits. Then null the stream, as a reconnect does.
+    ///
+    /// Under the round-2 ordering the entry exists during the wait and the
+    /// first assertion fails. (Round 1's race — a reply handled between the
+    /// write and the insert — is closed by the same lock, since the receiver
+    /// reads under it, but is not what this test exercises.)
+    ///
+    /// An earlier attempt at an ordering test was dropped for good reason: it
+    /// raced a real socket round trip against a nanosecond gap and passed on
+    /// both orderings. Holding the lock removes the timing from the question.
+    #[test]
+    fn a_submission_blocked_on_the_stream_registers_nothing_until_it_writes() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let _server = thread::spawn(move || {
+            let _held = listener.accept();
+            thread::sleep(Duration::from_secs(3));
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        // Stand in for reconnect(): it must hold this lock to null the stream.
+        let mut guard = conn.stream.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter =
+            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+        thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            conn.pending_shares.lock().unwrap().is_empty(),
+            "a submission must not be registered before it can be written — \
+             otherwise a reconnect in the gap drains it as lost and the write \
+             then lands on the new connection with nothing to pair its reply with"
+        );
+
+        *guard = None; // ...the reconnect nulls the stream,
+        drop(guard);
+        conn.drain_pending_shares(); // ...and drains.
+
+        assert!(
+            submitter.join().expect("submitter thread").is_err(),
+            "with the stream gone the submission must fail, not be written anywhere"
+        );
+        assert!(conn.pending_shares.lock().unwrap().is_empty());
+        assert_eq!(
+            conn.lost_shares.load(Ordering::Relaxed),
+            0,
+            "a share that was never written must not be counted lost"
+        );
+    }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -179,6 +180,18 @@ struct JsonRpcRequest {
     params: Value,
 }
 
+/// A `submit` request written to the pool but not yet answered, keyed by its
+/// JSON-RPC id in `PoolConnection::pending_shares`. Lets a response be paired
+/// with the submission it belongs to instead of the previous "any id-bearing,
+/// method-less message is a share response", which miscounted a keepalive
+/// error as a rejected share (GitHub #17).
+#[derive(Clone, Debug)]
+struct PendingShare {
+    job_id: String,
+    nonce: String,
+    sent_at: Instant,
+}
+
 /// Wraps either a plain TCP or TLS stream behind Read + Write.
 /// A single long-lived value, so the variant size difference is irrelevant.
 #[allow(clippy::large_enum_variant)]
@@ -272,6 +285,18 @@ pub struct PoolConnection {
     session_id: Mutex<String>,
     accepted_shares: AtomicU32,
     rejected_shares: AtomicU32,
+    /// Submissions written to the pool but not yet answered, keyed by the
+    /// JSON-RPC id they were written with. A
+    /// response is only ever counted against `accepted_shares` /
+    /// `rejected_shares` if its id is found — and removed — here, which is
+    /// what stops a keepalive response (or a late reply from a connection
+    /// already replaced) from being miscounted as a share result (#17).
+    pending_shares: Mutex<HashMap<u64, PendingShare>>,
+    /// Submissions whose connection was torn down and replaced before the
+    /// pool ever answered. Distinct from `rejected_shares`: the pool never
+    /// said no, so counting it as a rejection would blame the pool for a
+    /// local reconnect.
+    lost_shares: AtomicU32,
     /// How long the pool may be silent before the connection is treated as
     /// dead, in **milliseconds**. Defaults to `POOL_SILENCE_TIMEOUT`; tests
     /// shorten it so the real `receiver_loop` can be driven to the timeout in
@@ -338,6 +363,8 @@ impl PoolConnection {
             session_id: Mutex::new(String::new()),
             accepted_shares: AtomicU32::new(0),
             rejected_shares: AtomicU32::new(0),
+            pending_shares: Mutex::new(HashMap::new()),
+            lost_shares: AtomicU32::new(0),
             silence_timeout_ms: AtomicU64::new(POOL_SILENCE_TIMEOUT.as_millis() as u64),
         }
     }
@@ -485,7 +512,67 @@ impl PoolConnection {
             "result": result
         });
 
-        self.send_message("submit", params)
+        let rpc_id = self.next_request_id();
+
+        // Write and register under the STREAM lock, as one step. Two earlier
+        // orderings each left a race, both found by review:
+        //
+        //   write, then insert (round 1): the receiver could read and handle
+        //     the reply in the gap, find nothing pending, discard it uncounted
+        //     — and the entry inserted afterwards was later drained as "lost"
+        //     although the pool had answered it.
+        //   insert, then write (round 2): a reconnect could null the stream and
+        //     drain the fresh entry as "lost" in the gap, and the write would
+        //     then go out on the NEW connection with the old session id and no
+        //     entry left to pair its reply with.
+        //
+        // Holding the stream lock across both closes each: the receiver reads
+        // under this same lock, so no reply can be handled before the entry
+        // exists; and `reconnect()`/`relogin_as()` must take this lock to null
+        // the stream, so a drain runs wholly before (we see no stream and
+        // insert nothing) or wholly after (the entry was written to the old
+        // stream, where no reply will ever be read, so "lost" is correct).
+        //
+        // What this does NOT close: `sid` above is read before any lock, and
+        // `connect()` installs the new stream before `login()` updates the
+        // session id. A submit that takes the lock in that window goes out on
+        // the new connection with the old session id. It IS registered, so the
+        // pool's answer is paired and counted — normally as a rejection, which
+        // is the pool's real verdict on it. The miscounting is closed; the
+        // stale id is not (review round 3, R3-1).
+        //
+        // Lock order is stream -> pending_shares. Nothing takes them the other
+        // way: `drain_pending_shares` and `handle_pool_message` take
+        // `pending_shares` alone, after the stream guard has been released.
+        {
+            let mut stream_guard = self
+                .stream
+                .lock()
+                .map_err(|_| "Stream mutex poisoned".to_string())?;
+            let stream = stream_guard
+                .as_mut()
+                .ok_or_else(|| "Not connected".to_string())?;
+            write_request(stream, rpc_id, "submit", params)?;
+            if let Ok(mut pending) = self.pending_shares.lock() {
+                pending.insert(
+                    rpc_id,
+                    PendingShare {
+                        job_id: job_id.to_string(),
+                        nonce: nonce.to_string(),
+                        sent_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        log::info!(
+            "Share submitted: rpc_id={} job_id={} nonce={}",
+            rpc_id,
+            job_id,
+            nonce
+        );
+
+        Ok(())
     }
 
     pub fn get_accepted_shares(&self) -> u32 {
@@ -496,9 +583,56 @@ impl PoolConnection {
         self.rejected_shares.load(Ordering::Relaxed)
     }
 
+    /// Submissions whose connection was torn down and replaced (reconnect or
+    /// donation relogin) before the pool ever answered. Not "rejected" — the
+    /// pool never said no.
+    pub fn get_lost_shares(&self) -> u32 {
+        self.lost_shares.load(Ordering::Relaxed)
+    }
+
+    /// Submissions written to the pool with no response yet — neither
+    /// accepted, rejected, nor lost. Lets `submitted == accepted + rejected +
+    /// lost + pending` be checked from a running log, rather than only ever
+    /// balancing once every submission has finally been answered or drained.
+    pub fn get_pending_shares(&self) -> usize {
+        self.pending_shares.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    /// Remove every outstanding submission and count + log it as lost. Called
+    /// before the stream is replaced, wherever that happens — `reconnect()`
+    /// and the donation `relogin_as()` path — so a share that is about to
+    /// become unanswerable (its response, if it ever arrives, will be for a
+    /// connection that no longer exists) is not simply forgotten.
+    fn drain_pending_shares(&self) {
+        let drained: Vec<(u64, PendingShare)> = match self.pending_shares.lock() {
+            Ok(mut pending) => pending.drain().collect(),
+            Err(_) => return,
+        };
+        for (rpc_id, entry) in drained {
+            log::warn!(
+                "Share lost: rpc_id={} job_id={} nonce={} — no response before the \
+                 connection was replaced ({}s outstanding)",
+                rpc_id,
+                entry.job_id,
+                entry.nonce,
+                entry.sent_at.elapsed().as_secs(),
+            );
+            self.lost_shares.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn reset_share_counters(&self) {
         self.accepted_shares.store(0, Ordering::SeqCst);
         self.rejected_shares.store(0, Ordering::SeqCst);
+        // Accepted, rejected and lost are one ledger: for *submitted* shares,
+        // submitted == accepted + rejected + lost + still-pending. This is
+        // not the same population as the stats line's "found" count, which
+        // increments the moment a hash clears the target — before the share
+        // verifier or `submit_share` itself has had a chance to withhold or
+        // fail it, so a found share is not guaranteed ever to become a
+        // submitted one. Resetting two of these three would let the
+        // arithmetic that exposed #34 silently stop balancing.
+        self.lost_shares.store(0, Ordering::SeqCst);
     }
 
     /// Spawn the receiver thread. It polls the shared stream with a short
@@ -680,6 +814,10 @@ impl PoolConnection {
         if let Ok(mut s) = self.stream.lock() {
             *s = None;
         }
+        // Every reconnect goes through this one function, so this is the single
+        // place a submission on the old connection can be declared lost rather
+        // than left pending forever against a stream that no longer exists.
+        self.drain_pending_shares();
 
         let address = self.address.lock().map(|a| a.clone()).unwrap_or_default();
         let wallet = self.wallet.lock().map(|w| w.clone()).unwrap_or_default();
@@ -740,6 +878,10 @@ impl PoolConnection {
         if let Ok(mut s) = self.stream.lock() {
             *s = None;
         }
+        // This replaces the stream without going through `reconnect()`, so it
+        // needs its own drain — otherwise a submission sent just before a
+        // donation-slice switch is orphaned in the pending map forever.
+        self.drain_pending_shares();
         self.connect(&address)?;
         self.login(wallet)?;
         self.set_read_timeout(RECV_POLL_INTERVAL);
@@ -795,8 +937,53 @@ impl PoolConnection {
             }
         }
 
-        // Handle submit responses (has an "id" but no "method")
-        if msg.get("id").is_some() && msg.get("method").is_none() {
+        // A response candidate: has a numeric "id" and no "method" (a
+        // notification, like "job", carries a method and never an id we
+        // issued). That used to be sufficient to call it a share response,
+        // but the only *other* id-bearing, method-less messages this handler
+        // ever sees are keepalive responses — login goes through the
+        // synchronous `send_request` and never reaches here — so an errored
+        // keepalive was being counted as a rejected share. Pairing by id
+        // against `pending_shares` is what tells the two apart (#17): only an
+        // id this connection is actually waiting on for a *submit* is treated
+        // as a share result.
+        if msg.get("method").is_none()
+            && let Some(rpc_id) = msg.get("id").and_then(|v| v.as_u64())
+        {
+            let entry = self
+                .pending_shares
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&rpc_id));
+
+            let Some(entry) = entry else {
+                // A keepalive reply is unmatched *by design* — it is sent via
+                // plain `send_message`, which never registers an id — and
+                // arrives every `KEEPALIVE_INTERVAL`, so it stays at `debug`
+                // to avoid flooding the log. Anything else unmatched (a late
+                // reply after a reconnect, or an untracked request) is also
+                // the only trace the race Finding 1 fixed would ever have
+                // left, so it is worth `warn`.
+                let status = msg
+                    .get("result")
+                    .and_then(|r| r.get("status"))
+                    .and_then(|s| s.as_str());
+                if status == Some("KEEPALIVED") {
+                    log::debug!(
+                        "Pool response for rpc_id={} matches no pending share submission \
+                         (keepalive) — not counted",
+                        rpc_id,
+                    );
+                } else {
+                    log::warn!(
+                        "Pool response rpc_id={} matches no pending share submission (late \
+                         reply after a reconnect, or an untracked request)",
+                        rpc_id,
+                    );
+                }
+                return;
+            };
+
             if let Some(error) = msg.get("error")
                 && !error.is_null()
             {
@@ -804,16 +991,46 @@ impl PoolConnection {
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown");
-                log::warn!("Share rejected: {}", err_msg);
+                log::warn!(
+                    "Share rejected: rpc_id={} job_id={} nonce={} — {}",
+                    rpc_id,
+                    entry.job_id,
+                    entry.nonce,
+                    err_msg,
+                );
                 self.rejected_shares.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            if let Some(result) = msg.get("result") {
-                let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                if status == "OK" {
-                    log::info!("Share accepted by pool");
-                    self.accepted_shares.fetch_add(1, Ordering::Relaxed);
-                }
+            let status = msg
+                .get("result")
+                .and_then(|r| r.get("status"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            if status == "OK" {
+                let latency_ms = entry.sent_at.elapsed().as_millis();
+                log::info!(
+                    "Share accepted: rpc_id={} job_id={} nonce={} latency_ms={}",
+                    rpc_id,
+                    entry.job_id,
+                    entry.nonce,
+                    latency_ms,
+                );
+                self.accepted_shares.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // Neither an error nor `status == "OK"` — a shape no known
+                // pool sends, but one that must still be accounted for:
+                // the entry is already removed from `pending_shares` above,
+                // so silently falling through here would make it vanish
+                // from the found = accepted + rejected + lost + pending
+                // ledger with no trace at all.
+                log::warn!(
+                    "Share rejected: rpc_id={} job_id={} nonce={} — unrecognised status \"{}\"",
+                    rpc_id,
+                    entry.job_id,
+                    entry.nonce,
+                    status,
+                );
+                self.rejected_shares.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -852,16 +1069,19 @@ impl PoolConnection {
     }
 
     /// Write-only send — responses are handled by the receiver thread.
+    ///
+    /// The id is allocated here and deliberately not returned: callers of this
+    /// (keepalive) never register it, which is exactly why their responses are
+    /// *not* found in `pending_shares`. `submit_share` does its own write,
+    /// because it must register the id under the stream lock — see there.
     fn send_message(&self, method: &str, params: Value) -> Result<(), String> {
         let mut stream_guard = self
             .stream
             .lock()
             .map_err(|_| "Stream mutex poisoned".to_string())?;
-
         let stream = stream_guard
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
-
         write_request(stream, self.next_request_id(), method, params)
     }
 
@@ -1662,6 +1882,382 @@ mod tls_tests {
                 .verify_server_cert(&der, &[], &name, &[], rustls::pki_types::UnixTime::now())
                 .is_ok(),
             "the pinned certificate itself must be accepted, self-signed or not"
+        );
+    }
+
+    // --- GitHub #17: pair share responses by JSON-RPC id -------------------
+
+    fn pending_share(job_id: &str, nonce: &str) -> PendingShare {
+        PendingShare {
+            job_id: job_id.to_string(),
+            nonce: nonce.to_string(),
+            sent_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_share_response_with_a_pending_id_is_accepted_and_the_entry_removed() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.pending_shares
+            .lock()
+            .unwrap()
+            .insert(7, pending_share("job-a", "aabbccdd"));
+
+        conn.handle_pool_message(
+            r#"{"id":7,"jsonrpc":"2.0","result":{"status":"OK"}}"#,
+        );
+
+        assert_eq!(conn.get_accepted_shares(), 1, "the accepted counter must increment");
+        assert_eq!(conn.get_rejected_shares(), 0);
+        assert!(
+            !conn.pending_shares.lock().unwrap().contains_key(&7),
+            "the entry must be removed once its response arrives"
+        );
+    }
+
+    /// Many pools answer an accepted share with `"error": null` alongside the
+    /// result. That is a success, and must not be read as a rejection just
+    /// because an `error` key is present. Round 2's mutation run showed this
+    /// was handled correctly but untested: deleting the `!` in
+    /// `!error.is_null()` left the suite green.
+    #[test]
+    fn a_success_reply_carrying_error_null_is_accepted_not_rejected() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.pending_shares
+            .lock()
+            .unwrap()
+            .insert(9, pending_share("job-n", "01020304"));
+
+        conn.handle_pool_message(
+            r#"{"id":9,"jsonrpc":"2.0","error":null,"result":{"status":"OK"}}"#,
+        );
+
+        assert_eq!(conn.get_accepted_shares(), 1, "error:null with status OK is an accept");
+        assert_eq!(conn.get_rejected_shares(), 0, "error:null must not count as a rejection");
+    }
+
+    #[test]
+    fn an_error_response_with_a_pending_id_is_rejected() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.pending_shares
+            .lock()
+            .unwrap()
+            .insert(9, pending_share("job-b", "11223344"));
+
+        conn.handle_pool_message(
+            r#"{"id":9,"jsonrpc":"2.0","error":{"code":-1,"message":"Low difficulty share"}}"#,
+        );
+
+        assert_eq!(conn.get_rejected_shares(), 1, "the rejected counter must increment");
+        assert_eq!(conn.get_accepted_shares(), 0);
+        assert!(!conn.pending_shares.lock().unwrap().contains_key(&9));
+    }
+
+    /// The latent bug from GitHub #17: a keepalive is written through
+    /// `send_message`, which never registers a `pending_shares` entry — its id
+    /// is never a share's id. Before pairing by id, `handle_pool_message`
+    /// treated *any* id-bearing, method-less message as a share response, so
+    /// an errored keepalive answer was counted as a rejected share.
+    ///
+    /// This must FAIL on that old behaviour: break-tested by temporarily
+    /// restoring "any id without method is a share response" (dropping the
+    /// pending-map lookup) and confirming this assertion goes red before
+    /// restoring the real code.
+    #[test]
+    fn an_error_response_whose_id_is_not_pending_does_not_count_as_a_rejected_share() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        // No insert into pending_shares: id 42 was never a submission — this is
+        // the shape of an errored keepalive response.
+
+        conn.handle_pool_message(
+            r#"{"id":42,"jsonrpc":"2.0","error":{"code":-1,"message":"keepalive not recognised"}}"#,
+        );
+
+        assert_eq!(
+            conn.get_rejected_shares(),
+            0,
+            "a response whose id was never a pending share submission (e.g. a keepalive) \
+             must not be counted as a rejected share"
+        );
+        assert_eq!(conn.get_accepted_shares(), 0);
+    }
+
+    #[test]
+    fn draining_pending_shares_on_reconnect_counts_and_empties_them() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        {
+            let mut pending = conn.pending_shares.lock().unwrap();
+            pending.insert(1, pending_share("job-c", "00000001"));
+            pending.insert(2, pending_share("job-c", "00000002"));
+            pending.insert(3, pending_share("job-d", "00000003"));
+        }
+
+        // `drain_pending_shares` is the exact call `reconnect()` and
+        // `relogin_as()` make before tearing down the stream — see those two
+        // functions in `pool_connection.rs`. Driving the real `reconnect()`
+        // here would require a live socket loop; that wiring is verified by
+        // reading the two call sites, not by this test.
+        conn.drain_pending_shares();
+
+        assert_eq!(conn.get_lost_shares(), 3, "every drained entry must be counted as lost");
+        assert!(
+            conn.pending_shares.lock().unwrap().is_empty(),
+            "the pending map must be empty after draining"
+        );
+    }
+
+    /// A response whose id matches but is neither `error` nor
+    /// `result.status == "OK"` — a shape no known pool sends, but one the
+    /// accounting must not lose silently now that a matched id always
+    /// removes its `pending_shares` entry.
+    #[test]
+    fn a_result_with_an_unrecognised_status_is_counted_rejected_not_dropped() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.pending_shares
+            .lock()
+            .unwrap()
+            .insert(11, pending_share("job-e", "55667788"));
+
+        conn.handle_pool_message(
+            r#"{"id":11,"jsonrpc":"2.0","result":{"status":"WEIRD"}}"#,
+        );
+
+        assert_eq!(
+            conn.get_rejected_shares(),
+            1,
+            "an unrecognised status must be counted, not silently dropped"
+        );
+        assert_eq!(conn.get_accepted_shares(), 0);
+        assert!(!conn.pending_shares.lock().unwrap().contains_key(&11));
+    }
+
+    // --- submit_share itself (review round 2 of #17/PR #36) ----------------
+    //
+    // The four tests above all construct a `PendingShare` by hand and drive
+    // `handle_pool_message`/`drain_pending_shares` directly — none of them
+    // calls `submit_share`, so none of them could ever notice a defect in
+    // how it registers or writes a submission. Mutation testing confirmed
+    // the gap: `./scripts/mutants.sh 'submit_share|send_message_with_id'` (a
+    // helper since folded into `send_message`)
+    // with `'pool_connection::'` found 3 MISSED mutants that gutted `submit_share`
+    // and that helper to a no-op `Ok(...)` — i.e. nothing written
+    // to the socket, no `pending_shares` entry ever created — and the full
+    // suite stayed green. These tests close that: they call `submit_share`
+    // itself, against a real local socket.
+
+    #[test]
+    fn submit_share_registers_the_same_id_it_writes_to_the_wire() {
+        use std::io::Read as _;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            // Bounded, not blocking forever: a `submit_share` that silently
+            // writes nothing must fail this test promptly, not hang the
+            // whole suite. Mutation testing found exactly this gap.
+            sock.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set_read_timeout");
+            let mut buf = [0u8; 4096];
+            let n = sock
+                .read(&mut buf)
+                .expect("read (or a timeout: submit_share wrote nothing to the socket)");
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect to the local listener");
+
+        conn.submit_share("job-wire", "deadbeef", &"a".repeat(64))
+            .expect("submit_share must succeed against a connected stream");
+
+        let line = server.join().expect("server thread panicked");
+        let msg: Value =
+            serde_json::from_str(line.trim()).expect("the line on the wire must be valid JSON");
+        assert_eq!(
+            msg.get("method").and_then(|m| m.as_str()),
+            Some("submit"),
+            "submit_share must write a \"submit\" request"
+        );
+        let wire_id = msg
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .expect("the request must carry a numeric id");
+
+        let pending = conn.pending_shares.lock().unwrap();
+        let entry = pending.get(&wire_id).unwrap_or_else(|| {
+            panic!(
+                "pending_shares must contain the exact id written to the wire ({}); has: {:?}",
+                wire_id,
+                pending.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(entry.job_id, "job-wire");
+        assert_eq!(entry.nonce, "deadbeef");
+    }
+
+    /// `send_message` is the write path keepalives take. Mutation testing
+    /// showed it could be replaced by a no-op `Ok(())` with the whole suite
+    /// still green — nothing checked that a keepalive actually reaches the
+    /// wire, and a silent keepalive is half of what #34 was about.
+    #[test]
+    fn send_message_writes_a_request_to_the_wire() {
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("accept");
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut line = String::new();
+            BufReader::new(sock).read_line(&mut line).expect("a request line");
+            line
+        });
+
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect to the local listener");
+        conn.send_message("keepalived", serde_json::json!({ "id": "sess" }))
+            .expect("write");
+
+        let line = server.join().expect("server thread");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
+        assert_eq!(v["method"], "keepalived", "the request must reach the wire: {line}");
+        assert!(v["id"].is_u64(), "every request carries a numeric JSON-RPC id: {line}");
+    }
+
+    #[test]
+    fn submit_share_write_failure_leaves_nothing_pending() {
+        // Never connected — `PoolConnection::new` alone, no `connect()` — so
+        // the write inside `submit_share` must fail with no stream to write
+        // to.
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+
+        let err = conn
+            .submit_share("job-fail", "cafebabe", &"b".repeat(64))
+            .expect_err("submit_share must fail when there is no stream to write to");
+        assert!(
+            err.contains("Not connected"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            conn.pending_shares.lock().unwrap().is_empty(),
+            "a submission that never left the machine must not leave an orphan entry \
+             in pending_shares"
+        );
+    }
+
+    /// The complement of the test below: this one pins round 1's ordering.
+    /// Round 1 found that writing, releasing the stream lock, and only then
+    /// registering let the receiver handle the reply in the gap. So registration
+    /// must happen while the stream lock is still held. Hold `pending_shares`
+    /// so the submission blocks exactly at its insert, wait until the request
+    /// has reached the wire, and check the stream is still locked at that
+    /// moment. Under round 1's ordering the stream is already released there.
+    /// (Approach from review round 3, which prototyped it; R3-3.)
+    #[test]
+    fn a_submission_still_holds_the_stream_while_it_registers() {
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (read_tx, read_rx) = mpsc::channel::<()>();
+        let _server = thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("accept");
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut line = String::new();
+            let _ = BufReader::new(sock).read_line(&mut line);
+            let _ = read_tx.send(());
+            thread::sleep(Duration::from_secs(2));
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        let pending_guard = conn.pending_shares.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter =
+            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+
+        read_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the submission should reach the wire");
+        thread::sleep(Duration::from_millis(100)); // let it arrive at the insert
+
+        assert!(
+            conn.stream.try_lock().is_err(),
+            "the stream must still be locked while the share is being registered — \
+             releasing it first lets the receiver handle the reply before the entry \
+             exists, so it goes uncounted and the share is later counted lost"
+        );
+
+        drop(pending_guard);
+        submitter.join().expect("submitter thread").expect("submit succeeds");
+        assert_eq!(conn.pending_shares.lock().unwrap().len(), 1);
+    }
+
+    /// Round 2 of review found that registering a share *before* writing it
+    /// let a reconnect drain the entry as "lost" in the gap, after which the
+    /// write went out on the new connection with nothing left to pair its
+    /// reply with. The fix does write-and-register as one step under the
+    /// stream lock — which, unlike the earlier orderings, can be tested
+    /// deterministically: stand in for `reconnect()` by holding that lock,
+    /// start a submission that has to block on it, and check nothing is
+    /// registered while it waits. Then null the stream, as a reconnect does.
+    ///
+    /// Under the round-2 ordering the entry exists during the wait and the
+    /// first assertion fails. (Round 1's race — a reply handled between the
+    /// write and the insert — is closed by the same lock, since the receiver
+    /// reads under it, but is not what this test exercises.)
+    ///
+    /// An earlier attempt at an ordering test was dropped for good reason: it
+    /// raced a real socket round trip against a nanosecond gap and passed on
+    /// both orderings. Holding the lock removes the timing from the question.
+    #[test]
+    fn a_submission_blocked_on_the_stream_registers_nothing_until_it_writes() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let _server = thread::spawn(move || {
+            let _held = listener.accept();
+            thread::sleep(Duration::from_secs(3));
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        // Stand in for reconnect(): it must hold this lock to null the stream.
+        let mut guard = conn.stream.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter =
+            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+        thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            conn.pending_shares.lock().unwrap().is_empty(),
+            "a submission must not be registered before it can be written — \
+             otherwise a reconnect in the gap drains it as lost and the write \
+             then lands on the new connection with nothing to pair its reply with"
+        );
+
+        *guard = None; // ...the reconnect nulls the stream,
+        drop(guard);
+        conn.drain_pending_shares(); // ...and drains.
+
+        assert!(
+            submitter.join().expect("submitter thread").is_err(),
+            "with the stream gone the submission must fail, not be written anywhere"
+        );
+        assert!(conn.pending_shares.lock().unwrap().is_empty());
+        assert_eq!(
+            conn.lost_shares.load(Ordering::Relaxed),
+            0,
+            "a share that was never written must not be counted lost"
         );
     }
 }

@@ -394,8 +394,8 @@
 
 ## Current task
 
-**NET-02 — Detect a silent pool instead of mining a stale job forever (#34).**
-Completed. See [`tasks/NET-02.md`](tasks/NET-02.md).
+**NET-03 — Pair share submissions to pool responses by JSON-RPC id (#17).**
+Completed. See [`tasks/NET-03.md`](tasks/NET-03.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

@@ -375,6 +375,15 @@ impl Miner {
             .unwrap_or(0)
     }
 
+    /// Submissions written to the pool with no response yet. See
+    /// `PoolConnection::get_pending_shares`.
+    pub fn get_pending_shares(&self) -> usize {
+        self.pool_connection
+            .as_ref()
+            .map(|p| p.get_pending_shares())
+            .unwrap_or(0)
+    }
+
     pub fn set_thread_count(&mut self, count: u32) {
         let max_threads = thread::available_parallelism()
             .map(|n| n.get() as u32)

@@ -365,6 +365,16 @@ impl Miner {
             .unwrap_or(0)
     }
 
+    /// Shares submitted whose connection was torn down and replaced before
+    /// the pool ever answered — neither accepted nor rejected, just unheard
+    /// from (#17).
+    pub fn get_lost_shares(&self) -> u32 {
+        self.pool_connection
+            .as_ref()
+            .map(|p| p.get_lost_shares())
+            .unwrap_or(0)
+    }
+
     pub fn set_thread_count(&mut self, count: u32) {
         let max_threads = thread::available_parallelism()
             .map(|n| n.get() as u32)

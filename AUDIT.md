@@ -7086,33 +7086,35 @@ this session.
 - 3 lost shares (all named, all at rotations — see issue #32)
 - 0 unplanned disconnects
 
-**Contrast with prior run (LIVE8H_RUN_2.log, without these fixes):**
+**Contrast with the prior run, reproduced from the GitHub #34 comment thread, not from the log file directly — `LIVE8H_RUN_2.log` was deleted as stale scratch debris on 2026-10-01, before this entry was written, so these four "without fixes" numbers are no longer independently reproducible from the raw log; NET-02's own entry above cites only a mid-run snapshot (163/2, 5 unaccounted) from the same file, not these full-run totals:**
 
-| Metric | Without fixes | With fixes |
-|---|---|---|
-| Duration | 12h | 12h |
-| Accepted | 380 | 870 |
-| Rejected | 3 | 0 |
-| Lost / unaccounted | 7 | 3, all named |
-| Unplanned disconnects | 3 | 0 |
-| Silent windows | 121 + 88 min | none |
+| Metric | Without fixes | With fixes | Comparable? |
+|---|---|---|---|
+| Duration | 12h | 12h | yes |
+| Accepted | 380 | 870 | yes |
+| Rejected | 3 | 0 | **no** — NET-03 found a keepalive error could previously be miscounted as a rejected share; the two runs don't count "rejected" the same way |
+| Lost / unaccounted | 7 | 3, all named | **no** — the old figure is an arithmetic residual (found − accepted − rejected) from a mid-run snapshot; the new figure is a direct counter #36 added. Different metrics |
+| Unplanned disconnects | 3 | 0 | **no** — the silence fix's purpose is to *add* reconnects when the pool goes silent (0 fired here because it never did); whether a pool holds the connection open is that night's pool behaviour, not something attributable to either fix across two different nights |
+| Silent windows | 121 + 88 min | none | yes, and this is the one row that matters — but see below |
 
-**What this establishes.** No false reconnects, no regression — the fixes are safe and do measurable good. What it does **not** establish: **silence detection remains unexercised in production.** The condition the fix exists to catch did not occur. The 12h run neither verifies nor falsifies that the detection itself works — it cannot, because the trigger never fired. A pool that actually stops sending would be the only real test; this run shows the fix does not create problems when it is not needed.
+**What this establishes.** No false reconnects across 21 donation-rotation relogins, and no regression. **It does not establish that the fixes caused the improvement in the other rows** — three of the four comparison rows above are not like-for-like, and the accurate statement, matching the source comment's own wording, is that **the fixes are safe and show no observed harm**, not that they "did measurable good." What it also does **not** establish: **silence detection remains unexercised in production.** The condition the fix exists to catch did not occur. The 12h run neither verifies nor falsifies that the detection itself works — it cannot, because the trigger never fired. A pool that actually stops sending would be the only real test; this run shows the fix does not create problems when it is not needed.
 
 **Merge decision (2026-10-01).** The lead presented the tradeoff explicitly to the user via a multiple-choice: **"Merge anyway"** (accepting inconclusive verification), **"Run another long session"**, or **"Leave open, do something else"**. The user chose **"Merge anyway"** — explicit, informed authorization to proceed despite the known gap that silence detection remains unobserved in production until a real pool goes silent.
 
 **The merges.** Both PRs squash-merged to `main`:
 
 - **PR #35** → commit `19f3d03b65b61edff0efbc97db5dd5452931c109` ("Detect a silent pool instead of mining a stale job forever (#34) (#35)"). No conflict.
-- **PR #36** required retargeting: its base was the old PR #35 (`fix/stale-connection-detect`), which was now merged as a squash. The branch `fix/share-response-ids` was rebased; `git rebase origin/main` hit a conflict in `src/pool_connection.rs` doc comments. Conflict resolution showed the two commits being replayed (`c83938c`, `02a8027`) were already inside `main` via #35's squash, so this was not a real conflict — merely stale history. Resolved mechanically: `git rebase --onto origin/main 95148a7 fix/share-response-ids` (95148a7 being the old merge-base), which cleanly dropped the duplicate commits. Verified: no conflict markers in `src/`, 171 lib + 20 bin tests pass, `run12h.sh` carries all three `grep -q`→`grep -c` pipefail fixes from both PRs. Force-pushed, CI re-ran green on all five checks. → commit `c3f035a058f8a681e5f238dc008c360084405acd` ("Pair share submissions to pool responses by JSON-RPC id (#17) (#36)").
+- **PR #36** required retargeting: its base was the old PR #35 (`fix/stale-connection-detect`), which was now merged as a squash. The branch `fix/share-response-ids` was rebased; `git rebase origin/main` hit a conflict in `src/pool_connection.rs` doc comments between two commits being replayed, `c83938c` and `02a8027`. The precise reason, more exact than "already inside main via the squash": both are ancestors of `95148a7`, the old `fix/stale-connection-detect` tip — `02a8027`'s diff (the doc-comment move) is verbatim inside `main` today via the squash, while `c83938c` touches only `REVIEW_PR35.md`, a file that was never in `main` at all since review ledgers are never merged (PROC-07) — a separate, unrelated fact. What matters mechanically is that both commits are ancestors of the chosen `--onto` boundary, so `git rebase --onto origin/main 95148a7 fix/share-response-ids` excludes them from replay regardless of squash content, which is what made the rebase conflict-free. Verified: no conflict markers in `src/`, 171 lib + 20 bin tests pass, `run12h.sh` carries all three `grep -q`→`grep -c` pipefail fixes from both PRs. Force-pushed, CI re-ran green on all five checks. → commit `c3f035a058f8a681e5f238dc008c360084405acd` ("Pair share submissions to pool responses by JSON-RPC id (#17) (#36)").
 
 **No ledger cleanup required.** Both branches were checked for tracked `REVIEW_*.md` files via `git ls-tree -r <branch> --name-only | grep -i review`. The only matches were the `.claude/agents/*.md` definition files, not ledger files — ledgers were stored only on-branch during review and removed before the PR branches reached this state.
 
-**Current follow-up run.** A 7-hour confirmatory live run (`run7h.sh` binary from `main`, rebuilt with both merged fixes) was started 2026-10-02 at the user's request as additional evidence. **Run is still in progress.** No result yet to record. Exists to provide further data on long-run stability with both fixes deployed.
+**Current follow-up run.** A 7-hour confirmatory live run (`run7h.sh` binary from `main`, rebuilt with both merged fixes) was started 2026-10-02 at the user's request as additional evidence. Result to follow in a later `AUDIT.md` entry once it completes — not recorded here, and this entry makes no claim about its outcome.
+
+**Review (Sonnet, `pr-reviewer`, on this entry itself — this PR is docs-only, no source touched):** found 1 fixable-in-place issue, incorporated above — the entry had upgraded the source comment's "safe and does no observed harm" into "do measurable good," and three of the four comparison-table rows were not like-for-like (different counting methods or different nights' pool behaviour, not caused by the code change). Independently re-parsed `LIVE12H_FIX.log` and reconciled every headline number against the raw log rather than trusting this entry's own prose; ran `cargo test --lib` itself (171 passed) rather than reusing the cited figure; confirmed the GitHub timeline for PR #36's retarget/rebase/force-push sequence matches the story given. Also caught that this entry cited a log file (`LIVE8H_RUN_2.log`) that no longer exists in any worktree, having been deleted during this session's own cleanup — fixed above by citing the GitHub #34 comment instead. 0 false positives. Ledger `REVIEW_PR38.md`, removed from the tree before merge; retrieve with `git show e533af6:REVIEW_PR38.md`.
 
 **Not established.**
 
 - Silence detection was never exercised; whether the detection itself works remains untested in production.
 - The 180 s silence threshold (NET-02) was chosen by reasoning, not by tuning against real pools' actual quiet periods.
-- False reconnects under donation rotation without the fixes cannot be individually isolated to #34 or #17 — both improve share accounting simultaneously.
+- Whether the accepted/rejected/lost improvements between the two runs are actually attributable to #34/#17, as opposed to that night's pool simply behaving differently — three of the four comparison-table rows above are not like-for-like, so causation is not established, only that nothing regressed.
 - Whether a real pool goes silent for >180s at any point remains unobserved by this miner; tuning would require either a live event or a test harness simulating that condition.

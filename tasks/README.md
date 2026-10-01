@@ -45,3 +45,4 @@ Newest last.
 - **[NET-03](NET-03.md)** — Pair share submissions to pool responses by JSON-RPC id (#17). *(Completed)*
 - **[NET-02](NET-02.md)** — Detect a silent pool instead of mining a stale job forever (#34). *(Completed)*
 - **[LIVE-02](LIVE-02.md)** — 12-hour verification run on silent-pool and share-id fixes; merged despite inconclusive result. *(Completed)*
+- **[LIVE-03](LIVE-03.md)** — Confirmatory 7-hour live run with both fixes deployed. *(Completed)*

@@ -394,8 +394,8 @@
 
 ## Current task
 
-**LIVE-02 — 12-hour verification run on silent-pool and share-id fixes; merged despite inconclusive result.**
-Completed. See [`tasks/LIVE-02.md`](tasks/LIVE-02.md).
+**LIVE-03 — Confirmatory 7-hour live run with both fixes deployed.**
+Completed. See [`tasks/LIVE-03.md`](tasks/LIVE-03.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

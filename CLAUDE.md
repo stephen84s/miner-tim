@@ -394,8 +394,8 @@
 
 ## Current task
 
-**NET-03 — Pair share submissions to pool responses by JSON-RPC id (#17).**
-Completed. See [`tasks/NET-03.md`](tasks/NET-03.md).
+**LIVE-02 — 12-hour verification run on silent-pool and share-id fixes; merged despite inconclusive result.**
+Completed. See [`tasks/LIVE-02.md`](tasks/LIVE-02.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

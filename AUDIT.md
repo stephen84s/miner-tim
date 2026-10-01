@@ -7125,6 +7125,6 @@ this session.
 
 **Result.** Run completed successfully via its designed self-terminate (Perl alarm). Final share stats: 465 accepted, 0 rejected, 1 lost, 467 found — the one unaccounted share at final tally is an artifact of log snapshot taken mid-cycle (at the moment alarm fired), not a discrepancy. Lead independently re-ran error grep (`ERROR|panic|withheld|Failed to submit|[Rr]ejected|Pool closed|No data from pool|Keepalive failed`) against the full log: **zero matches**. No `minertim` process remains running post-termination. No silence-detection event fired — the pool remained responsive throughout (longest job gap 22 seconds, same as LIVE-02); the fix continues untested in production.
 
-**What this establishes.** Seven additional hours of safe, regression-free operation with both fixes deployed. **Not established:** whether the silence-detection path itself works; the condition it exists to catch did not occur. Like LIVE-02, this run shows the fixes do not create problems when they are not needed, and nothing more.
+**What this establishes.** Seven additional hours of safe, regression-free operation with both fixes deployed. Like LIVE-02, this run shows the fixes do not create problems when they are not needed, and nothing more.
 
-**Not established.** Silence detection remains unexercised in production; a real pool going silent is the only path that would exercise it.
+**Not established.** Whether the silence-detection path itself works — the condition it exists to catch still did not occur. Silence detection remains unexercised in production; a real pool going silent is the only path that would exercise it.

@@ -7118,3 +7118,13 @@ this session.
 - The 180 s silence threshold (NET-02) was chosen by reasoning, not by tuning against real pools' actual quiet periods.
 - Whether the accepted/rejected/lost improvements between the two runs are actually attributable to #34/#17, as opposed to that night's pool simply behaving differently — three of the four comparison-table rows above are not like-for-like, so causation is not established, only that nothing regressed.
 - Whether a real pool goes silent for >180s at any point remains unobserved by this miner; tuning would require either a live event or a test harness simulating that condition.
+
+### LIVE-03 (2026-10-02): Confirmatory 7-hour live run with both fixes deployed
+
+**Follow-up to LIVE-02.** Ran `run7h.sh` (binary from `main` at `461008a`'s predecessor, carrying both PR #35 and PR #36 fixes) against the live Monero pool for 7 hours, 2026-10-01 16:06:04Z → 23:05:59Z.
+
+**Result.** Run completed successfully via its designed self-terminate (Perl alarm). Final share stats: 465 accepted, 0 rejected, 1 lost, 467 found — the one unaccounted share at final tally is an artifact of log snapshot taken mid-cycle (at the moment alarm fired), not a discrepancy. Lead independently re-ran error grep (`ERROR|panic|withheld|Failed to submit|[Rr]ejected|Pool closed|No data from pool|Keepalive failed`) against the full log: **zero matches**. No `minertim` process remains running post-termination. No silence-detection event fired — the pool remained responsive throughout (longest job gap 22 seconds, same as LIVE-02); the fix continues untested in production.
+
+**What this establishes.** Seven additional hours of safe, regression-free operation with both fixes deployed. **Not established:** whether the silence-detection path itself works; the condition it exists to catch did not occur. Like LIVE-02, this run shows the fixes do not create problems when they are not needed, and nothing more.
+
+**Not established.** Silence detection remains unexercised in production; a real pool going silent is the only path that would exercise it.

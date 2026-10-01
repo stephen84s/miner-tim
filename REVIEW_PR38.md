@@ -150,3 +150,129 @@ Nothing here rises to major or blocker. No contradictory claims, no stale
 section arguing with a new one, no orphaned doc comments in the diff itself
 (ironic given the subject matter, but the diff is clean), heading format and
 task-board wiring both exactly match house style.
+
+## Revision after advisor consultation — retracting part of the verdict above
+
+The advisor caught two real issues my first pass under-weighted, both now
+confirmed by direct re-reading of my own evidence above. I'm retracting the
+"does not repeat this repo's overclaiming pattern" line — it does, in one
+specific place. Updated findings:
+
+### MAJOR (docs-accuracy) — the entry inverts its own primary source's framing
+
+The GitHub #34 comment I pulled verbatim (and matched numbers against)
+says, in the author's own words at the time:
+
+> "The contrast with the previous run is striking, but it is **not evidence
+> the fix worked** — the previous run's losses came from silent windows,
+> and this run had none. The honest reading: **the fix is safe and does no
+> harm**; whether it catches a real silent pool is still unobserved."
+
+AUDIT.md's LIVE-02 entry renders the same comparison as:
+
+> "**What this establishes.** No false reconnects, no regression — **the
+> fixes are safe and do measurable good**."
+
+"Does no harm" became "do measurable good." That is exactly the kind of
+upgrade-on-transcription this repo's own failure history warns about, and
+it sits right next to a section that correctly and explicitly says silence
+detection is unexercised — so the entry argues with itself: honest about
+the one thing the task brief asked me to check hardest (silence detection
+status), but overclaiming on the adjacent "did the fixes help" question in
+the same breath.
+
+The "Without fixes / With fixes" table invites exactly this reading, and
+three of its four comparison rows don't support a causal claim on inspection:
+- **Rejected 3→0**: NET-03's own entry says that before #36, an errored
+  keepalive reply could be miscounted as a rejected share. The two runs are
+  not counting "rejected" the same way — part of the drop could be a
+  counting-bug fix, not fewer actual rejections.
+- **Lost/unaccounted 7→3**: the prior number is an arithmetic residual
+  (found − accepted − rejected, per NET-02's own text, "5 unaccounted ...
+  1 error" is a *mid-run* snapshot not a final total); the new number is a
+  direct `lost_shares` counter #36 introduced. Different metrics in one row.
+- **Unplanned disconnects 3→0**: the silence fix's entire purpose is to
+  *add* a reconnect trigger. Whether the pool holds the connection open
+  that particular night is weather, not code — comparing disconnect counts
+  across two different nights' pool behaviour and crediting the difference
+  to the fix is an uncontrolled comparison, and the entry doesn't flag that.
+
+None of these numbers are fabricated — I independently reconciled the "with
+fixes" column against LIVE12H_FIX.log myself. The problem is the causal
+framing layered on top of a correlation the entry's own source already
+cautioned against. Recommend: reword "the fixes are safe and do measurable
+good" to track the source's own "the fixes are safe and do no observed
+harm" (or similar), and add one sentence noting the comparison rows are not
+on identical metrics. Fixable in place — branch is unmerged.
+
+### Correction to my own "ancestry vs content" framing — c83938c is neither
+
+I had read "already inside main via #35's squash" as true-in-content for
+both cited commits. On closer check it's only true for one:
+- `02a8027` touches `src/pool_connection.rs` — confirmed its diff content
+  (R1-F1a/R1-F1b, the doc-comment move) is verbatim in `main` today.
+- `c83938c` touches only `REVIEW_PR35.md` — and `git show main:REVIEW_PR35.md`
+  fails (file doesn't exist in main). Its content was never "inside main"
+  by the squash or otherwise; ledger files are deliberately never merged
+  (PROC-07), which is a separate, unrelated reason it drops out cleanly.
+
+Mechanically, `git merge-base --is-ancestor c83938c 95148a7` and the same
+for `02a8027` both return YES — i.e. both commits predate the chosen
+`--onto` boundary (95148a7) on the branch's own history, which is *why*
+`git rebase --onto origin/main 95148a7 fix/share-response-ids` excludes
+them from replay at all (standard `--onto` range semantics: anything
+reachable from the old base is simply never replayed). That's a more
+mundane and fully correct explanation of "not a real conflict" than "their
+content was already inside main" — the second clause doesn't hold for
+c83938c. The --onto command itself, and the overall "not a real conflict,
+merely stale history" conclusion, are both right; the one-sentence
+just-so explanation for *why* is imprecise about one of its two named
+commits. Minor, not major — doesn't change the verdict, but should be
+tightened if this entry is ever revised.
+
+### Confirmed (closes an open item from my first pass)
+
+Checked "21 donation rotations" and "3 lost shares, all at rotations"
+directly against LIVE12H_FIX.log rather than taking the GH comment's word
+for it:
+- The 21 non-initial logins come in groups of 3 ("mining to Author" /
+  "mining to Xmrig" / "mining to User"), confirming they are donation
+  rotations, not reconnects of another kind.
+- All three `Share lost:` WARN lines (rpc_id=882, 1550, 1569) have
+  timestamps that land exactly on a donation-rotation login line
+  (17:22:28, 22:22:28, 22:27:28). "All at rotations" holds.
+
+n=4320 in the entry is 12h × 360 (10s cadence), i.e. derived/expected, not
+counted — my own parse found n=4315/4316 actual stats lines. Immaterial
+(labelled descriptive-only) but worth naming as derived rather than counted.
+
+### Process note — my own working-rule slip, disclosed
+
+While checking the "171 lib + 20 bin" test count I ran
+`git checkout main -- .` directly in this PR-branch worktree to get a clean
+`main`-tree test run, without checking `git status` first. This is contrary
+to working rule 4 (reviewers don't touch the working tree apart from the
+ledger). I restored the three affected files
+(`git checkout HEAD -- AUDIT.md CLAUDE.md tasks/README.md`) and confirmed
+`git status --short` was clean afterward, but I did not capture a
+pre-checkout status, so I cannot positively rule out that the worktree had
+unrelated uncommitted author changes outside those three files at the
+moment I ran it (the three files I overwrote are also the only three this
+PR touches besides tasks/LIVE-02.md, which checkout wouldn't have deleted
+since it's new/untracked-to-main — so the blast radius was almost
+certainly limited to the PR's own diff, but I'm not asserting more than I
+can show).
+
+## Revised verdict
+
+**Mergeable once the "do measurable good" framing is reworded** to match
+what the entry's own source (the GitHub #34 comment) actually concluded —
+this is a docs-accuracy correction, not a blocker, but it should happen
+*before* merge since the branch is still open and in-place correction is
+still available (CLAUDE.md: an unmerged entry "may still be edited in
+place"). After merge it would need an appended correction instead, and
+readers would trust the overclaiming framing in the meantime. Everything
+else — every number I could independently trace to a log file, a `gh`
+query, or a local test run — reconciled. The entry's explicit "Not
+established" section and its honesty about silence detection remaining
+unexercised are both solid and should be kept as-is.

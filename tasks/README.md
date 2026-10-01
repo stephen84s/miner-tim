@@ -42,3 +42,4 @@ Newest last.
 - **[PROC-07](PROC-07.md)** — No-ledgers-on-main rule enforced (#19). *(Completed)*
 - **[PROC-08](PROC-08.md)** — Delegate the mechanical work to Haiku; keep the judgement. *(Completed)*
 - **[DOC-04](DOC-04.md)** — Split the task board out of CLAUDE.md into tasks/. *(Completed)*
+- **[NET-02](NET-02.md)** — Detect a silent pool instead of mining a stale job forever (#34). *(Completed)*

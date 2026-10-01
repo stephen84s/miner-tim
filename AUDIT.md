@@ -6971,3 +6971,62 @@ Three smaller corrections: the byte count (39,856 claimed, **40,381** measured),
 Recorded for the tier series: **Sonnet, 5 findings, 5 reproduced, 0 false positives**, 131,512 subagent tokens. Ledger: `REVIEW_PR33.md`, removed per LEDGER-01; retrieve with `git show 302a744:REVIEW_PR33.md`.
 
 **Not established (from review):** whether the original one-off `caffeinate` disappearance happened in an invocation context not reproduced here — an interactive Terminal session, say. Observed once, not seen since.
+
+### NET-02 (2026-09-23): Detect a silent pool instead of mining a stale job forever (GitHub #34)
+
+A pool that stops sending but leaves the TCP socket open left the miner hashing a job the pool had long since replaced. Every share found in that window was submitted into a connection that never answered and discarded with **no error, no warning and no counter**.
+
+Measured on the 12-hour live run (`LIVE8H_RUN_2.log`): two windows of **121 and 88 minutes — 209 minutes, about 60% of the session** — ending only when the pool finally closed the socket. The arithmetic was the only visible symptom: `found:170` against `Shares: 163/2` = 165 accounted for, **5 unaccounted with only 1 error in the entire log**.
+
+**Why nothing caught it.** Keepalives are *writes*. They proved the socket was still writable, which a half-dead connection remains, and said nothing about whether the peer was still talking. Nothing watched the receive side, so "silent for two hours" was indistinguishable from "quiet pool".
+
+**The fix.** Three changes:
+
+1. **`POOL_SILENCE_TIMEOUT`** — 3 × `KEEPALIVE_INTERVAL` (180 s). Derived rather than picked: real jobs arrive roughly every 15 s, so three minutes of *total* silence is two orders of magnitude past normal and cannot be mistaken for an ordinary lull.
+2. **`last_recv`** tracked in `receiver_loop`, refreshed on any successful read and reset after every reconnect.
+3. **A failed keepalive now reconnects** rather than warning and continuing — a connection that cannot carry a keepalive cannot carry a share submission either.
+
+This is a small change because the recovery machinery already works. During a live DNS failure the miner correctly cleared the job, idled its workers and reconnected in 15 seconds. #34 was never a missing recovery path — only a missing trigger.
+
+**The test drives the real `receiver_loop`.** `a_silent_pool_is_detected_and_reconnected_to` runs the shipping receiver loop against a local listener that answers the login, then goes silent and **holds every socket open for the life of the test**.
+
+That last part is load-bearing. If the server dropped the socket, the miner would see EOF and reconnect *for that reason*, and the test would pass against the unfixed code — exactly how SEC-03's flood test was worthless on its first attempt. Here the **only** route to a second accept is the silence timeout firing.
+
+The silence window is an injectable field (`silence_timeout_ms`) so the test reaches timeout in ~600 ms rather than three minutes. Only the window changes; the code under test is the shipping loop, not a helper — the distinction PR #22 took three attempts to learn.
+
+**Break-tested:** removing the silence check fails the test with its own diagnostic ("no second connection means the silence went undetected, which is #34"); source restored `cmp` byte-identical.
+
+**Files changed:** `src/pool_connection.rs` (the `POOL_SILENCE_TIMEOUT` constant, the `silence_timeout_ms` field on `PoolConnection`, five sites where `last_recv` is reset, the failed-keepalive reconnect, the silence detection check, and one new test in `tls_tests`).
+
+**Review (Sonnet, round 1): MERGEABLE, no blockers, no majors, four minors, 0 false positives — all fixed.**
+
+**R1-F1** — the "reset `last_recv` after every reconnect" invariant held at **3 of 5** sites. Two were missing: the `Err(overflow)` arm reset only via `Ok(n)` *before* calling the unbounded `reconnect()`, and `relogin_as()`'s success arm (donation rotation) never reset at all despite `login()` performing a real read. Both **over**-trigger rather than under-trigger — a spurious reconnect idling workers for `RECONNECT_DELAY`, self-healing in one cycle, never a missed detection. Fixed at both sites; all five now reset after the call returns.
+
+**R1-F2** — an **orphaned doc comment**. The new test's doc block was spliced under the flood test's, so the merged block documented the new test while `the_receiver_loop_really_drops_a_newline_free_stream` had none. Moved back.
+
+Review also self-corrected a wrong first draft, where it had **substituted the silence branch for the oversized-line branch** while checking the resets. That error was **not** silently fixed — it was recorded in the ledger at the step it occurred (`910b55d`), then **explicitly corrected before reporting** (`c83938c`), a path review itself chose rather than leaving the draft standing.
+
+**Verification:** 160 lib + 20 bin tests pass (one new test); `cargo clippy --all-targets --release -- -D warnings` clean. Break-tested by mutation: silence check removed, test fails with the diagnostic; source restored, `cmp` byte-identical.
+
+**Ledger:** `REVIEW_PR35.md` carried round 1 and is removed from the tree in this commit; retrieve with `git show c83938c:REVIEW_PR35.md`. The sha is **the corrected version**, where the substitution error was acknowledged — `910b55d` carried the wrong first draft and is left in history as the record that even cold review can misread a block of resets.
+
+**An agent deviation caught and fixed, recorded per the standing rule.** The
+`audit-writer` agent wrote and committed this very entry **straight onto `main`
+in the primary checkout**, while its brief named a worktree — breaking worktree
+isolation and the branch-and-PR rule at once. Local only, and recovered by
+cherry-picking onto the branch and resetting `main` to `origin/main`; a push
+would have made it far worse. It was caught by its own report, which listed
+primary-checkout paths when the brief named a worktree and claimed the branch
+was 1 commit ahead when it was 4 — the report's honesty is what exposed it.
+`audit-writer.md` now requires checking `pwd` and the branch before the first
+edit and again before committing, stopping rather than working where it landed,
+and reporting paths as seen. Third deviation folded back into an agent file
+this session.
+
+**Not established.**
+
+- **No live run against a pool that actually goes silent.** The condition is reproduced by a local listener only. The next 8-hour run is the real test.
+- **The 180 s threshold is reasoned, not tuned.** No survey of real pools' quiet periods backs the specific number. Too tight would reconnect on an ordinary lull; this is deliberately generous.
+- **R1-F3, a known gap:** no test enforces "reset after, not before, a call that can block indefinitely" — which is exactly why R1-F1 shipped green. Review break-tested it by moving the silence branch's reset before its `reconnect()`; the suite still passed. Covering that path remains an open task.
+- **R1-F4, noted not fixed:** the new test's receiver thread is spawned and never joined, retrying a dead address for the life of the test binary. The adjacent flood test has the same shape.
+- **Shares lost in the window are still not counted.** #34 also suggested counting a share that gets no response; this change does not, so `found` minus (`accepted` + `rejected`) remains the only way to see them.

@@ -66,6 +66,31 @@ If the brief does not tell you the tier or the counts, **ask for them rather
 than guessing or omitting the paragraph.** A series with gaps cannot answer the
 question it exists for.
 
+## Confirm you are in the right tree before you write anything
+
+Your brief names a worktree. **Verify you are actually in it before the first
+edit, and again before committing:**
+
+```bash
+pwd && git rev-parse --abbrev-ref HEAD
+```
+
+The branch must be the feature branch, never `main`. If `pwd` is the primary
+checkout or the branch is `main`, **stop and say so** — do not edit, do not
+commit, do not "helpfully" work where you landed.
+
+This is written down because it happened: an entry was written and committed
+straight onto `main` in the primary checkout while the brief named a worktree,
+breaking two rules at once — worktree isolation, and `main` being
+protected-and-PR-only. It was local and recoverable by cherry-picking onto the
+branch and resetting `main`, but a push would have made it a mess. A `cd` at
+the top of a script does not survive the way you might assume across separate
+tool calls; re-check rather than trust it.
+
+Report the paths you wrote **as you saw them**, including the directory. A
+report listing primary-checkout paths when the brief named a worktree is how
+this was caught.
+
 ## Finishing
 
 Commit the documentation files only. Do not push, do not open or merge a PR,

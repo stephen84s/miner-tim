@@ -7030,3 +7030,45 @@ this session.
 - **R1-F3, a known gap:** no test enforces "reset after, not before, a call that can block indefinitely" — which is exactly why R1-F1 shipped green. Review break-tested it by moving the silence branch's reset before its `reconnect()`; the suite still passed. Covering that path remains an open task.
 - **R1-F4, noted not fixed:** the new test's receiver thread is spawned and never joined, retrying a dead address for the life of the test binary. The adjacent flood test has the same shape.
 - **Shares lost in the window are still not counted.** #34 also suggested counting a share that gets no response; this change does not, so `found` minus (`accepted` + `rejected`) remains the only way to see them.
+
+### NET-03 (2026-09-23): Pair share submissions to pool responses by JSON-RPC id (GitHub #17)
+
+**Problem.** Every request already carried a JSON-RPC id and it was thrown away, so a pool reply could not be paired with its submission. On the 12-hour live run three replies arrived in one second with ≥2 submissions outstanding; which one was rejected was unknowable.
+
+**Latent miscount found during review.** Any reply with an `id` and no `method` was counted as a share reply. Logins use a synchronous path, so what reached the handler was submits and **keepalives** — a keepalive answered with an error was counted as a **rejected share**.
+
+**The fix.** Outstanding submissions recorded in `pending_shares` keyed by rpc id; submit/accept/reject logs name `rpc_id`, `job_id`, `nonce` (and latency on accept). Only pending ids count as shares. Replies with an unrecognised status count as rejected (logged `warn`) rather than vanishing. Unmatched replies log at `warn` except `KEEPALIVED`, which stays `debug`. Shares outstanding when a connection is replaced are drained and counted **lost** (`lost_shares`), at both paths that replace a live stream: `reconnect()` and `relogin_as()`. Stats line shows `(lost:N)` and `(pending:N)` when non-zero; final line always shows both. `reset_share_counters` resets `lost` too.
+
+**Three review rounds; rounds 2 and 3 each found a defect in the fix for the prior round's finding.**
+- **Round 1 (Sonnet): NOT MERGEABLE.** Write-then-register let a fast reply be handled before the entry existed — discarded uncounted, and the entry later drained as **lost** though the pool answered. Also: `submit_share` had no test — `mutants.sh 'submit_share|send_message_with_id' 'pool_connection::'` gave 3 mutants, **0 caught**.
+- **Round 2 (Sonnet): NOT MERGEABLE.** Round 1's fix (register-then-write) let a **reconnect** null the stream and drain the fresh entry as lost in the gap, after which the write went out on the new connection with the old session id and nothing to pair its reply with. Triggered by reconnects, which donation rotations cause several times a night — more reachable than round 1's race.
+- **Round 3 (Opus, raised because the fix became a locking design): MERGEABLE, safe to run live.** Three minors, all fixed: a stale round-2 comment saying the opposite of the code (deleted); a comment overclaiming that a drain runs "wholly before or wholly after" a submit — there is a third case where `connect()` installs the new stream before `login()` updates the session id, so a submit there uses the old id (still registered and its reply counted, so miscounting is closed but the stale id is not) (corrected); and no test pinning round 1's ordering (added). It also found a **pre-existing** defect outside the diff — a failed `relogin_as` leaves a live unauthenticated stream with a stale session and 30 s read timeout — filed as **#37**. Round 3 found the lead's sealed prediction and went further.
+
+**Final design.** `submit_share` takes the stream lock, writes, and registers the entry **while holding it**. The receiver reads under that same lock, so no reply is handled before the entry exists; `reconnect()`/`relogin_as()` must take that lock to null the stream, so a drain runs wholly before (no stream, nothing registered) or wholly after (written to the old stream — "lost" is correct). Lock order stream → pending_shares, never reversed.
+
+**Two deterministic ordering tests**, where the round-1 attempt at one had to be abandoned because it raced a socket round trip against a nanosecond gap and passed on both orderings. `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes` holds the stream lock and asserts nothing is registered while the submit waits — **fails on round 2's ordering**. `a_submission_still_holds_the_stream_while_it_registers` holds `pending_shares` and asserts the stream is still locked at the insert — **fails on round 1's ordering**. Both break-tested, source restored `cmp` byte-identical.
+
+**Dead indirection removed twice**: `send_message_with_id` and then `write_with_id` each became single-use; their surviving mutants were an artefact of an unused return value, not a test gap. Removing the first exposed a real gap underneath — `send_message` itself could be a no-op with the suite green — closed by `send_message_writes_a_request_to_the_wire`. Also added: a success reply with `"error": null` counts as accepted.
+
+**Mutation testing:** `mutants.sh 'submit_share|send_message|handle_pool_message|drain_pending_shares' 'pool_connection::'` → 12 mutants: 7 caught, 4 unviable, **1 missed** — the `KEEPALIVED` equality that only chooses `debug` vs `warn` for an unmatched keepalive and counts nothing.
+
+**Verification:** 171 lib + 20 bin pass; clippy clean.
+
+**Ledger:** `REVIEW_PR36.md`, rounds 1–3; retrieve with `git show 346a318:REVIEW_PR36.md`. The lead removes it before merge.
+
+**Files changed:** `src/pool_connection.rs` (`pending_shares` map keyed by rpc id, share tracking and draining, logging updates, four new tests), `src/miner.rs` (stats counters for `lost_shares` and `pending_shares`), `src/bin/minertim.rs` (stats line formatting to show `(lost:N)` and `(pending:N)` when non-zero, final-line formatting).
+
+**Review (Sonnet, round 1): NOT MERGEABLE — 1 major, 2 minors, no blockers, 0 false positives.** (93,910 subagent tokens, from the task notification.)
+
+**Review (Sonnet, round 2): NOT MERGEABLE — 1 major, 3 minors, no blockers, 0 false positives.** (127,596 subagent tokens, from the task notification.)
+
+**Review (Opus, round 3): MERGEABLE — 0 blockers, 0 majors, 3 minors, 0 false positives.** (77,269 subagent tokens, from the task notification.)
+
+**Not established.**
+
+- No live evidence yet — tonight's 12-hour run uses a binary with #35 and this change.
+- The drain wiring into `reconnect()`/`relogin_as()` is covered by reading, not by a test.
+- The stale-session-id window after `connect()` and before `login()` is not closed (counting is correct; the id is not).
+- Whether real pools answer keepalives with status `KEEPALIVED` is unverified; if not, ~720 keepalive replies over 12 h log at `warn` — noise, not miscounting.
+- Whether any pool answers an *accepted* share with a status other than `"OK"`; if so this change would count it as rejected.
+- A late reply arriving after its entry was drained is logged and not counted, so a share counted lost may conceivably have been accepted; the pool dashboard is the authority.

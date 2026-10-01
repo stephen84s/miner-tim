@@ -7072,3 +7072,47 @@ this session.
 - Whether real pools answer keepalives with status `KEEPALIVED` is unverified; if not, ~720 keepalive replies over 12 h log at `warn` — noise, not miscounting.
 - Whether any pool answers an *accepted* share with a status other than `"OK"`; if so this change would count it as rejected.
 - A late reply arriving after its entry was drained is logged and not counted, so a share counted lost may conceivably have been accepted; the pool dashboard is the authority.
+
+### LIVE-02 (2026-10-01): Verify silent-pool fix and share-id pairing under 12-hour load, then merge despite inconclusive result
+
+**Background.** PR #35 fixes GitHub #34 (silent pool detection) and PR #36 stacked on it fixes GitHub #17 (share submission pairing by JSON-RPC id). Both PRs had full `AUDIT.md` entries (NET-02 and NET-03) as of their initial review. Before merging, a 12-hour live run was requested as additional confirmatory evidence, delaying both PRs pending that result.
+
+**The 12-hour live run (2026-09-23 10:47Z → 22:47Z).** Ran the `share-ids` worktree binary (carrying both #35 and #36's fixes) via `run12h.sh` against the live Monero pool. The fix never encountered a silent pool condition — longest job gap across the whole 12 hours was 22 seconds. Silence detections: 0.
+
+**Result summary:**
+- 22 logins (1 initial + 21 donation rotations; 0 unplanned reconnects, 0 false detections)
+- 870 accepted shares, 0 rejected, 0 errors, 0 withheld by verifier
+- Median hashrate 2,240 H/s (n=4320, descriptive only)
+- 3 lost shares (all named, all at rotations — see issue #32)
+- 0 unplanned disconnects
+
+**Contrast with prior run (LIVE8H_RUN_2.log, without these fixes):**
+
+| Metric | Without fixes | With fixes |
+|---|---|---|
+| Duration | 12h | 12h |
+| Accepted | 380 | 870 |
+| Rejected | 3 | 0 |
+| Lost / unaccounted | 7 | 3, all named |
+| Unplanned disconnects | 3 | 0 |
+| Silent windows | 121 + 88 min | none |
+
+**What this establishes.** No false reconnects, no regression — the fixes are safe and do measurable good. What it does **not** establish: **silence detection remains unexercised in production.** The condition the fix exists to catch did not occur. The 12h run neither verifies nor falsifies that the detection itself works — it cannot, because the trigger never fired. A pool that actually stops sending would be the only real test; this run shows the fix does not create problems when it is not needed.
+
+**Merge decision (2026-10-01).** The lead presented the tradeoff explicitly to the user via a multiple-choice: **"Merge anyway"** (accepting inconclusive verification), **"Run another long session"**, or **"Leave open, do something else"**. The user chose **"Merge anyway"** — explicit, informed authorization to proceed despite the known gap that silence detection remains unobserved in production until a real pool goes silent.
+
+**The merges.** Both PRs squash-merged to `main`:
+
+- **PR #35** → commit `19f3d03b65b61edff0efbc97db5dd5452931c109` ("Detect a silent pool instead of mining a stale job forever (#34) (#35)"). No conflict.
+- **PR #36** required retargeting: its base was the old PR #35 (`fix/stale-connection-detect`), which was now merged as a squash. The branch `fix/share-response-ids` was rebased; `git rebase origin/main` hit a conflict in `src/pool_connection.rs` doc comments. Conflict resolution showed the two commits being replayed (`c83938c`, `02a8027`) were already inside `main` via #35's squash, so this was not a real conflict — merely stale history. Resolved mechanically: `git rebase --onto origin/main 95148a7 fix/share-response-ids` (95148a7 being the old merge-base), which cleanly dropped the duplicate commits. Verified: no conflict markers in `src/`, 171 lib + 20 bin tests pass, `run12h.sh` carries all three `grep -q`→`grep -c` pipefail fixes from both PRs. Force-pushed, CI re-ran green on all five checks. → commit `c3f035a058f8a681e5f238dc008c360084405acd` ("Pair share submissions to pool responses by JSON-RPC id (#17) (#36)").
+
+**No ledger cleanup required.** Both branches were checked for tracked `REVIEW_*.md` files via `git ls-tree -r <branch> --name-only | grep -i review`. The only matches were the `.claude/agents/*.md` definition files, not ledger files — ledgers were stored only on-branch during review and removed before the PR branches reached this state.
+
+**Current follow-up run.** A 7-hour confirmatory live run (`run7h.sh` binary from `main`, rebuilt with both merged fixes) was started 2026-10-02 at the user's request as additional evidence. **Run is still in progress.** No result yet to record. Exists to provide further data on long-run stability with both fixes deployed.
+
+**Not established.**
+
+- Silence detection was never exercised; whether the detection itself works remains untested in production.
+- The 180 s silence threshold (NET-02) was chosen by reasoning, not by tuning against real pools' actual quiet periods.
+- False reconnects under donation rotation without the fixes cannot be individually isolated to #34 or #17 — both improve share accounting simultaneously.
+- Whether a real pool goes silent for >180s at any point remains unobserved by this miner; tuning would require either a live event or a test harness simulating that condition.

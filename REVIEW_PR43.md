@@ -62,3 +62,18 @@ A poisoned `pending_shares` lock in `write_and_register` still writes without re
 
 ### Suite
 `cargo test --release`: 178 lib / 20 bin pass, 2 ignored. `cargo test` (debug): 178 / 20 pass. `cargo clippy --all-targets --release -- -D warnings`: clean. Gate break-test (call site forced to proceed): core test and blocked-submitter test both fail — the gate itself is covered.
+
+### Implementer's break-tests re-run (item 6), each restored and `cmp`-verified
+- **#1** `rotation_settled` forced `true` (early return at the top): `a_share_outstanding_at_a_rotation_is_answered_before_the_relogin` and `a_blocked_submitter_at_rotation_...` FAIL. Reproduces.
+- **#6** `unsent_shares` increment removed: `a_write_failure_on_an_established_stream_counts_as_unsent`, `submit_share_write_failure_leaves_nothing_pending`, `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes` FAIL. Reproduces.
+- **#7** `InFlight::drop` body emptied: `in_flight_is_released_on_every_error_path`, `a_submitter_blocked_on_the_stream_lock_counts_as_in_flight` FAIL — the two the AUDIT entry implies. Reproduces. (Note the rotation tests stay green under #7: a leaked in-flight count only delays every rotation to the 5 s limit, which nothing asserts against. Same root as F1.)
+- **#8** reset removed: no failure. Reproduces (see F2).
+
+### Orphaned doc comments (item 6 sub-check): none
+`InFlight` is inserted above the `/// Wraps either a plain TCP or TLS stream` doc, which stays on the enum; `rotation_may_proceed` sits above `write_request`, which has no doc comment; the block moved above `write_and_register` is `//`, not `///`. Nothing orphaned.
+
+## Verdict
+**Not mergeable as-is.** 0 blockers, 1 major (F1), 5 minors (F2-F6), 2 nits (F7, F8), 0 behavioural defects in the shipped code.
+F1 is a test gap, not wrong behaviour today: the in-flight read that *is* the Gap-B fix can be deleted and CI goes red about once in six runs — an intermittent flake someone re-runs, which is worse than no test. Fix with a deterministic test calling `rotation_settled` while a submitter is parked on the lock, and re-run the in-flight=0 mutation against it.
+F2 needs a fix, not a documented limitation (the lead's own criterion): the reset is reachable through an unbounded `reconnect()` inside a deferral. Correct the claim in AUDIT.md NET-05 and tasks/NET-05.md and add a test or a structural change.
+Could not verify: the source of the "417" denominator; whether the 10 ms yield actually beats stream-lock starvation on macOS; any live behaviour.

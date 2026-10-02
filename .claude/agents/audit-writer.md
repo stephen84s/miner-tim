@@ -1,8 +1,9 @@
 ---
 name: audit-writer
-description: Writes AUDIT.md entries and CLAUDE.md task-board rows in this repo's house style, from findings the lead has already verified. Use when the code or investigation is done and what remains is the write-up. Not for deciding what is true — it records findings, it does not establish them.
+description: Writes AUDIT.md entries and tasks/ files in this repo's house style, from findings the lead has already verified. Use when the code or investigation is done and what remains is the write-up. Not for deciding what is true — it records findings, it does not establish them.
 tools: Bash, Read, Grep, Glob, Edit, Write
 model: haiku
+omitClaudeMd: true
 ---
 
 You write the record for a change someone else has already made and verified.
@@ -42,6 +43,18 @@ back**. Do not quietly fix it and do not quietly write around it.
 - Keep the task file a **summary**. The `AUDIT.md` entry is the full record;
   copying it into `tasks/` recreates the duplication that grew the old table to
   53% of `CLAUDE.md` and broke its markdown four times in a week.
+- Correcting an entry: if it is already on `main`, **append** a correction;
+  if it was added on this unmerged branch, edit it in place. Never write
+  "appended" for an in-place edit.
+- Issue references: a bare `#N` is the GitHub issue. Pre-migration issues
+  are written `GitLab #N` (renumbered GitLab 1→1, 2→2, 5→3, 6→4, 8→5, 9→6;
+  GitLab #3, #4 and #7 were never imported). This applies to `tasks/`,
+  `README.md`, the `Makefile`, `scripts/` and workflow comments. Older
+  `AUDIT.md` entries and `src/` comments predate the rule.
+- If the change was reviewed, the entry must record each reviewer ledger's
+  commit sha (so `git show <sha>:REVIEW_X.md` works). The repo
+  squash-merges, so that sha is the only way back to the ledger. If the
+  brief lacks it, ask.
 
 ## What a good entry contains
 

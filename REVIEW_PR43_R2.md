@@ -15,8 +15,8 @@ Scope: diff touches AUDIT.md, CLAUDE.md, src/bin/minertim.rs, src/miner.rs, src/
 
 ## Findings
 
-### R2-F1 (minor→major-for-the-record): recorded ledger sha 99bb076 is the PRE-rebase commit, reachable from no branch
-`git branch -a --contains 99bb076` → empty. The rebase rewrote it to 995a1ee (which is on the branch and origin). CLAUDE.md step 0 makes the recorded sha the only retrieval mechanism after squash; an unreachable sha disappears at the next gc. Should read 995a1ee.
+### R2-F1 (minor): recorded ledger sha 99bb076 is the PRE-rebase commit, reachable from no branch
+`git branch -a --contains 99bb076` → empty. The rebase rewrote it to 995a1ee (which is on the branch and origin). CLAUDE.md step 0 makes the recorded sha the only retrieval mechanism after squash; an unreachable sha disappears at the next gc. Should read 995a1ee — and that too changes on any further rebase, so record it after the final one. `git ls-remote origin 'refs/pull/43/*'`: head 78b4850, so 99bb076 is not reachable via the PR ref either.
 
 ### R2-F2 (minor; blocks merge — see verdict): removing the `want == active` reset re-opens the same hole for a RETURN to the same beneficiary
 d5bf8ee deleted `if want == active { rotation_wait_since = None; }` claiming `rotation_settled`'s mismatch check "subsumes it". It does not: `rotation_settled` is only called when `want != active` (short-circuit `&&`), so while the schedule sits on the active beneficiary nothing ever clears the stale entry. Sequence with default schedule (cycle 6000s: User 0-5700, Author 5700-5850, Xmrig 5850-6000):

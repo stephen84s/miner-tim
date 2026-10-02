@@ -65,3 +65,23 @@ R4-F4 (major, record): PR #43's description is stale from round 1 and becomes th
 Checked, no finding: the rebase's "now confirmed directly" upgrade for NET-06 is supported by
   NET-06's merged text (AUDIT ~7217: lock_wait_ms within 2-3ms of found_to_submit_ms at every
   percentile; ~7230: both rejections attributed to the starvation). PR #45 is MERGED (bf4868b).
+
+R4-F5 (minor, record): mutants numbers are stale post-rebase. Re-ran
+  `./scripts/mutants.sh 'submit_share|write_and_register|rotation_may_proceed|rotation_settled|reconnect|note_donation_target' 'pool_connection::'`
+  on 162e428: **38 tested, 25 caught, 5 unviable, 8 missed** (7m). AUDIT ~7331 and tasks/NET-05.md:13
+  say 22/17/1/4. Misses: the original 4 unchanged (rotation_settled:1345 x3, the warn-branch
+  `in_flight + pending > 0` log-only condition; reconnect:972 `||`->`&&`, pre-existing on main), plus
+  4 NEW in write_and_register:700/701 (`* 1000.0` -> `+` / `/` on both tuple members). These are
+  NET-06's ms conversion relocated into the extracted method: log-value-only, never asserted on
+  main either (no test checks lock_wait_ms/write_ms values or tuple order). Not a merge-resolution
+  defect, but "same 4 misses" no longer holds and a swapped tuple would also pass every test.
+
+Hygiene: tree clean after mutants; `git diff --quiet 162e428 -- src/` true; ledger commits touch
+  REVIEW_PR43_R4.md only.
+
+## Verdict
+Merge resolution: CORRECT and lossless. No code findings. Not mergeable until the record is fixed:
+R4-F1 (dead ledger shas — must fix, they are the only retrieval path after squash), R4-F4 (stale PR
+body = future commit message), R4-F2, R4-F3, R4-F5 (stale/false doc claims), R4-N1 nit.
+Record replacement shas (828d76b / e5a20a7 / 8fb2b65 + this ledger's final commit) only after the
+last push; any further rebase orphans them again.

@@ -375,6 +375,16 @@ impl Miner {
             .unwrap_or(0)
     }
 
+    /// Shares `submit_share` was asked to send but never wrote at all — no
+    /// stream, a poisoned lock, or a write error. Distinct from
+    /// `get_lost_shares`, which the pool at least received (#32).
+    pub fn get_unsent_shares(&self) -> u32 {
+        self.pool_connection
+            .as_ref()
+            .map(|p| p.get_unsent_shares())
+            .unwrap_or(0)
+    }
+
     /// Submissions written to the pool with no response yet. See
     /// `PoolConnection::get_pending_shares`.
     pub fn get_pending_shares(&self) -> usize {

@@ -7191,3 +7191,81 @@ Round 2 ledger: `REVIEW_PR42_R2.md`, removed from the tree before merge; retriev
 
 Final re-verification after all review-round fixes: `rtk proxy cargo test --release` → 177 lib passed (+2 over the post-implementation 175: F2's and R2-F1's tests), 20 bin passed; `cargo clippy --all-targets --release -- -D warnings` clean.
 
+### NET-06 (2026-10-02): Instrument found-to-submit latency; confirm stream-lock starvation as the cause, with direct evidence it causes real share rejections (#40)
+
+**Background.** Issue #40 observed shares taking a mean 7.8s (max 34s) to go from "found" to "submitted" in an earlier 7-hour log, with the pool's own explanation ("the verifier's recomputation") already ruled out by reading the code (one JIT hash call, single-digit ms). The issue's own suggested next step was: instrument, measure, then decide whether a fix is needed. This entry is that measurement.
+
+**Plan origin.** An Opus agent read the code (`submit_share`'s lock acquisition in `src/pool_connection.rs`, `receiver_loop`'s blocking-read-while-locked pattern, `worker_loop`'s share-found block in `src/miner.rs`) and built a case that the receiver loop's own lock/unlock/relock cycle — not the verifier — starves a `submit_share` call waiting on the same mutex, especially since the receiver re-takes the lock within microseconds of releasing it except when it pauses to process an inbound message. The lead independently verified the verifier's cost directly (one `calculate_hash` call, no Argon2d) before accepting this diagnosis. A Sonnet agent implemented exactly the instrumentation and reproducer plan below — no behavior change, diagnostic only.
+
+**What was added, both purely additive (no lock scope, ordering, or write/insert sequence changed):**
+1. `submit_share` (`src/pool_connection.rs`): three `Instant` captures around the existing lock/write sequence, appended as `lock_wait_ms={:.3} write_ms={:.3}` on the existing `"Share submitted: ..."` log line.
+2. `worker_loop`'s share-found block (`src/miner.rs`): captures around the existing verifier call and submit call, emitted as a new `"Worker {} share timing: ... verdict={:?} verify_ms={:.3} submit_call_ms={:.3} found_to_submit_ms={:.3}"` log line.
+3. Two `#[ignore]`d deterministic reproducer tests in `src/pool_connection.rs`'s `tls_tests`: `a_submit_is_not_held_hostage_by_a_quiet_receiver` (a quiet connection) and its control, `control_a_chatty_receiver_lets_a_submit_through` (a chatty one).
+
+**Reproducer result (5 trials each, local, no live pool):** the quiet-receiver test failed every single trial, landing consistently at ~2.79-2.80s (well past its 500ms bound) — a clean, repeatable signature, not noise. The chatty-receiver control passed every trial, at 1.4-104.8ms. This isolates the effect to connection quietness specifically, deterministically, before any live run.
+
+**Live result: a 1-hour run on this branch's binary (`run1h_timing.sh`, `LIVE1H_TIMING.log`, 2026-10-02 02:14:46Z-03:14:46Z, `RUST_LOG=info,minertim::pool_connection=debug`), 92 shares found, 90 accepted, 2 rejected, 0 lost.**
+
+Aggregate timing (n=92, all in ms):
+
+| Metric | Mean | Median | p90 | Max |
+|---|---|---|---|---|
+| `verify_ms` | 2.0 | — | — | 4.8 |
+| `lock_wait_ms` | 11,564 | 7,717 | 24,459 | 81,367 |
+| `found_to_submit_ms` | 11,567 | 7,719 | 24,461 | 81,368 |
+
+`verify_ms` and `lock_wait_ms` together account for essentially all of `found_to_submit_ms` (the two are within 2-3ms of each other at every percentile), and `verify_ms` is negligible — the decision rule set before this run (median `lock_wait_ms` ≥ 90% of median `found_to_submit_ms`, median `verify_ms` under 100ms) is satisfied with enormous margin. **Stream-lock starvation is confirmed as the cause, not the verifier.** 92% of submits landed in the same second as an inbound pool message (consistent with the 88% seen in the original 7h log and the 86% an independent #32 investigation found in the same log by a different method).
+
+**This run's numbers are markedly worse than the original 7h log's (mean 7.8s/max 34s vs. this run's mean 11.6s/max 81.4s).** Both are real measurements of the same underlying mechanism; the difference is most likely sample variance (n=466 vs n=92) and scheduler/load differences between runs, not a sign either measurement is wrong — both point the same direction and neither claims a tight bound on worst case.
+
+**New finding beyond the original issue's scope: this run's two rejected shares are both directly explained by the latency, not independent pool-side flukes — but not by wait duration alone.**
+
+- `job_id=R4QEoJoN43B9fdzR nonce=69305200`: `found_to_submit_ms=81368.262` (the run's maximum) — rejected `Invalid job id`.
+- `job_id=lBMzj1yn5Kftq0AN nonce=c8785400`: `found_to_submit_ms=42958.968` — rejected `Invalid job id`.
+
+**Correction (found by review, PR #45): an earlier draft of this entry claimed these are "the two largest `lock_wait_ms` values in the entire run" — that's false.** A third share, `job_id=d8J5BQTkjUN6B2pf`, waited **60,381.717ms** — longer than the second rejected share's 42,959ms — and was *accepted*. Wait duration alone does not predict rejection.
+
+**The actual mechanism, found by the same review**: both job ids the rejected shares were mined against (`R4QEoJoN43B9fdzR`, `lBMzj1yn5Kftq0AN`) were issued at block height 3774963, and a new job at height **3774964** arrived during the wait — a real new block, not just an ordinary job rotation within the same height. The accepted 60s-wait share's job stayed at height 3774950 for its entire wait, with no height change. **The correct claim is that the wait spanned a block-height change, not merely that it was long** — this is sharper than "exceeded the job's live window" and explains why the 60s-wait share survived while the 43s-wait share didn't: the pool invalidates jobs on a new block, not after a fixed timeout, and only the two rejections' waits happened to straddle one.
+
+This still changes #40 from a latency curiosity into a confirmed, measured cause of real share rejections: 2 of 92 shares (≈2.2%) were rejected in this one hour, and both are attributable to the starvation this entry measures — the correction narrows *why* they were rejected, not *that* they were.
+
+**What this establishes:** stream-lock starvation is the real cause (confirmed, not hypothesized), it is large enough in practice to span a block-height change during the wait, and it has now been observed causing actual rejected shares, not just elevated latency with no visible cost. (Round 3 correction: an earlier version of this sentence said "large enough to exceed typical job lifetimes" — the same duration-only framing the correction above already rejects, missed when that correction was first written two paragraphs up. The section must not argue with itself.)
+
+**What this does not do:** fix it. The actual fix (some form of fair/ticket lock, or a waiter-counting backoff so the receiver yields to a blocked submitter) touches the stream-lock invariants issue #17's design depends on — concurrency and shared-state work, Opus tier per `CLAUDE.md`'s own rule, not appropriate for this instrumentation-only change. Filed as a new, higher-priority follow-up issue (see below) that supersedes #40's original "worth a look" framing with "confirmed to cost shares."
+
+**Files changed:** `src/pool_connection.rs` (timing captures in `submit_share`, two new `#[ignore]`d reproducer tests), `src/miner.rs` (timing captures in `worker_loop`'s share-found block, `ShareVerdict` already derived `Debug` so no change needed there).
+
+**Verification performed:**
+- `rtk proxy cargo test --release`: **177 lib passed, 4 ignored**, 20 bin passed, on the current head rebased onto `main` (which carries #37's own 6 new tests, moving the baseline from the original 171/2 to 177/2 before this branch's own 2 `#[ignore]`d additions bring it to 177/4). An earlier version of this line said "171 lib... unchanged," which was correct against the pre-rebase base but went stale once the rebase changed what "baseline" meant — caught by review (PR #45 round 2) as the same class of defect CLAUDE.md's own review-series table records against an earlier PR ("the verification paragraph measured the wrong tree"). Lead independently re-ran and confirms 177/4/20 on the current head.
+- `cargo clippy --all-targets --release -- -D warnings`: clean.
+- `make check`: passes.
+- Existing tests `submit_share_registers_the_same_id_it_writes_to_the_wire`, `submit_share_write_failure_leaves_nothing_pending`, `a_submission_still_holds_the_stream_while_it_registers` confirmed still passing unchanged — the instrumentation didn't alter lock scope or the write/insert sequence. Lead independently verified the diff against `06ec147` touches only `Instant` captures and log formatting, nothing structural.
+- Reproducer break-test: not applicable in the usual sense (there is no fix here to break-test) — the reproducer pair's own 5-trial-each result (reported above) is the evidence, not a mutation.
+- Live run's `lock_wait_ms`/`found_to_submit_ms` near-equality, independently recomputed by the lead from the raw log with a separate script from the one used during implementation.
+
+**Review round 1 (Sonnet, `pr-reviewer`): not mergeable as submitted — 0 blockers found in the code itself, 1 major (a factual error in this entry, corrected above), 1 minor (issue #44's wording), plus a blocking stale-base finding the reviewer raised on its own initiative (resolved by the rebase recorded below).** Confirmed the instrumentation is genuinely additive (diffed both functions against `main`, byte-identical lock scope/order/write-sequence aside from `Instant` captures and log formatting). Re-ran both reproducer tests live (3 trials each): the quiet-receiver test failed consistently (~3.0s, close to the claimed ~2.8s — small gap is test-harness overhead), the chatty-receiver control passed consistently (6-94ms). Specifically checked whether the quiet reproducer's result could be an artifact of the test never calling `login()` (i.e. still on `connect()`'s 30s timeout rather than the 50ms poll interval) — it isn't: `receiver_loop()`'s first statement unconditionally sets the 50ms interval before any login/relogin logic runs. Also independently derived the correct nearest-rank convention behind the table's median/p90 figures (not documented in the original entry) and confirmed they reproduce exactly once accounted for.
+
+- **Major (fixed)**: the "two largest `lock_wait_ms` values" claim was false, and the review found a better, correct mechanism (a block-height change spanning the wait) — see the correction above.
+- **Minor (fixed)**: issue #44 stated "Issue #32 (fixed, PR #43)" — PR #43 was open, not merged, at the time. Corrected in the issue.
+- **Nit, not an error**: the table's median/p90 use an unstated nearest-rank-below convention rather than linear interpolation — both reproduce exactly once that's known; added as a footnote below rather than treated as a defect.
+
+**Review round 2 (Sonnet, `pr-reviewer`, cold, on round 1's fixes): not mergeable — round 1's corrections were accurate but didn't propagate to every place that mattered, 2 majors, 0 false positives.** Independently reproduced round 1's raw-log evidence (top-3 `found_to_submit_ms` values, both rejected shares' job heights at 3774963 with a 3774964 job arriving mid-wait, the accepted 60.4s-wait share's job holding a constant height) under a stricter check than round 1 used — verified the height-3774964 job arrived **after** each rejected share's own found time, not merely before its submit time, which is the causally-relevant ordering. Confirmed the branch's merge-base equals `main`'s current tip with CI green on that exact head.
+
+- **Major (fixed)**: the block-height correction only touched `AUDIT.md`. Three other places still carried the superseded duration-based framing: **PR #45's own body** (which becomes the permanent squash-merge commit message on this repo's convention — not cosmetic), `tasks/NET-06.md`, and a leftover contradicting sentence in issue #44 even after its first edit. All three fixed; the PR body and issue #44 edited directly (with a second disclosure comment on the issue), `tasks/NET-06.md` rewritten to match.
+- **Major (fixed)**: `AUDIT.md`'s own Verification paragraph said "171 lib passed (unchanged)" — correct against the pre-rebase base, stale once the rebase onto `main` (carrying #37's 6 new tests) moved the baseline to 177. Same class of defect `CLAUDE.md`'s own review-series table already records against an earlier PR ("the verification paragraph measured the wrong tree"). Fixed, with the rebase explanation stated explicitly this time rather than just a corrected number.
+
+**Review round 3 (Sonnet, `pr-reviewer`, cold, on round 2's propagation fixes): not mergeable — round 2's propagation was itself incomplete, 2 more minors, 0 false positives.** Re-verified round 2's fixes were actually in place in all four locations (PR body, task file, issue body, AUDIT.md), re-derived the raw-log numbers independently a third time (all held), confirmed CI still green and branch still current.
+
+- **Minor (fixed)**: this entry's own "What this establishes" sentence, two paragraphs below the block-height correction, still said the starvation is "large enough in practice to exceed typical job lifetimes" — the same duration-only framing the correction above it already rejects. The section argued with itself. Fixed to say "large enough in practice to span a block-height change during the wait."
+- **Minor (fixed)**: issue #44 said "2 of 92 shares... lost in one hour" — but this codebase's `lost_shares` counter means something specific (a submission drained uncounted on reconnect), and this run had 0 lost per this very entry. The two shares were *rejected*, not lost. Fixed in the issue (third disclosure comment), with the distinction spelled out.
+- **Nit (fixed)**: "the two shortlived rejections" awkwardly implied the rejections themselves were short-lived rather than their waits. Reworded.
+
+No ledger was committed for this review — the reviewing agent's own harness-level instructions for this session prohibited writing report/findings files, so there is no `REVIEW_PR45.md` sha to record. Findings are folded into this entry directly instead.
+
+**Not established.**
+- The actual worst case — 81.4s was this run's max on n=92; a longer run could show worse (or, equally plausibly given the small sample, this could already be near the tail).
+- Whether this bug has caused rejections in prior runs that weren't instrumented to see why (the 12h and 7h runs this session already recorded in LIVE-02/LIVE-03 had their own rejected/lost shares attributed to other causes — this entry does not retroactively reattribute those; it only speaks to this run's own two rejections, which it directly traced).
+- A fix design. Filed as a follow-up issue rather than designed here, per this instrumentation-only PR's explicit scope boundary set before implementation began.
+- Whether "92% of submits land in the same second as an inbound message" reproduces exactly under the review's own method — plausible given the confirmed mechanism, not independently recomputed by the reviewer (the lead's own figure, computed separately, is unchanged).
+
+**Footnote on the table above**: `median`/`p90` use nearest-rank-below (`sorted[floor(n·p)-1]`, 0-indexed, no interpolation), not linear interpolation — e.g. for `lock_wait_ms`, `sorted[45]=7717.144` gives the claimed median, `sorted[81]=24458.866` gives the claimed p90. Noted here so a future reproducer doesn't read a ~1.5s gap against a standard interpolated calculation as a defect.

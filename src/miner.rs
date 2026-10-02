@@ -727,6 +727,7 @@ fn worker_loop(
 
         // Compare hash to target (little-endian comparison)
         if meets_target(&hash, &job.target) {
+            let found_at = Instant::now();
             let nonce_hex = hex_encode(&job_blob_current[39..43]);
             let result_hex = hex_encode(&hash);
 
@@ -770,7 +771,9 @@ fn worker_loop(
             // (MR !1 review round 7, R7-F6.)
             // The decision itself lives in `classify_share` so every branch is
             // reachable from a test; only the expensive recomputation is here.
+            let verify_start = Instant::now();
             let reference = verifier.reference(&job_blob_current);
+            let verify_elapsed = verify_start.elapsed();
             // `is_enabled`, not `is_armed`: the distinction keeps the
             // "verification wanted but unavailable" case *logically* reachable
             // so it fails open loudly instead of being folded into "not
@@ -810,10 +813,24 @@ fn worker_loop(
             }
             let verified = verdict.should_submit();
 
-            if verified
-                && let Err(e) = pool.submit_share(&job.job_id, &nonce_hex, &result_hex)
-            {
-                log::error!("Failed to submit share: {}", e);
+            if verified {
+                let submit_start = Instant::now();
+                let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex);
+                let submit_call_elapsed = submit_start.elapsed();
+                if let Err(e) = submit_result {
+                    log::error!("Failed to submit share: {}", e);
+                }
+                log::info!(
+                    "Worker {} share timing: job_id={} nonce={} verdict={:?} \
+                     verify_ms={:.3} submit_call_ms={:.3} found_to_submit_ms={:.3}",
+                    thread_id,
+                    job.job_id,
+                    nonce_hex,
+                    verdict,
+                    verify_elapsed.as_secs_f64() * 1000.0,
+                    submit_call_elapsed.as_secs_f64() * 1000.0,
+                    found_at.elapsed().as_secs_f64() * 1000.0,
+                );
             }
         }
 

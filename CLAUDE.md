@@ -394,8 +394,8 @@
 
 ## Current task
 
-**NET-04 — Close stream-clear and session-id-check gaps in relogin and login (#37).**
-Implemented; awaiting review. See [`tasks/NET-04.md`](tasks/NET-04.md).
+**NET-06 — Instrument found-to-submit latency; confirm stream-lock starvation and its real-world cost (#40).**
+Completed. See [`tasks/NET-06.md`](tasks/NET-06.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

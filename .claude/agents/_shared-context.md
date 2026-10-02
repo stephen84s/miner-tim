@@ -5,6 +5,8 @@ reviewers (`jit-reviewer`, `ci-reviewer`, `pr-reviewer`) and the implementers
 (`rust-implementer`, `audit-writer`, `break-tester`) alike. Keep the lessons here; keep each
 agent's file about its own scope.*
 
+**You do not load `CLAUDE.md`.** Every agent here runs with `omitClaudeMd: true`, so neither the project `CLAUDE.md` nor the user's `~/.claude/CLAUDE.md` is in your context. What you need is in this file, your agent file and your brief. If your brief cites a rule "in CLAUDE.md" without restating it, `grep -n` it in `CLAUDE.md` and read that passage instead of guessing, and say in your report that the brief relied on it.
+
 ## What this project is
 
 A Monero CPU miner in pure Rust for Apple Silicon. It writes ARM64 machine code
@@ -38,6 +40,7 @@ Look for these specifically. Each one passed a green test suite.
 | Doc comments **orphaned** by splicing a new function under an existing one | New code inserted directly beneath a doc comment |
 | Reported RSS figures **did not reproduce** — a 2.7× overstatement | Any measurement quoted without a reproduction |
 | A test's `#[ignore]`/filter matched nothing, so libtest reported **success** | Test filters; renamed modules |
+| A guard tested only against bad input proves nothing; a shell guard like `producer \| grep -q pattern` under `pipefail` **exits 141** (SIGPIPE) if `grep` matches early, not a clean pass/fail | Any test-guards-both-directions claim; pipeline guards under `set -o pipefail` |
 
 ## Break-testing is required, not optional
 
@@ -73,8 +76,19 @@ the bug it was written for.
   `scripts/verify-jit.sh`: 92 tests, in **both** debug and release. It asserts an
   **exact pass count**, because libtest reports a filter matching nothing as
   success.
-- Reproduce claimed results yourself. Wrap long runs in `caffeinate -dimsu` (see `CLAUDE.md`'s rule — `-i` alone leaves system sleep free to kill the run) so the
-  Mac does not sleep. `make verify-jit` takes ~6 minutes locally.
+- **CI runs only where a PR exists.** `ci.yml` and `jit.yml` trigger on
+  `pull_request` and `workflow_dispatch`, never `push` (deliberate, CI-03). A
+  green PR ran against `refs/pull/N/merge`, not the head commit. "Nothing went
+  red" on a branch with no open PR is not evidence of anything.
+- Reproduce claimed results yourself. Wrap anything longer than a few minutes
+  in `caffeinate -dimsu <command>`: `make verify-jit` (~6 minutes locally), a
+  benchmark sweep, a live pool session. `-i` alone leaves system sleep free to
+  kill the run. For a background run, start it, then attach:
+  `nohup caffeinate -dimsu -w <pid> >/dev/null 2>&1 & echo $! > /tmp/caffeinate.pid`.
+  Verify with `test -s /tmp/caffeinate.pid && pmset -g assertions | grep "pid $(cat /tmp/caffeinate.pid)("`.
+  The guard and the trailing `(` are both load-bearing: without them the grep
+  matches some other process's assertion and reports success. Under `nohup`
+  the launched process showing `ppid 1` is normal, not orphaning.
 
 ## Context budget — this has killed reviewers before
 

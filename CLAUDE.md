@@ -39,6 +39,14 @@
       tree — it fell out of the crash-recovery mechanism, and thirteen of them
       accumulated to 530 KB, larger than the entire Rust source (LEDGER-01).
 
+      **Agents do not load this file.** Every agent in `.claude/agents/` sets
+      `omitClaudeMd: true` (PROC-09). A rule here reaches an agent only if it
+      is restated in that agent's file, in `_shared-context.md`, or in your
+      brief. When you add a rule an agent must obey, add it to the agent's
+      file in the same PR. Path-scoped `.claude/rules/` files and
+      subdirectory `CLAUDE.md` files still load lazily when an agent reads a
+      matching file.
+
     - **Worktrees for concurrent branches.** When more than one branch is in
       flight, give each its own worktree under `.claude/worktrees/` rather than
       switching branches in the shared checkout:
@@ -50,11 +58,13 @@
       branches while two reviewers were running made one of them commit its
       ledger to the wrong branch.
 
+    <!-- Copied into .claude/agents/pr-reviewer.md and audit-writer.md (PROC-09); change all three. -->
     - **Correcting `AUDIT.md`.** An entry already merged to `main` is corrected
       by **appending**. An entry added on an unmerged branch may still be edited
       in place — it is not yet part of the record. Never claim to append while
       editing in place.
 
+    <!-- Copied into .claude/agents/_shared-context.md and ci-reviewer.md (PROC-09); change all three. -->
     - **CI runs only where a PR exists** (the gating workflows, that is —
       `release.yml` is separate and fires on a `v*` tag). `ci.yml` and `jit.yml`
       trigger on `pull_request` and `workflow_dispatch` only — never on `push`.
@@ -260,6 +270,7 @@
       stray `.bak` left inside `src/`; one of three requested items silently
       dropped.
 
+    <!-- Copied into .claude/agents/_shared-context.md (PROC-09); change both. -->
     - **Long runs need `caffeinate`, and the miner is always a long run.** Any
       live pool session, benchmark sweep or multi-hour gate must be launched
       under **`caffeinate -dimsu`** — `-d` keeps the display awake, `-i` blocks
@@ -394,8 +405,8 @@
 
 ## Current task
 
-**NET-05 — Wait out an in-flight share submission before a donation rotation (#32).**
-Completed. See [`tasks/NET-05.md`](tasks/NET-05.md).
+**PROC-09 — Subagents stop loading CLAUDE.md.**
+Active (implementation done, pending review). See [`tasks/PROC-09.md`](tasks/PROC-09.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the
@@ -411,6 +422,7 @@ authoritative record; a task file is its summary.
 > Operational Protocol step 4 mandated it, the same shape as LEDGER-01, where
 > thirteen review ledgers piled up because every reviewer obeyed correctly.
 
+<!-- Copied into .claude/agents/pr-reviewer.md and audit-writer.md (PROC-09); change all three. -->
 > **Issue-numbering convention.** A bare `#N` means the **GitHub** issue. The
 > migration renumbered everything — GitLab 1→1, 2→2, 5→3, 6→4, 8→5, 9→6 — and
 > GitLab #3, #4 and #7 were closed before it and never imported, so those take
@@ -556,7 +568,7 @@ thirteen removed in bulk.
 1. `Miner::initialize(pool, wallet, threads)` — creates `PoolConnection`, TCP/TLS connects, sends Stratum `login`
 2. Pool sends `job` (blob + target + job_id)
 3. `Miner::start()` — spawns N workers; `dataset_cache = Arc::new(Mutex::new(None))`
-4. Thread 0 calls `get_or_generate_dataset()` — generates 2 GiB dataset (~46s M2 Max); other threads wait on the same mutex
+4. Every worker calls `get_or_generate_dataset()`; the first one to reach a new `seed_hash` generates the 2 GiB dataset (~46s M2 Max, all CPU cores) while the others block on the same mutex — "thread 0" is not special-cased, it is whichever worker gets the lock first
 5. Each worker: `RandomXVm::new_full(seed, dataset)` → `prepare_scratchpad(blob)` → loop `calculate_hash_pipelined(next_blob)`
 6. On hash ≤ target: if the verifier is armed, recompute the hash on the
    reference path (`ShareVerifier::reference`, a second VM with
@@ -574,6 +586,7 @@ thirteen removed in bulk.
 
 `prepare_scratchpad(input)` must be called once before entering the pipeline loop.
 
+<!-- Architecture facts copied into .claude/agents/jit-reviewer.md (PROC-09); change both. -->
 ### JIT Compiler (`jit/compiler.rs`)
 Active on aarch64. Two modes, and which one runs is decided by
 `native_loop_applies(use_native_loop, version, has_dataset, has_jit)`
@@ -622,9 +635,10 @@ would otherwise be the interpreter and the comparison would be vacuous
 - Submit: `{"method":"submit","params":{"job_id":"...","nonce":"<8hex>","result":"<64hex>"}}`
 - Keepalive: `{"method":"keepalived"}` every 60s
 
-### Dataset & Cache (`dataset.rs`)
-`SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`. `DatasetCache` holds `seed_hash` + `Arc<RandomXDataset>`. Thread 0 generates; others call `get_or_generate_dataset()` which waits on the mutex, then clones the `Arc`.
+### Dataset & Cache (`miner.rs`, not `dataset.rs` — `dataset.rs` only computes individual dataset items)
+`SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`. `DatasetCache` holds `seed_hash` + `Arc<RandomXDataset>`. The first worker to call `get_or_generate_dataset()` for a new `seed_hash` generates; every other worker waits on the same mutex, then clones the `Arc`.
 
+<!-- Copied into .claude/agents/pr-reviewer.md (PROC-09); change both. -->
 ### Runtime switches (`bin/minertim.rs`)
 `--native-loop` / `MINERTIM_NATIVE_LOOP` and `--verify-shares` /
 `MINERTIM_VERIFY_SHARES`. Both default on. The bare names `NATIVE_LOOP` and
@@ -644,6 +658,7 @@ intact. The startup line reports the *request*; each worker logs its own
 feature set omits aes/sha2/neon, which trips a `ring` compile-time assertion.
 `make dist` uses `apple-m1` for the same portability reason. `Cargo.toml` release profile: `lto=true`, `opt-level=3`, `codegen-units=1`, `strip=true`.
 
+<!-- Copied into .claude/agents/rust-implementer.md (PROC-09); change both. -->
 ## Conventions
 - **Rust:** `snake_case` functions/variables, `PascalCase` types, `UPPER_SNAKE_CASE` consts
 - **Logging:** `env_logger` with `RUST_LOG=info` (default); structured with module path

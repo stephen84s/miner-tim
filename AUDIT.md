@@ -7218,12 +7218,16 @@ Aggregate timing (n=92, all in ms):
 
 **This run's numbers are markedly worse than the original 7h log's (mean 7.8s/max 34s vs. this run's mean 11.6s/max 81.4s).** Both are real measurements of the same underlying mechanism; the difference is most likely sample variance (n=466 vs n=92) and scheduler/load differences between runs, not a sign either measurement is wrong — both point the same direction and neither claims a tight bound on worst case.
 
-**New finding beyond the original issue's scope: this run's two rejected shares are both directly explained by the latency, not independent pool-side flukes.**
+**New finding beyond the original issue's scope: this run's two rejected shares are both directly explained by the latency, not independent pool-side flukes — but not by wait duration alone.**
 
 - `job_id=R4QEoJoN43B9fdzR nonce=69305200`: `found_to_submit_ms=81368.262` (the run's maximum) — rejected `Invalid job id`.
 - `job_id=lBMzj1yn5Kftq0AN nonce=c8785400`: `found_to_submit_ms=42958.968` — rejected `Invalid job id`.
 
-Both shares waited (43s and 81s respectively) long enough that the job they were mined against had gone stale by the time they were finally submitted — both failures are on the two largest `lock_wait_ms` values in the entire run. **This changes #40 from a latency curiosity into a confirmed, measured cause of real share rejections**: 2 of 92 shares (≈2.2%) were rejected in this one hour, and both are attributable to the starvation this entry measures, not to anything else.
+**Correction (found by review, PR #45): an earlier draft of this entry claimed these are "the two largest `lock_wait_ms` values in the entire run" — that's false.** A third share, `job_id=d8J5BQTkjUN6B2pf`, waited **60,381.717ms** — longer than the second rejected share's 42,959ms — and was *accepted*. Wait duration alone does not predict rejection.
+
+**The actual mechanism, found by the same review**: both job ids the rejected shares were mined against (`R4QEoJoN43B9fdzR`, `lBMzj1yn5Kftq0AN`) were issued at block height 3774963, and a new job at height **3774964** arrived during the wait — a real new block, not just an ordinary job rotation within the same height. The accepted 60s-wait share's job stayed at height 3774950 for its entire wait, with no height change. **The correct claim is that the wait spanned a block-height change, not merely that it was long** — this is sharper than "exceeded the job's live window" and explains why the 60s-wait share survived while the 43s-wait share didn't: the pool invalidates jobs on a new block, not after a fixed timeout, and only the two shortlived rejections happened to straddle one.
+
+This still changes #40 from a latency curiosity into a confirmed, measured cause of real share rejections: 2 of 92 shares (≈2.2%) were rejected in this one hour, and both are attributable to the starvation this entry measures — the correction narrows *why* they were rejected, not *that* they were.
 
 **What this establishes:** stream-lock starvation is the real cause (confirmed, not hypothesized), it is large enough in practice to exceed typical job lifetimes, and it has now been observed causing actual rejected shares, not just elevated latency with no visible cost.
 
@@ -7239,7 +7243,18 @@ Both shares waited (43s and 81s respectively) long enough that the job they were
 - Reproducer break-test: not applicable in the usual sense (there is no fix here to break-test) — the reproducer pair's own 5-trial-each result (reported above) is the evidence, not a mutation.
 - Live run's `lock_wait_ms`/`found_to_submit_ms` near-equality, independently recomputed by the lead from the raw log with a separate script from the one used during implementation.
 
+**Review (Sonnet, `pr-reviewer`): not mergeable as submitted — 0 blockers found in the code itself, 1 major (a factual error in this entry, corrected above), 1 minor (issue #44's wording), plus a blocking stale-base finding the reviewer raised on its own initiative (resolved by the rebase recorded below).** Confirmed the instrumentation is genuinely additive (diffed both functions against `main`, byte-identical lock scope/order/write-sequence aside from `Instant` captures and log formatting). Re-ran both reproducer tests live (3 trials each): the quiet-receiver test failed consistently (~3.0s, close to the claimed ~2.8s — small gap is test-harness overhead), the chatty-receiver control passed consistently (6-94ms). Specifically checked whether the quiet reproducer's result could be an artifact of the test never calling `login()` (i.e. still on `connect()`'s 30s timeout rather than the 50ms poll interval) — it isn't: `receiver_loop()`'s first statement unconditionally sets the 50ms interval before any login/relogin logic runs. Also independently derived the correct nearest-rank convention behind the table's median/p90 figures (not documented in the original entry) and confirmed they reproduce exactly once accounted for.
+
+- **Major (fixed above)**: the "two largest `lock_wait_ms` values" claim was false, and the review found a better, correct mechanism (a block-height change spanning the wait) — see the correction above.
+- **Minor (fixed)**: issue #44 stated "Issue #32 (fixed, PR #43)" — PR #43 was open, not merged, at the time. Corrected in the issue.
+- **Nit, not an error**: the table's median/p90 use an unstated nearest-rank-below convention rather than linear interpolation — both reproduce exactly once that's known; added as a footnote below rather than treated as a defect.
+
+No ledger was committed for this review — the reviewing agent's own harness-level instructions for this session prohibited writing report/findings files, so there is no `REVIEW_PR45.md` sha to record. Findings are folded into this entry directly instead.
+
 **Not established.**
 - The actual worst case — 81.4s was this run's max on n=92; a longer run could show worse (or, equally plausibly given the small sample, this could already be near the tail).
 - Whether this bug has caused rejections in prior runs that weren't instrumented to see why (the 12h and 7h runs this session already recorded in LIVE-02/LIVE-03 had their own rejected/lost shares attributed to other causes — this entry does not retroactively reattribute those; it only speaks to this run's own two rejections, which it directly traced).
 - A fix design. Filed as a follow-up issue rather than designed here, per this instrumentation-only PR's explicit scope boundary set before implementation began.
+- Whether "92% of submits land in the same second as an inbound message" reproduces exactly under the review's own method — plausible given the confirmed mechanism, not independently recomputed by the reviewer (the lead's own figure, computed separately, is unchanged).
+
+**Footnote on the table above**: `median`/`p90` use nearest-rank-below (`sorted[floor(n·p)-1]`, 0-indexed, no interpolation), not linear interpolation — e.g. for `lock_wait_ms`, `sorted[45]=7717.144` gives the claimed median, `sorted[81]=24458.866` gives the claimed p90. Noted here so a future reproducer doesn't read a ~1.5s gap against a standard interpolated calculation as a defect.

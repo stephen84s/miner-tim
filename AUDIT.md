@@ -7592,6 +7592,7 @@ PROC-09 (#46) merged as `88701c1` after two independent Opus review rounds (see 
 
 - `tasks/PROC-09.md`: `**Status:** Active` → `**Status:** Completed`.
 - `CLAUDE.md`: "Current task" blurb — "Active (implementation done, pending review)" → "Completed, merged as #46 (two independent review rounds, Opus tier)".
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `PROC-09` line — **missed in this entry's first draft, caught by round-1 review (blocker).** The brief's own stated purpose named two stale locations and there was a third; this is exactly the "silently dropped one of N items" pattern this repo's own protocol warns about, now happening to the entry that itself documents that warning.
 
 **Behaviour / Content Changes**
 
@@ -7601,10 +7602,15 @@ None functional. Pure status bookkeeping.
 
 - `rtk proxy cargo test --release`, `cargo clippy --all-targets --release -- -D warnings`, `make check`: all clean, no Rust source touched.
 - Confirmed `88701c1` is `origin/main`'s tip and is PR #46's merge commit (`gh pr view 46 --json state,mergeCommit`).
+- Round-1 review independently re-ran `git diff main...origin/docs/proc-09-mark-completed --stat`, confirmed the self-correction commit (`c912694`) actually removes the two accidentally-swept files from the branch tip (`git ls-tree`), and confirmed both the "audit-writer.md gained the rule" and "two independent Opus rounds" claims against `88701c1`'s own diff and this file's own line numbers.
+
+**No review ledger.** Scope too small to warrant one; the reviewer's findings are folded directly into this entry.
+
+**No sealed prediction was written before review spawned**, unlike PROC-09 itself — reasonable given the trivial scope, but named here rather than silently skipped, per this file's own grading-honesty rule.
 
 **Review**
 
-**Review (Sonnet, round 1): <pending at time of writing>.** Tier chosen deliberately below Opus — this is a two-line status flip with no logic, no silent-failure surface, and no content overlap with PROC-09's own (already twice-reviewed) substance; the Haiku→Sonnet→Opus tiering in this file's own step 0 reserves Opus for work where a defect would be silent, which does not describe this change.
+**Review (Sonnet, round 1): not mergeable as first pushed — one blocker, three process minors, all fixed in this same entry.** Blocker: `tasks/README.md` was missed (see "Files Changed" above). Minors: this paragraph was a literal unfilled `<pending>` placeholder at review time (fixed by writing this verdict in); no sealed prediction existed before the review ran (now named above rather than left implicit); no ledger existed (now stated explicitly above rather than left as an empty slot). The review also flagged, non-blocking, that the two files removed in the self-correction commit remain retrievable from pushed history (`1cdf2f7`, and `refs/pull/47/head`) even though gone from the branch tip — checked their contents for anything sensitive (wallet address, pool hostname, password): none found, only ephemeral Stratum session IDs and hashrate stats. **False positives: 0.**
 
 **Not Established**
 

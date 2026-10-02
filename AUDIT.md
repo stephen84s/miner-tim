@@ -7191,3 +7191,55 @@ Round 2 ledger: `REVIEW_PR42_R2.md`, removed from the tree before merge; retriev
 
 Final re-verification after all review-round fixes: `rtk proxy cargo test --release` → 177 lib passed (+2 over the post-implementation 175: F2's and R2-F1's tests), 20 bin passed; `cargo clippy --all-targets --release -- -D warnings` clean.
 
+### NET-06 (2026-10-02): Instrument found-to-submit latency; confirm stream-lock starvation as the cause, with direct evidence it causes real share rejections (#40)
+
+**Background.** Issue #40 observed shares taking a mean 7.8s (max 34s) to go from "found" to "submitted" in an earlier 7-hour log, with the pool's own explanation ("the verifier's recomputation") already ruled out by reading the code (one JIT hash call, single-digit ms). The issue's own suggested next step was: instrument, measure, then decide whether a fix is needed. This entry is that measurement.
+
+**Plan origin.** An Opus agent read the code (`submit_share`'s lock acquisition in `src/pool_connection.rs`, `receiver_loop`'s blocking-read-while-locked pattern, `worker_loop`'s share-found block in `src/miner.rs`) and built a case that the receiver loop's own lock/unlock/relock cycle — not the verifier — starves a `submit_share` call waiting on the same mutex, especially since the receiver re-takes the lock within microseconds of releasing it except when it pauses to process an inbound message. The lead independently verified the verifier's cost directly (one `calculate_hash` call, no Argon2d) before accepting this diagnosis. A Sonnet agent implemented exactly the instrumentation and reproducer plan below — no behavior change, diagnostic only.
+
+**What was added, both purely additive (no lock scope, ordering, or write/insert sequence changed):**
+1. `submit_share` (`src/pool_connection.rs`): three `Instant` captures around the existing lock/write sequence, appended as `lock_wait_ms={:.3} write_ms={:.3}` on the existing `"Share submitted: ..."` log line.
+2. `worker_loop`'s share-found block (`src/miner.rs`): captures around the existing verifier call and submit call, emitted as a new `"Worker {} share timing: ... verdict={:?} verify_ms={:.3} submit_call_ms={:.3} found_to_submit_ms={:.3}"` log line.
+3. Two `#[ignore]`d deterministic reproducer tests in `src/pool_connection.rs`'s `tls_tests`: `a_submit_is_not_held_hostage_by_a_quiet_receiver` (a quiet connection) and its control, `control_a_chatty_receiver_lets_a_submit_through` (a chatty one).
+
+**Reproducer result (5 trials each, local, no live pool):** the quiet-receiver test failed every single trial, landing consistently at ~2.79-2.80s (well past its 500ms bound) — a clean, repeatable signature, not noise. The chatty-receiver control passed every trial, at 1.4-104.8ms. This isolates the effect to connection quietness specifically, deterministically, before any live run.
+
+**Live result: a 1-hour run on this branch's binary (`run1h_timing.sh`, `LIVE1H_TIMING.log`, 2026-10-02 02:14:46Z-03:14:46Z, `RUST_LOG=info,minertim::pool_connection=debug`), 92 shares found, 90 accepted, 2 rejected, 0 lost.**
+
+Aggregate timing (n=92, all in ms):
+
+| Metric | Mean | Median | p90 | Max |
+|---|---|---|---|---|
+| `verify_ms` | 2.0 | — | — | 4.8 |
+| `lock_wait_ms` | 11,564 | 7,717 | 24,459 | 81,367 |
+| `found_to_submit_ms` | 11,567 | 7,719 | 24,461 | 81,368 |
+
+`verify_ms` and `lock_wait_ms` together account for essentially all of `found_to_submit_ms` (the two are within 2-3ms of each other at every percentile), and `verify_ms` is negligible — the decision rule set before this run (median `lock_wait_ms` ≥ 90% of median `found_to_submit_ms`, median `verify_ms` under 100ms) is satisfied with enormous margin. **Stream-lock starvation is confirmed as the cause, not the verifier.** 92% of submits landed in the same second as an inbound pool message (consistent with the 88% seen in the original 7h log and the 86% an independent #32 investigation found in the same log by a different method).
+
+**This run's numbers are markedly worse than the original 7h log's (mean 7.8s/max 34s vs. this run's mean 11.6s/max 81.4s).** Both are real measurements of the same underlying mechanism; the difference is most likely sample variance (n=466 vs n=92) and scheduler/load differences between runs, not a sign either measurement is wrong — both point the same direction and neither claims a tight bound on worst case.
+
+**New finding beyond the original issue's scope: this run's two rejected shares are both directly explained by the latency, not independent pool-side flukes.**
+
+- `job_id=R4QEoJoN43B9fdzR nonce=69305200`: `found_to_submit_ms=81368.262` (the run's maximum) — rejected `Invalid job id`.
+- `job_id=lBMzj1yn5Kftq0AN nonce=c8785400`: `found_to_submit_ms=42958.968` — rejected `Invalid job id`.
+
+Both shares waited (43s and 81s respectively) long enough that the job they were mined against had gone stale by the time they were finally submitted — both failures are on the two largest `lock_wait_ms` values in the entire run. **This changes #40 from a latency curiosity into a confirmed, measured cause of real share rejections**: 2 of 92 shares (≈2.2%) were rejected in this one hour, and both are attributable to the starvation this entry measures, not to anything else.
+
+**What this establishes:** stream-lock starvation is the real cause (confirmed, not hypothesized), it is large enough in practice to exceed typical job lifetimes, and it has now been observed causing actual rejected shares, not just elevated latency with no visible cost.
+
+**What this does not do:** fix it. The actual fix (some form of fair/ticket lock, or a waiter-counting backoff so the receiver yields to a blocked submitter) touches the stream-lock invariants issue #17's design depends on — concurrency and shared-state work, Opus tier per `CLAUDE.md`'s own rule, not appropriate for this instrumentation-only change. Filed as a new, higher-priority follow-up issue (see below) that supersedes #40's original "worth a look" framing with "confirmed to cost shares."
+
+**Files changed:** `src/pool_connection.rs` (timing captures in `submit_share`, two new `#[ignore]`d reproducer tests), `src/miner.rs` (timing captures in `worker_loop`'s share-found block, `ShareVerdict` already derived `Debug` so no change needed there).
+
+**Verification performed:**
+- `rtk proxy cargo test --release`: 171 lib passed (unchanged — the two new tests are `#[ignore]`d and don't run by default, confirmed +2 ignored over baseline), 20 bin passed. Lead independently re-ran and confirms.
+- `cargo clippy --all-targets --release -- -D warnings`: clean.
+- `make check`: passes.
+- Existing tests `submit_share_registers_the_same_id_it_writes_to_the_wire`, `submit_share_write_failure_leaves_nothing_pending`, `a_submission_still_holds_the_stream_while_it_registers` confirmed still passing unchanged — the instrumentation didn't alter lock scope or the write/insert sequence. Lead independently verified the diff against `06ec147` touches only `Instant` captures and log formatting, nothing structural.
+- Reproducer break-test: not applicable in the usual sense (there is no fix here to break-test) — the reproducer pair's own 5-trial-each result (reported above) is the evidence, not a mutation.
+- Live run's `lock_wait_ms`/`found_to_submit_ms` near-equality, independently recomputed by the lead from the raw log with a separate script from the one used during implementation.
+
+**Not established.**
+- The actual worst case — 81.4s was this run's max on n=92; a longer run could show worse (or, equally plausibly given the small sample, this could already be near the tail).
+- Whether this bug has caused rejections in prior runs that weren't instrumented to see why (the 12h and 7h runs this session already recorded in LIVE-02/LIVE-03 had their own rejected/lost shares attributed to other causes — this entry does not retroactively reattribute those; it only speaks to this run's own two rejections, which it directly traced).
+- A fix design. Filed as a follow-up issue rather than designed here, per this instrumentation-only PR's explicit scope boundary set before implementation began.

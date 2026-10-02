@@ -29,6 +29,12 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 > - **§5.1's "available from v2.1.271" is unverified.** The docs fetched for
 >   PROC-09 give no introduction version for `omitClaudeMd`; only "observed
 >   working on 2.1.287" (and the planner's run on 2.1.286) is established.
+> - **A path-scoped rule matches against the *primary checkout's* copy of
+>   `.claude/rules/`, even for an agent reading a file inside a worktree.**
+>   The planning agent's own scratch-repo experiment found this; it means
+>   step 4's idea of using a path-scoped rule as a lighter alternative to
+>   pasting facts directly won't see a branch's own edit to that rule
+>   until it reaches `main` — worth knowing before step 4 relies on it.
 > - **§1 and step 5's claim that "why" paragraphs survive as free HTML
 >   comments, "stripped before injection," is false for at least one of the
 >   two comment shapes tested.** PROC-09's own verification found it's

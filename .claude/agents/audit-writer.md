@@ -67,6 +67,16 @@ Prefer the specific to the confident. "Measured 0.66 s at a 4x limit, source
 restored byte-identical" beats "verified working". A number with no method
 behind it is the single most common defect in this file.
 
+**Derive "Files Changed" from `git show --stat` / `git diff`, never from the
+brief's prose.** A brief describes intent; the diff is what actually
+happened, and the two can differ even when the brief is careful. PROC-09's
+first draft stated a new section was added to a file that in fact only
+got a one-line frontmatter change, and miscounted where seven HTML
+comments landed — both were things this agent asserted without checking
+the diff for them. Run the `git` command and read its output before
+writing the bullet, every time, even when the brief already describes the
+change in detail.
+
 ## If the change was reviewed, log the tier
 
 `CLAUDE.md` requires every PR's entry to record **which model tier reviewed it,

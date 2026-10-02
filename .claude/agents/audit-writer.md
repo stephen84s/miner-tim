@@ -43,6 +43,11 @@ back**. Do not quietly fix it and do not quietly write around it.
 - Keep the task file a **summary**. The `AUDIT.md` entry is the full record;
   copying it into `tasks/` recreates the duplication that grew the old table to
   53% of `CLAUDE.md` and broke its markdown four times in a week.
+- **Do not leave a task's `tasks/<TASK-ID>.md` `**Status:**` as "Active" once
+  the work it describes is complete.** Set it to "Completed" (or the
+  equivalent terminal state) in the same batch that writes the `AUDIT.md`
+  entry recording completion — the task file is meant to answer "is this
+  still open?" at a glance, and a stale "Active" defeats that.
 - Correcting an entry: if it is already on `main`, **append** a correction;
   if it was added on this unmerged branch, edit it in place. Never write
   "appended" for an in-place edit.

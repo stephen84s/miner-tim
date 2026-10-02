@@ -30,8 +30,12 @@ name what you are handing off.
    forever. On a share, an armed verifier recomputes the hash on the reference path
    (`ShareVerifier::reference`, a second VM with `set_native_loop(false)`).
    `classify_share` maps the outcome to a `ShareVerdict`, and a mismatch
-   **withholds** the share. With no JIT the verifier disarms itself. Ask of
-   every fallback: **if this fires, does anyone find out?**
+   **withholds** the share. The verifier disarms whenever
+   `native_loop_effective()` is false — not only a missing JIT, but also the
+   switch set off, light mode (no dataset), or a version other than rx/0 —
+   because in every one of those cases both the mined path and the reference
+   path are already the interpreter, and comparing them would be vacuous.
+   Ask of every fallback: **if this fires, does anyone find out?**
 3. **Safety switches and their fail-safe direction.** `--native-loop` fails to
    *off* (slower but cannot mine wrong hashes); `--verify-shares` fails to *on*
    (keeps the net). They are deliberately asymmetric. Check each one's direction
@@ -92,6 +96,27 @@ name what you are handing off.
 7. **Concurrency.** Worker threads, the pool receiver, `Arc<Mutex<…>>` job
    handoff, nonce interleaving. Check for a starved receiver — mining on every
    core once caused ~15% stale-share rejects.
+
+## Facts about mining flow, Stratum and the dataset (copied from CLAUDE.md)
+
+- **Threading.** One main thread (CLI, Ctrl+C, 10s stats print) plus one pool
+  connection worker and N mining worker threads.
+- **Mining flow.** `Miner::initialize` connects and logs in; the pool sends a
+  `job`; thread 0 generates the shared dataset (`get_or_generate_dataset()`,
+  others wait on the same mutex) while each worker runs
+  `RandomXVm::new_full` → `prepare_scratchpad` → a loop of
+  `calculate_hash_pipelined`; nonces are interleaved (`nonce += thread_count`);
+  a new job with a changed seed reinitialises the VM.
+- **Stratum.** Newline-delimited JSON-RPC 2.0 over TCP, TLS via rustls +
+  webpki-roots. Login carries `"algo":"rx/0"` and an `agent` string that is
+  `concat!("MinerTim/", env!("CARGO_PKG_VERSION"))` — **it tracks
+  `Cargo.toml`, it is not the literal `MinerTim/1.0`.** A stale version
+  string in a diff or a claim is a real finding. Keepalive fires every 60s.
+- **Dataset & cache.** `SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`;
+  `DatasetCache` holds `seed_hash` plus an `Arc<RandomXDataset>`. Thread 0
+  generates (~46s for the full 2 GiB dataset on an M2 Max); every other
+  thread calls `get_or_generate_dataset()`, which waits on the mutex then
+  clones the `Arc` — cheap, not a second generation.
 
 ## Local trap: filtered `cargo test`
 

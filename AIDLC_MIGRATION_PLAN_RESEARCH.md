@@ -10,7 +10,7 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 > shifts by one from what this document guesses throughout §6. Read any
 > "PROC-09" below as this document's own placeholder, not the real task.
 >
-> Two things this document leaves open (§5.1, §6 step 4.1) are now settled:
+> The following six items update, settle or correct this document:
 > - **§6 step 4.1's open question — does `omitClaudeMd` block path-scoped
 >   `.claude/rules/` too?** Answered empirically, independently, twice (a
 >   sequenced before/after/match probe in the real worktree, and a separate
@@ -36,19 +36,34 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 >   pasting facts directly won't see a branch's own edit to that rule
 >   until it reaches `main` — worth knowing before step 4 relies on it.
 > - **§1 and step 5's claim that "why" paragraphs survive as free HTML
->   comments, "stripped before injection," is false for at least one of the
->   two comment shapes tested.** PROC-09's own verification found it's
->   syntax-dependent: an HTML comment nested inside a list item (4-space
->   indent, between sibling bullets) is present in context and costs
->   tokens; a standalone column-0 comment directly above a heading appears
->   to be stripped. This was tested once per shape (n=1), on one Claude
->   Code version, in one file — treat it as "observed here," not as a
->   documented product guarantee, and re-verify before step 5 relies on it
->   at scale. See the `PROC-09` entry in `AUDIT.md` for the three probes.
+>   comments, "stripped before injection," is false, and the variable is
+>   indentation, not list-nesting.** PROC-09's own n=1-per-shape probe first
+>   framed this as "nested in a list" vs. "column-0", but the independent
+>   review that followed measured it directly (`cacheCreationInputTokens`
+>   against a ~9k-token comment payload in scratch repos) and found the
+>   actual threshold is the comment's **indent level**: a comment indented
+>   4 or more spaces is present in context and costs tokens — whether it
+>   sits inside a list or at top level with no list at all — while a
+>   comment indented 0-3 spaces, including at column 0 between list items,
+>   is stripped. The *mechanism* behind that threshold is still not
+>   established — it is not a plain CommonMark parse — so treat the
+>   threshold itself as "observed here," not a documented product
+>   guarantee, and re-verify before step 5 relies on it at scale. See the
+>   `PROC-09` entry in `AUDIT.md` for both rounds of probes.
+> - **PROC-09 implemented step 4's "subagents stop loading CLAUDE.md" before
+>   step 1 (CI enforcement), reversing this document's own risk ordering,
+>   and the reordering was never recorded at the time.** The commit that
+>   added this document (`6d0d420`) describes PROC-09 as "the first,
+>   lowest-risk step it identifies" — but §6 labels **step 1**, not step 4,
+>   as "lowest risk, highest value". The reasoning given for skipping
+>   straight to step 4 — "this PR deletes nothing" — does not fully cover
+>   what step 4 actually does: an agent that stops loading `CLAUDE.md`
+>   entirely is a larger behavioural change than deleting a passage from it.
+>   Recorded here after the fact, rather than silently left implicit.
 >
 > Everything else below — the AI-DLC comparison, the six-step migration
 > outline, the risk table — is unchanged and still represents the state of
-> the research as written; only the three items above and the numbering were
+> the research as written; only the six items above and the numbering were
 > corrected after a real PR exercised them.
 
 ---

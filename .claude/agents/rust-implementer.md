@@ -71,7 +71,7 @@ though no test ran — hand break-test that code instead.
 ## Finishing
 
 Commit the source changes with a clear message. **Do not** write the `AUDIT.md`
-entry or the task-board row — `audit-writer` does that from your report, so your
+entry or the task's `tasks/` file — `audit-writer` does that from your report, so your
 report is what it will be built from. Do not push, do not open or merge a PR,
 do not close an issue.
 

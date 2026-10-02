@@ -11,10 +11,10 @@ No src/, jit/, benches/, workflows, Makefile, scripts/. Nothing to hand off.
 ## Coverage ledger
 - [x] 1 Completeness of compensation
 - [x] 2 Empirical claims (spot-check, HTML comments, memory confound)
-- [ ] 3 Token-delta math / sealed prediction
-- [ ] 4 rust-implementer out-of-scope use
-- [ ] 5 CI / base
-- [ ] 6 Grading honesty
+- [x] 3 Token-delta math / sealed prediction
+- [x] 4 rust-implementer out-of-scope use
+- [x] 5 (partial: jit-* pending on eddcdc8; 09802cc never ran) CI / base
+- [x] 6 Grading honesty
 
 ## Findings
 
@@ -94,3 +94,11 @@ AUDIT entry nor the research-doc status note records that the ordering was chang
 - N4 PR description files the token-prediction miss under "corrections to the research doc's own
   premises" — it is the task file's prediction.
 - N5 three v345 runs logged exit=1 while their JSON reports success, unmentioned.
+
+## Verdict
+Mergeable once fixed-forward, minors only: 0 blockers, 0 majors, 6 minors, 5 nits. Sealed prediction
+("mergeable with at most minors") holds. Conditions: push 09802cc (and remove this ledger), let
+jit-macos/jit-linux-arm finish green on the pushed head, and correct F2/F3 in the entry since AUDIT.md
+is trusted later. F1 should also correct the research-doc status note before step 5 relies on it.
+Not verified: the five other agent pairs (only pr-reviewer re-run); real-file token cost of the three
+surviving comments; CI on 09802cc.

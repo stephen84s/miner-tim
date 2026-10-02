@@ -29,10 +29,20 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 > - **§5.1's "available from v2.1.271" is unverified.** The docs fetched for
 >   PROC-09 give no introduction version for `omitClaudeMd`; only "observed
 >   working on 2.1.287" (and the planner's run on 2.1.286) is established.
+> - **§1 and step 5's claim that "why" paragraphs survive as free HTML
+>   comments, "stripped before injection," is false for at least one of the
+>   two comment shapes tested.** PROC-09's own verification found it's
+>   syntax-dependent: an HTML comment nested inside a list item (4-space
+>   indent, between sibling bullets) is present in context and costs
+>   tokens; a standalone column-0 comment directly above a heading appears
+>   to be stripped. This was tested once per shape (n=1), on one Claude
+>   Code version, in one file — treat it as "observed here," not as a
+>   documented product guarantee, and re-verify before step 5 relies on it
+>   at scale. See the `PROC-09` entry in `AUDIT.md` for the three probes.
 >
 > Everything else below — the AI-DLC comparison, the six-step migration
 > outline, the risk table — is unchanged and still represents the state of
-> the research as written; only the two items above and the numbering were
+> the research as written; only the three items above and the numbering were
 > corrected after a real PR exercised them.
 
 ---

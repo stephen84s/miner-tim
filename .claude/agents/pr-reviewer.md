@@ -71,6 +71,19 @@ name what you are handing off.
      `tasks/`, `README.md`, the `Makefile`, `scripts/` and workflow
      comments. Older `AUDIT.md` entries and `src/` comments predate the
      rule.
+   - **If this PR was independently reviewed**, its `AUDIT.md` entry must
+     record which model tier reviewed it, what the review found, what it
+     missed that was discovered later, and how many false positives it
+     raised, as `**Review (<tier>, round N): <verdict>**`. A reviewed PR
+     with no such paragraph, or one that doesn't name the tier, is an
+     audit-accuracy gap worth flagging.
+   - **Before trusting a green CI run as evidence, check the branch is
+     rebased on the current `origin/main`** (`git merge-base HEAD
+     origin/main` should equal `origin/main`'s tip). This repo's branch
+     protection requires up-to-date branches, but a reviewer working from a
+     stale local checkout can still be fooled by CI results that ran
+     against an older merge ref. A stale base has been the actual blocker
+     in more than one past review round here.
 7. **Concurrency.** Worker threads, the pool receiver, `Arc<Mutex<…>>` job
    handoff, nonce interleaving. Check for a starved receiver — mining on every
    core once caused ~15% stale-share rejects.

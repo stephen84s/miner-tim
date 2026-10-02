@@ -7403,10 +7403,10 @@ First PR of the Claude-Code-native migration (research phase in `AIDLC_MIGRATION
 
 - `.claude/agents/_shared-context.md`: added "Agents do not load CLAUDE.md" intro paragraph; rewrote caffeinate rule fully self-contained (previously said "see CLAUDE.md's rule"); added "CI runs only where a PR exists" bullet; added a new failure-modes table row for shell-pipeline SIGPIPE/exit-141 guards (added after verification found all six agents lacked this fact).
 - `.claude/agents/audit-writer.md`: corrected stale `description:` ("task-board rows" → "tasks/ files"); added three new bullets (correction rule, issue-numbering convention, ledger-sha requirement).
-- `.claude/agents/break-tester.md`: added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/break-tester.md`: `omitClaudeMd: true` added to frontmatter only — no body change needed, since it already carried the `rtk proxy cargo test` trap natively (an earlier draft of this entry wrongly claimed a new "Local trap" section was added here; corrected).
 - `.claude/agents/ci-reviewer.md`: added "Facts about this repo's CI" section (trigger rules, five required checks and job names, jit-macos ~14min figure, ledger-check step name); added "Local trap: filtered `cargo test`" section.
 - `.claude/agents/jit-reviewer.md`: added "Architecture facts (copied from CLAUDE.md...)" section (JIT two-mode summary, register allocation, CBRANCH i16→i32 cast rule, failed-mmap fallback, native-loop +6.8%-7.4% gain figure, Linux mprotect cost note); added "Local trap: filtered `cargo test`" section.
-- `.claude/agents/pr-reviewer.md`: extended existing checklist items 2, 3, 6 in place (silent failure section gained ShareVerifier/classify_share/ShareVerdict facts; safety switches gained empty-value fail-safe and env-var-vs-mining.conf facts; AUDIT.md-append bullet corrected and gained issue-numbering-convention bullet); added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/pr-reviewer.md`: extended existing checklist items 2, 3, 6 in place (silent failure section gained ShareVerifier/classify_share/ShareVerdict facts; safety switches gained empty-value fail-safe and env-var-vs-mining.conf facts; AUDIT.md-append bullet corrected and gained issue-numbering-convention bullet); added "Local trap: filtered `cargo test`" section; **two further bullets added to item 6 after review** (see "Dependencies found by grepping past reviews" below): the review-tier/found/missed/FP logging requirement, and a stale-base check against `origin/main` before trusting a green CI run.
 - `.claude/agents/rust-implementer.md`: added paragraph of house Rust conventions (snake_case/PascalCase/UPPER_SNAKE_CASE, log macros, Result<T, String>).
 - `CLAUDE.md`: added new paragraph in step-0 "Reviewer agents" bullet stating agents don't load this file and that path-scoped rules still load lazily; inserted seven one-line HTML comments (`<!-- Copied into ... -->`) as drift guards; updated Current-task pointer to PROC-09.
 - All six `.claude/agents/*.md` files: added `omitClaudeMd: true` to their YAML frontmatter.
@@ -7419,11 +7419,11 @@ All six agent definitions now carry `omitClaudeMd: true` in frontmatter, prevent
 
 Each agent gained compensation text — either a new section in its own body or pasted into `_shared-context.md` — containing the specific CLAUDE.md passages it needs to function. Examples: `jit-reviewer.md` gained register-allocation facts and the +6.8%-7.4% native-loop gain figure; `ci-reviewer.md` gained the trigger rule (pull_request/workflow_dispatch only, never push) and the ~14min jit-macos duration; `pr-reviewer.md`'s existing silent-failure checklist item was extended with actual code facts (ShareVerifier::reference, classify_share, ShareVerdict).
 
-Seven one-line HTML comments were inserted into CLAUDE.md's step-0 bullet, each naming the agent file(s) that received a copy of the passage it guards. These comments are not instructions — they are drift alerts: if that passage is edited later, the comments mark where each copy must be updated too.
+Seven one-line HTML comments were inserted into CLAUDE.md, each naming the agent file(s) that received a copy of the passage it guards: **three nested inside step-0 list items** at 4-space indent (above the "Correcting AUDIT.md", "CI runs only where a PR exists", and "Long runs need caffeinate" bullets), and **four at column 0** — directly above the issue-numbering blockquote and above the three section headings `### JIT Compiler`, `### Runtime switches`, `## Conventions`. These comments are not instructions — they are drift alerts: if that passage is edited later, the comments mark where each copy must be updated too. (An earlier draft of this paragraph said all seven were "in CLAUDE.md's step-0 bullet" — false; the nesting distinction between the two groups turns out to matter, see the HTML-comment finding below.)
 
 **Empirical Evidence (the core of this entry's "done" criterion)**
 
-**Finding 1: `omitClaudeMd: true` suppresses project CLAUDE.md, user-global `~/.claude/CLAUDE.md`, and auto-memory — but NOT path-scoped `.claude/rules/*.md` files.**
+**Finding 1: `omitClaudeMd: true` suppresses project CLAUDE.md and user-global `~/.claude/CLAUDE.md` — but NOT path-scoped `.claude/rules/*.md` files.** (This probe did not test auto-memory; that evidence is Finding 3, below.)
 
 Established by controlled probe (two throwaway agent definitions, identical except `omitClaudeMd: true` on one; a throwaway `.claude/rules/canary.md` scoped to `paths: ["src/hex.rs"]` containing a nonce string; three-step checks: before any read, after reading a non-matching file, after reading the matching file). Both control (no omitClaudeMd) and flagged (omitClaudeMd: true) probes run headless via `claude -p` from this worktree (Claude Code 2.1.287). Verbatim results:
 
@@ -7483,9 +7483,17 @@ Per-agent measured token delta (sum of `inputTokens + cacheReadInputTokens + cac
 - audit-writer: 20469 → 8929, delta ≈ 11,540
 - break-tester: 20149 → 8346, delta ≈ 11,803
 
-All six deltas land in 10,958–11,803 range, closely matching and slightly exceeding the sealed prediction of "roughly 9-11k tokens." Token saving validated.
+All six deltas land in a 10,958–11,803 range. Grading this honestly against `tasks/PROC-09.md`'s sealed prediction ("roughly 9-11k tokens... offset by a small increase of ~0.3-1.5k from the pasted compensation text"): the prediction's own stated net range, after its own offset, was roughly 7.5-10.7k. The measured range (10,958-11,803) is entirely **above** that net range — the prediction undershot, not matched. The gross saving (CLAUDE.md/RTK.md removed) is real and in the right order of magnitude, but the sealed prediction specifically underestimated the net figure; record this as a miss on the prediction's precision, not as validation.
 
-**Correction to the plan's own premise: HTML comments do consume context.** The plan asserted comments "cost no context because comments are stripped before injection." A direct headless check (`claude -p` from this worktree, zero tool calls, asking whether its own context contains the literal text "Copied into") returned FOUND. The seven one-line comments consume some (not precisely measured — each ~100-150 tokens estimated for all seven combined) context in the main session only, not in subagent contexts. Confirmed by a second, independent check using a non-leading prompt (asking the agent to enumerate HTML comments generally, without naming the target phrase): it correctly quoted three of the seven comments verbatim unprompted. The comments remain a useful drift guard (cheap at hundreds of tokens against the whole file) and their usage is correct, but the plan's stated justification was wrong.
+**Correction to the plan's own premise, refined to a specific, syntax-dependent finding: whether an HTML comment is stripped before injection depends on where it sits, and the plan's blanket "stripped before injection, costs no context" claim is false for at least one of the two shapes used in this PR.**
+
+Three separate headless checks (`claude -p` from this worktree, zero tool calls), run in order of increasing rigor:
+
+1. A leading check — asking directly whether context contains the literal text "Copied into" — returned FOUND. Weak evidence on its own, since the phrase appeared in the question.
+2. A non-leading check — asking the agent to enumerate every HTML comment in its CLAUDE.md context, without naming the target phrase — correctly quoted **three** comments verbatim, unprompted: specifically the three nested inside step-0 list items (4-space indent). It did not surface the other four.
+3. A discriminating check — asking specifically for the line immediately above the `### JIT Compiler` heading (one of the four column-0 comments) — came back **blank** (reported the nearest actual content, a full paragraph earlier). The comment is absent from context.
+
+**Conclusion, stated at the strength the evidence supports (n=1 per shape, one session, one file):** the three comments nested inside step-0 list items (4-space indent, between sibling `<li>`s) are present in context and therefore cost tokens — not "stripped before injection" as the plan claimed. The four comments sitting as standalone column-0 blocks directly above section headings appear to be stripped (at least one directly tested, absent; the other three untested individually but structurally identical). **This is the opposite of a clean "comments are free" or "comments always cost" result — it's syntax-dependent, and the plan's flat claim was wrong either way it's read.** The cost of the three surviving comments is real but small (three short lines, rough order of 50-80 tokens combined, not precisely measured) and this doesn't change the PR's merits — the comments are still a cheap, useful drift guard — but the stated justification needs correcting, and the research doc's step 5 (which also assumes "why" paragraphs survive as free HTML comments) and §1 item 5 should be revisited against this, not reused uncritically.
 
 **Verification Performed**
 
@@ -7499,7 +7507,7 @@ All six deltas land in 10,958–11,803 range, closely matching and slightly exce
 - Primary checkout (`/Users/stephen/code/github/miner-tim`) confirmed untouched throughout (git status / git log verified before and after implementer's run): still session-start state plus two pre-existing untracked files unrelated to this work.
 - Branch rebased cleanly onto `origin/main` (tip `0be2000`, PR #43/NET-05) — two trivial append-order conflicts in `tasks/README.md` and CLAUDE.md's Current-task pointer, resolved by established convention (main's line first, then branch's append after).
 
-**Gap found during verification, closed before this entry was finalized**
+**Gap found during verification, closed and re-checked before this entry was finalized**
 
 **User auto-memory (MEMORY.md) fact missing from initial compensation.** All six flagged agents reported "exits 141" (a marker from this user's own auto-memory file: `test guards both directions; grep -q under pipefail exits 141`) as NOT-FOUND during the V3 verification probe. This marker is suppressed by `omitClaudeMd` exactly like CLAUDE.md is. **This specific fact — that an unguarded `grep -q` in a shell pipeline silently returns success when no match is found, hiding logic errors — is directly relevant to ci-reviewer's domain** (correctness of shell-based CI checks, guard patterns, exit codes). 
 
@@ -7507,7 +7515,15 @@ All six deltas land in 10,958–11,803 range, closely matching and slightly exce
 
 | A guard tested only against bad input proves nothing; a shell guard like `producer \| grep -q pattern` under `pipefail` **exits 141** (SIGPIPE) if `grep` matches early, not a clean pass/fail | Any test-guards-both-directions claim; pipeline guards under `set -o pipefail` |
 
-This closes the gap before the PR proceeds to review.
+**Two caveats on this fix, now checked:**
+- This edit landed in `_shared-context.md` only, which every agent reads via its own "First: read" instruction — an instruction the agent must obey, not an automatic injection like frontmatter or the agent's own body. **V4b was run as a follow-up** (after the fix, not as part of the original twelve-run probe): `ci-reviewer` spawned headless with `model: haiku`, told to follow its system prompt starting with reading `_shared-context.md`, then asked whether "exits 141" is now in context. Result: one tool call (the `_shared-context.md` Read), then `FOUND` — the subagent located it on the file's own line 43, matching where the new row was inserted. Confirmed for one of the six agents; the other five were not individually re-checked (all six read the same file via the same instruction, so this is treated as representative rather than exhaustive).
+- This edit was made **after** the original V3/V4 real-agent probes in Finding 3 were run, so those twelve runs correctly show "exits 141" as NOT-FOUND (pre-fix) — that's what caught the gap. The follow-up V4b check above is the fix's own verification, run separately.
+
+**Dependencies found by grepping past reviews for "CLAUDE.md" citations, beyond the exits-141 gap**: `grep -n 'CLAUDE.md' AUDIT.md` against past review findings surfaced two more real dependencies that were not in the original compensation set, both now added to `pr-reviewer.md` item 6 in this same PR (see "Files Changed" above):
+- The review-tier/found/missed/false-positive logging format (`**Review (<tier>, round N): <verdict>**`) — `pr-reviewer` has cited this by name in at least one past review (NET-04 round 1, N3) as part of checking audit accuracy, which is explicitly within its own item 6 scope. `audit-writer.md` already carries this natively (unaffected), but `pr-reviewer` itself had no restated copy once it stops loading CLAUDE.md.
+- A stale-base check against `origin/main` before trusting green CI as evidence — this was the actual blocker in at least two past review rounds (PR #31, NET-06 round 1). Added as a short bullet.
+
+This is not claimed to be an exhaustive disposition table of every CLAUDE.md passage any agent has ever relied on — it's what a `grep` for past citations surfaced in the time available for this PR. A fuller inventory (every rule row, every rationale paragraph, with an explicit destination) is exactly what the research doc's own step 0 ("Lesson inventory") proposes for the *next* stage of this migration, not this one.
 
 **Implementer's three self-resolved ambiguities**
 
@@ -7526,6 +7542,8 @@ Not yet performed. Independent review pending before merge, to be added as a cor
 **Not Established**
 
 - Whether a smaller/re-homed CLAUDE.md actually reduces deviations in practice (the research doc's second open question) — not addressed by this PR, not something one PR can settle.
-- The exact token cost of the seven HTML drift-guard comments (estimated ~100-150 tokens total, not precisely measured).
+- The exact token cost of the three surviving HTML drift-guard comments (rough order of 50-80 tokens combined, not precisely measured) and the precise mechanism/rule behind which HTML comments get stripped (list-nested vs. column-0 block is this entry's working hypothesis from one discriminating test per shape, not a documented Claude Code behavior — it should be treated as "observed here," not as a citable fact about the product).
 - Whether `omitClaudeMd` is available starting at Claude Code v2.1.271 specifically, as the research doc originally asserted — unverified; only "observed working on 2.1.286 (planner) and 2.1.287 (lead)" is established. (See `AIDLC_MIGRATION_PLAN_RESEARCH.md`'s status note on this.)
 - Whether auto-memory "exits 141" is suppressed by the same code path as CLAUDE.md (likely) or a separate one (possible) — established empirically that it IS suppressed, but not the *why*.
+- Whether the `_shared-context.md` fix for the exits-141 gap reaches all six agents, not just the one (`ci-reviewer`) individually re-checked via V4b after the fix.
+- Whether the two new `pr-reviewer.md` bullets (review-tier format, stale-base check) are themselves complete — they came from one `grep` pass over past review findings in the time available, not a systematic inventory.

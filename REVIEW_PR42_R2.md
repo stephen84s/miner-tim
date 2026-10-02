@@ -4,13 +4,13 @@ Reviewer: pr-reviewer, Opus tier. Head 2c9aac2, base 06ec147 (= origin/main, up 
 Scope: src/pool_connection.rs (login() reorder + new test), AUDIT.md NET-04 entry. No JIT/bench/CI paths.
 
 ## Coverage ledger
-1. Correctness of reorder / new gap (Q1) — pending
-2. Dead-code removal (Q2) — pending
-3. F2 break-test (Q3) — pending
-4. F3 re-verification (Q4) — pending
-5. mutants.sh (Q5) — pending
-6. Full suite + clippy (Q6) — pending
-7. AUDIT accuracy — pending
+1. Correctness of reorder / new gap (Q1) — done, no gap (below)
+2. Dead-code removal (Q2) — done, correct (below)
+3. F2 break-test (Q3) — done, reproduced
+4. F3 re-verification (Q4) — done, reproduced
+5. mutants.sh (Q5) — done, 6/4/2/0 reproduced
+6. Full suite + clippy (Q6) — done, green
+7. AUDIT accuracy — done (R2-F2, R2-F3, R2-N1)
 
 ## Findings
 
@@ -43,3 +43,15 @@ And the commit deleted the bullet that recorded the tier decision "before the re
 
 ### R2-N1 (nit, format) — **Review (** paragraph is a lazy continuation of the last bullet
 AUDIT.md:7170 (last "Not established" bullet) is followed at :7171 by `**Review (Opus, ...` with no blank line, so GFM renders it as part of the "No live evidence" list item. `grep '^\*\*Review ('` still finds it; rendering does not. Every neighbouring entry (7065, 7113, 7132) has the blank line.
+
+### Q1 — reorder correct; no real shape is newly misread
+Both reference pools make error/result mutually exclusive: monero-stratum `stratum.go:313` (success: `Error: nil` -> `"error":null`) and `:327` (failure: Result unset -> `"result":null`); nodejs-pool `pool.js:939` (`error: error ? {...} : null`). JSON-RPC 2.0 also forbids both. A non-null error with a meaningful result is therefore not a real shape. The only divergence from xmrig (`Client.cpp:828` tests `error.IsObject()`, not non-null) is a non-object, non-null `error` (`"error":"x"`, `false`): xmrig would ignore it and read `result`, we fail the login. Neither pool emits it, and the direction is fail-loud. Not a finding.
+
+### Q2 — dead-code removal correct
+Old trailing branch was reached only when `result` was absent. New outcomes for those inputs: error non-null -> first branch, same `Login error: {}` text; error `null` and result absent -> was `Login error: null`, now `Unexpected login response` (both Err). Also result `null` without error -> was `...no session id: null`, now `Unexpected login response` (both Err). Nothing that was Err became Ok; the only Ok-reaching input (non-null error alongside a result with an id) was the unrealistic shape in Q1.
+
+### Q6 — green
+`rtk proxy cargo test --release`: 176 lib passed / 2 ignored, 20 bin. `rtk proxy cargo test` (debug): 176 / 2 ignored, 20. `cargo clippy --all-targets --release -- -D warnings`: clean. Concurrency/resources: this commit only changes response parsing and adds a test; no lock or allocation change.
+
+## Verdict
+**Mergeable.** 0 blockers, 0 majors, 3 minors (R2-F1 test gap; R2-F2, R2-F3 AUDIT accuracy), 1 nit. The code change is correct and its claims (Q3, Q4, Q5, Q6) all reproduce. Recommend before merge, since the entry is unmerged and cheap to fix: resolve the stale xmrig bullet (R2-F2) and add the blank line (R2-N1). R2-F1 is a one-test addition worth making in this PR. Not verified: CI's jit-* jobs (pending at check time); no live run.

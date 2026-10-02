@@ -21,16 +21,20 @@ Scope: diff touches `src/pool_connection.rs`, `AUDIT.md`, `CLAUDE.md`, `tasks/`.
 - `./scripts/mutants.sh 'relogin_as|login' 'pool_connection::'`: 4 mutants, 2 caught (login->Ok(()), relogin_as->Ok(())), 2 unviable (&&->|| at 451, 481). No mutant on the `*s = None` assignment or the let-else return — cargo-mutants does not mutate plain assignments or let-else. AUDIT caveat is accurate.
 - xmrig claim checked against xmrig master `src/base/net/stratum/Client.cpp`: `parseLogin` does `setRpcId(Json::getString(result,"id")); if (rpcId().isNull()) { *code = 1; return false; }` — TRUE. Nuance: `parseResponse` handles `error.IsObject()` **before** `result`, and requires `result.IsObject()`; `parseLogin` also fails on an invalid job.
 
+- Full suite `rtk proxy cargo test --release`: 175 lib passed / 2 ignored, 20 bin passed — matches AUDIT.
+- Not re-run: clippy, `make check`. CI `jit-macos`/`jit-linux-arm` had no conclusion when checked; lint/test/audit green. MoneroOcean nodejs-pool fork's error shape not checked.
+- Side effect: `mutants.sh` rotated the gitignored `mutants.out` -> `mutants.out.old`.
+
 ## Findings
 
 ### F1 (minor) — login() inspects `result` before `error`; real pool login rejections now surface as "carried no session id: null"
-sammy007/monero-stratum `sendError` builds `JSONRpcResp{Id, Version, Error: reply}` with `Result interface{}` (no omitempty) -> wire shape `{"id":1,"jsonrpc":"2.0","result":null,"error":{...}}`. serde_json `get("result")` returns `Some(Null)`, so:
+sammy007/monero-stratum `stratum.go:324-327` `sendError` builds `JSONRpcResp{Id: id, Version: "2.0", Error: reply}` (login branch, line 275, routes `handleLoginRPC` errors through it with drop=true) with `Result interface{}` (no omitempty) -> wire shape `{"id":1,"jsonrpc":"2.0","result":null,"error":{...}}`. serde_json `get("result")` returns `Some(Null)`, so:
 - **Before this PR**: `Null.get("id")` is None, fell through, returned **Ok(())** — a rejected login (e.g. invalid wallet) reported as success, no session id, no job. A broader silent-success than the PR describes.
 - **After**: Err("Login response carried no session id: null") — no longer silent (good; at startup the binary exits), but the pool's actual message is dropped. User sees "Login failed: Login response carried no session id: null" instead of the pool's reason.
 Fix: check a non-null `error` first (as xmrig does), or treat `result: null` as absent. (Snipa22/nodejs-pool omits `result` on errors — `JSON.stringify` drops undefined — so it already hits the error branch.)
 
 ### F2 (minor) — the tested shape is not the realistic one
-The AUDIT and test motivate the login check with a submit-ack `{"id":99,"result":{"status":"OK"}}` read as the login reply. A submit carrying the *previous* session id on a freshly opened connection is not acknowledged OK by either reference pool: nodejs-pool replies `Unauthenticated` (error), monero-stratum replies error + `result:null`. The realistic silent-success shape is F1's, and no test covers it. Code handles it; coverage and narrative don't. Add a test with `{"id":1,"jsonrpc":"2.0","result":null,"error":{"code":-1,"message":"..."}}`.
+The AUDIT and test motivate the login check with a submit-ack `{"id":99,"result":{"status":"OK"}}` read as the login reply. A submit carrying the *previous* session id on a freshly opened connection is not acknowledged OK by either pool checked: Snipa22/nodejs-pool replies `Unauthenticated` (error), monero-stratum replies error + `result:null`. The realistic silent-success shape is F1's, and no test covers it. Code handles it; coverage and narrative don't. Add a test with `{"id":1,"jsonrpc":"2.0","result":null,"error":{"code":-1,"message":"..."}}`.
 
 ### F3 (minor) — AUDIT "Not established" bullet 3 is false and contradicts the entry's own break-test 2
 It says test 2 does not isolate the login() change and that its "true load-bearing assertion is the logged warning". There is no log assertion in the test. Break 2 (reproduced) shows test 2 fails on `result.is_err()` with only the login fix reverted; break 1 shows it fails on `stream.is_none()` with only the relogin fix reverted. It discriminates both. Only the `session_id == "old"` assertion is non-discriminating (old code also left the id untouched). Since unmerged, edit in place.
@@ -57,4 +61,4 @@ The entry records the tier decision before review but not what the review is exp
 No timing assumption added. The only coupling: retrying with the donation wallet after a failure relies on `self.wallet` being set before/inside the attempt (receiver loop sets it before `relogin_as`; `login()` also sets it, but only if connect succeeded). If #32 moves the wallet write to after a successful relogin, a connect failure would reconnect as the previous wallet — and test 4 would catch that. A guard, not a hazard.
 
 ## Verdict
-Mergeable after F3 is corrected (a false statement in the authoritative record). F1/F2 are worth fixing in this PR, being small and in the same function, but are not blocking: the behaviour change is strictly safer than main. 0 blockers, 0 majors, 4 minors, 3 nits.
+Mergeable; F3 (a false claim in `AUDIT.md`) must be edited in place before merge. F1/F2 are recommended in this PR but not blocking: the behaviour is strictly safer than main. 0 blockers, 0 majors, 4 minors, 3 nits.

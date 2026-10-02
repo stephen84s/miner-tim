@@ -462,7 +462,17 @@ impl PoolConnection {
 
         let response = self.send_request("login", params)?;
 
-        if let Some(result) = response.get("result") {
+        // GitHub #37 review (PR #42, F1): check `error` before `result`.
+        // sammy007/monero-stratum answers a rejected login with
+        // `{"result":null,"error":{...}}` — `result` is present but null, so
+        // checking it first (as the pre-review code did) swallowed the
+        // pool's real rejection reason behind a generic "no session id"
+        // error. xmrig's `Client::parseResponse` checks `error` first for
+        // the same reason. `.filter(|v| !v.is_null())` on both treats an
+        // explicit JSON `null` the same as an absent field.
+        if let Some(error) = response.get("error").filter(|v| !v.is_null()) {
+            Err(format!("Login error: {}", error))
+        } else if let Some(result) = response.get("result").filter(|v| !v.is_null()) {
             // GitHub #37: a submit-acknowledgement reply read by mistake as
             // the login reply (e.g. `{"id":99,"result":{"status":"OK"}}`)
             // has no session id and must not be treated as a successful
@@ -492,8 +502,6 @@ impl PoolConnection {
                 }
             }
             Ok(())
-        } else if let Some(error) = response.get("error") {
-            Err(format!("Login error: {}", error))
         } else {
             Err("Unexpected login response".into())
         }
@@ -2406,6 +2414,65 @@ mod tls_tests {
             *conn.session_id.lock().unwrap(),
             "old",
             "a login response with no session id must not overwrite the existing one"
+        );
+
+        let _ = server.join();
+    }
+
+    /// GitHub #37 review (PR #42, F1/F2): a real pool rejects a login this
+    /// way — sammy007/monero-stratum answers with `result` present but
+    /// `null` alongside a populated `error`, not with `error` alone. Before
+    /// the F1 fix, checking `result` first (even though it's `null`) made
+    /// this `Ok(())`: the pool's genuine rejection (bad wallet, banned IP,
+    /// etc.) was silently treated as a successful login with no session id
+    /// and no job. This pins that `error` is now checked first, and that
+    /// the real rejection reason reaches the caller rather than being
+    /// replaced with a generic "no session id" message.
+    #[test]
+    fn a_login_rejection_with_a_null_result_reports_the_real_reason() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":null,\
+                          \"error\":{\"code\":-1,\"message\":\"Unauthenticated\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(3));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let err = conn.relogin_as("4test").expect_err("a rejected login must fail relogin_as");
+
+        assert!(
+            err.contains("Unauthenticated"),
+            "the pool's real rejection reason must reach the caller, not be \
+             replaced with a generic \"no session id\" message; got: {err}"
+        );
+        assert!(
+            conn.stream.lock().unwrap().is_none(),
+            "a failed relogin must clear the stream"
         );
 
         let _ = server.join();

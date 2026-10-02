@@ -7581,3 +7581,31 @@ The "Sealed expectations" section of `tasks/PROC-09.md` (commit `c72e75f`, the r
 - Whether the `_shared-context.md` fix for the exits-141 gap reaches all six agents, not just the one (`ci-reviewer`) individually re-checked via V4b after the fix.
 - Why three of the twelve primary/worktree probe runs behind Finding 3 recorded `exit=1` in the probe script's own log while their `--output-format json` output reported successful completion (round-1 review, N5). The JSON-reported results were used throughout, consistent with the other nine runs, but the log/exit-code discrepancy itself was not investigated — it lives in a session scratchpad, not a repo artifact.
 - Whether the two new `pr-reviewer.md` bullets (review-tier format, stale-base check) are themselves complete — they came from one `grep` pass over past review findings in the time available, not a systematic inventory.
+
+### PROC-09-CLEANUP (2026-10-03): Mark PROC-09 completed after merge (#46)
+
+**Request / Goal**
+
+PROC-09 (#46) merged as `88701c1` after two independent Opus review rounds (see the PROC-09 entry above, "Review" section, for both rounds' findings and grading). Per this repo's own rule ("do not leave a task 'Active' once it is complete" — now also in `audit-writer.md`, added by PROC-09 itself), `tasks/PROC-09.md`'s `**Status:**` and `CLAUDE.md`'s "Current task" blurb both still said "Active"/"pending review" after the merge. This entry is the one-line follow-up that fixes that, on its own branch because `main` is protected and accepts no direct pushes regardless of triviality.
+
+**Files Changed**
+
+- `tasks/PROC-09.md`: `**Status:** Active` → `**Status:** Completed`.
+- `CLAUDE.md`: "Current task" blurb — "Active (implementation done, pending review)" → "Completed, merged as #46 (two independent review rounds, Opus tier)".
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping.
+
+**Verification Performed**
+
+- `rtk proxy cargo test --release`, `cargo clippy --all-targets --release -- -D warnings`, `make check`: all clean, no Rust source touched.
+- Confirmed `88701c1` is `origin/main`'s tip and is PR #46's merge commit (`gh pr view 46 --json state,mergeCommit`).
+
+**Review**
+
+**Review (Sonnet, round 1): <pending at time of writing>.** Tier chosen deliberately below Opus — this is a two-line status flip with no logic, no silent-failure surface, and no content overlap with PROC-09's own (already twice-reviewed) substance; the Haiku→Sonnet→Opus tiering in this file's own step 0 reserves Opus for work where a defect would be silent, which does not describe this change.
+
+**Not Established**
+
+Nothing beyond what PROC-09's own entry already lists.

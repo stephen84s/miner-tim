@@ -462,13 +462,31 @@ impl PoolConnection {
 
         let response = self.send_request("login", params)?;
 
-        if let Some(result) = response.get("result") {
-            if let Some(id) = result.get("id").and_then(|v| v.as_str()) {
-                if let Ok(mut sid) = self.session_id.lock() {
-                    *sid = id.to_string();
-                }
-                log::info!("Login successful, session id: {}", id);
+        // GitHub #37 review (PR #42, F1): check `error` before `result`.
+        // sammy007/monero-stratum answers a rejected login with
+        // `{"result":null,"error":{...}}` — `result` is present but null, so
+        // checking it first (as the pre-review code did) swallowed the
+        // pool's real rejection reason behind a generic "no session id"
+        // error. xmrig's `Client::parseResponse` checks `error` first for
+        // the same reason. `.filter(|v| !v.is_null())` on both treats an
+        // explicit JSON `null` the same as an absent field.
+        if let Some(error) = response.get("error").filter(|v| !v.is_null()) {
+            Err(format!("Login error: {}", error))
+        } else if let Some(result) = response.get("result").filter(|v| !v.is_null()) {
+            // GitHub #37: a submit-acknowledgement reply read by mistake as
+            // the login reply (e.g. `{"id":99,"result":{"status":"OK"}}`)
+            // has no session id and must not be treated as a successful
+            // login — this matches xmrig's `Client::parseLogin`, which
+            // refuses a login with no rpc id. Checked before any job is
+            // installed, so a misread reply cannot silently "succeed" with
+            // no session id update and no job installed.
+            let Some(id) = result.get("id").and_then(|v| v.as_str()) else {
+                return Err(format!("Login response carried no session id: {}", result));
+            };
+            if let Ok(mut sid) = self.session_id.lock() {
+                *sid = id.to_string();
             }
+            log::info!("Login successful, session id: {}", id);
             if let Some(job_data) = result.get("job")
                 && let Some(job) = parse_job(job_data)
             {
@@ -484,8 +502,6 @@ impl PoolConnection {
                 }
             }
             Ok(())
-        } else if let Some(error) = response.get("error") {
-            Err(format!("Login error: {}", error))
         } else {
             Err("Unexpected login response".into())
         }
@@ -539,7 +555,13 @@ impl PoolConnection {
         // the new connection with the old session id. It IS registered, so the
         // pool's answer is paired and counted — normally as a rejection, which
         // is the pool's real verdict on it. The miscounting is closed; the
-        // stale id is not (review round 3, R3-1).
+        // stale id is not (review round 3, R3-1) — still open in general. What
+        // IS closed (#37): a submit-reply that `login()` mistakenly reads as
+        // the login reply (no session id in it) now fails the login outright
+        // instead of silently "succeeding" with the old id left in place, and
+        // a failed `relogin_as` now clears the stream so the receiver loop
+        // reconnects cleanly rather than being left on a stale, unauthenticated
+        // connection.
         //
         // Lock order is stream -> pending_shares. Nothing takes them the other
         // way: `drain_pending_shares` and `handle_pool_message` take
@@ -693,7 +715,8 @@ impl PoolConnection {
                         continue;
                     }
                     Err(e) => {
-                        // Stream is torn down; the read below yields NotConnected
+                        // Stream is torn down (relogin_as now clears it on any
+                        // failure, #37); the read below yields NotConnected
                         // and reconnect() re-establishes using self.wallet (= addr).
                         log::warn!("Donation switch failed: {} (reconnecting)", e);
                     }
@@ -861,7 +884,8 @@ impl PoolConnection {
 
     /// Tear down the current session and log in again on the same pool with a
     /// different wallet. One attempt; on failure the caller falls through to
-    /// the reconnect path.
+    /// the reconnect path. On return, either the stream is `None`, or the
+    /// connection is logged in and has the 50ms poll-interval read timeout.
     fn relogin_as(&self, wallet: &str) -> Result<(), String> {
         let address = self.address.lock().map(|a| a.clone()).unwrap_or_default();
         if address.is_empty() {
@@ -882,8 +906,21 @@ impl PoolConnection {
         // needs its own drain — otherwise a submission sent just before a
         // donation-slice switch is orphaned in the pending map forever.
         self.drain_pending_shares();
-        self.connect(&address)?;
-        self.login(wallet)?;
+        // GitHub #37: a failed `login` used to return early here with the
+        // stream `connect()` had just installed still in place: live,
+        // unauthenticated, the session id still the previous connection's,
+        // and on the 30s read timeout `connect`/`send_request` set. (A
+        // failed `connect` never installed one, because the stream was
+        // already cleared above.) Clearing it on failure instead sends the
+        // receiver loop into its normal `reconnect()` path on the next read
+        // (which retries cleanly using `self.wallet`, already set to the
+        // donation address).
+        if let Err(e) = self.connect(&address).and_then(|_| self.login(wallet)) {
+            if let Ok(mut s) = self.stream.lock() {
+                *s = None;
+            }
+            return Err(e);
+        }
         self.set_read_timeout(RECV_POLL_INTERVAL);
         Ok(())
     }
@@ -2259,5 +2296,396 @@ mod tls_tests {
             0,
             "a share that was never written must not be counted lost"
         );
+    }
+
+    // --- GitHub #37: a failed relogin must not leave a live stream ---
+
+    /// Isolates the `relogin_as` fix: a failed `connect`/`login` must clear
+    /// the stream rather than leave a live, unauthenticated socket with a
+    /// stale session id and up to a 30s read timeout.
+    ///
+    /// `.is_err()` alone would also pass against the unfixed code — `?` still
+    /// propagates the login error either way. The stream-is-none check is
+    /// what actually covers the bug: the unfixed code returns `Err` with the
+    /// just-opened, now-unauthenticated stream still installed.
+    #[test]
+    fn a_failed_relogin_login_leaves_no_stream_behind() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\
+                          \"error\":{\"code\":-1,\"message\":\"denied\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    // Hold the socket open and silent — proves the test isn't
+                    // passing via EOF.
+                    thread::sleep(Duration::from_secs(3));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let result = conn.relogin_as("4test");
+
+        assert!(result.is_err(), "a denied login must fail relogin_as");
+        assert!(
+            conn.stream.lock().unwrap().is_none(),
+            "a failed relogin must clear the stream, not leave the new, \
+             unauthenticated connection installed"
+        );
+
+        let _ = server.join();
+    }
+
+    /// Covers the `login()` fix and reuses the `relogin_as` fix: a
+    /// submit-acknowledgement reply read by mistake as the login reply (no
+    /// `result.id`) must fail the login outright, not be mistaken for success.
+    #[test]
+    fn a_submit_reply_read_as_the_login_reply_fails_the_relogin() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    // Shape of an accepted submit reply: a top-level JSON-RPC
+                    // envelope id (99, unrelated to the login request's own
+                    // id) and a "result" with no "id" field inside it — which
+                    // is what login() actually reads (result.id), not the
+                    // envelope id.
+                    let _ = sock.write_all(
+                        b"{\"id\":99,\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"OK\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(3));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+        *conn.session_id.lock().unwrap() = "old".to_string();
+
+        let result = conn.relogin_as("4test");
+
+        assert!(
+            result.is_err(),
+            "a login response with no session id must fail, not succeed silently"
+        );
+        assert!(
+            conn.stream.lock().unwrap().is_none(),
+            "a failed relogin must clear the stream"
+        );
+        assert_eq!(
+            *conn.session_id.lock().unwrap(),
+            "old",
+            "a login response with no session id must not overwrite the existing one"
+        );
+
+        let _ = server.join();
+    }
+
+    /// GitHub #37 review (PR #42, F1/F2): a real pool rejects a login this
+    /// way — sammy007/monero-stratum answers with `result` present but
+    /// `null` alongside a populated `error`, not with `error` alone.
+    /// Before the F1 fix (but after #37's base fix in this same PR), login()
+    /// already checked `result` first and failed on a missing session id —
+    /// so this didn't silently succeed, but the error it raised was the
+    /// generic "no session id: null", not the pool's real rejection reason.
+    /// (`Ok(())` is `main`'s behaviour, two states further back — `main`'s
+    /// login() doesn't fail on a missing id at all.) This pins that `error`
+    /// is now checked first, so the real rejection reason reaches the
+    /// caller instead of being replaced with that generic message.
+    #[test]
+    fn a_login_rejection_with_a_null_result_reports_the_real_reason() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":null,\
+                          \"error\":{\"code\":-1,\"message\":\"Unauthenticated\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(3));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let err = conn.relogin_as("4test").expect_err("a rejected login must fail relogin_as");
+
+        assert!(
+            err.contains("Unauthenticated"),
+            "the pool's real rejection reason must reach the caller, not be \
+             replaced with a generic \"no session id\" message; got: {err}"
+        );
+        assert!(
+            conn.stream.lock().unwrap().is_none(),
+            "a failed relogin must clear the stream"
+        );
+
+        let _ = server.join();
+    }
+
+    /// Guards against someone deleting the `set_read_timeout` line on the
+    /// success path: a successful relogin must leave the connection polling
+    /// at the normal short interval, not the 30s login-wait timeout.
+    #[test]
+    fn a_successful_relogin_restores_the_poll_interval() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"result\":{\"id\":\"sess2\",\"job\":{\"blob\":\"00\",\
+                          \"job_id\":\"j1\",\"target\":\"ffffffff\"},\"status\":\"OK\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let result = conn.relogin_as("4test");
+
+        assert!(result.is_ok(), "a valid login response must succeed: {result:?}");
+        assert_eq!(*conn.session_id.lock().unwrap(), "sess2");
+
+        let timeout = {
+            let guard = conn.stream.lock().unwrap();
+            guard
+                .as_ref()
+                .expect("stream must be installed on success")
+                .tcp()
+                .read_timeout()
+                .expect("read_timeout query")
+        };
+        assert!(
+            timeout < Some(Duration::from_secs(1)),
+            "a successful relogin must restore the short poll interval, not leave \
+             the 30s login-wait timeout in place; got {timeout:?}"
+        );
+
+        let _ = server.join();
+    }
+
+    /// GitHub #37 review round 2 (R2-F1): both reference pool implementations
+    /// send `"error":null` on a *successful* login, not an absent `error`
+    /// field. The F1 fix's `.filter(|v| !v.is_null())` on the `error` check
+    /// matters for every real-pool login, not just the rejection case R2's
+    /// other new test covers — without the filter, `response.get("error")`
+    /// would return `Some(Null)` on every success and `login()` would fail
+    /// every real login with `"Login error: null"`. No prior test used this
+    /// shape; `a_successful_relogin_restores_the_poll_interval` omits `error`
+    /// entirely, so it can't catch a missing filter here.
+    #[test]
+    fn a_successful_login_with_an_explicit_null_error_still_succeeds() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"error\":null,\"result\":\
+                          {\"id\":\"sess3\",\"job\":{\"blob\":\"00\",\"job_id\":\"j1\",\
+                          \"target\":\"ffffffff\"},\"status\":\"OK\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let result = conn.relogin_as("4test");
+
+        assert!(
+            result.is_ok(),
+            "an explicit `\"error\":null` alongside a real result must not be \
+             mistaken for a rejection: {result:?}"
+        );
+        assert_eq!(*conn.session_id.lock().unwrap(), "sess3");
+
+        let _ = server.join();
+    }
+
+    /// End-to-end through the real `receiver_loop`: a failed donation relogin
+    /// must not leave the loop stuck re-reading a dead, unauthenticated
+    /// stream — it must fall into `reconnect()`, which retries using
+    /// `self.wallet` (the donation address), not a stale path.
+    ///
+    /// Donate level 100 means the very first rotation targets the Author
+    /// address at elapsed time ~0 (see `src/donate.rs`: `user` time is 0 when
+    /// `level == 100`), so no test hook is needed to trigger the switch.
+    #[test]
+    fn a_failed_donation_relogin_reconnects_through_the_real_receiver_loop() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<String>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                match n {
+                    0 => {
+                        // Held open, silent — the initial connection the
+                        // receiver loop starts on.
+                        held.push(sock);
+                    }
+                    1 => {
+                        let mut reader = BufReader::new(sock.try_clone().unwrap());
+                        let mut line = String::new();
+                        reader.read_line(&mut line).expect("a login request line");
+                        // Submit-OK shape again: no result.id, so login()
+                        // fails. Never closed — closing it would let the
+                        // unfixed code reach EOF and reconnect for the wrong
+                        // reason (see CLAUDE.md's break-testing section).
+                        let _ = sock.write_all(
+                            b"{\"id\":99,\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"OK\"}}\n",
+                        );
+                        let _ = sock.flush();
+                        held.push(sock);
+                    }
+                    2 => {
+                        let mut reader = BufReader::new(sock.try_clone().unwrap());
+                        let mut line = String::new();
+                        reader.read_line(&mut line).expect("a login request line");
+                        let _ = tx.send(line);
+                        let _ = sock.write_all(
+                            b"{\"id\":1,\"result\":{\"id\":\"sess3\",\"job\":{\"blob\":\"00\",\
+                              \"job_id\":\"j1\",\"target\":\"ffffffff\"},\"status\":\"OK\"}}\n",
+                        );
+                        let _ = sock.flush();
+                        held.push(sock);
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        });
+
+        // Donate level 100: the very first rotation targets Author.
+        let conn = Arc::new(PoolConnection::new(100));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+        // reconnect() needs both recorded, or it bails without retrying.
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+        // Leave silence_timeout_ms at its default — shortening it would let
+        // the unfixed code reconnect for a different reason entirely.
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        let login_line = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("a third accept (and login attempt) must happen within 15s");
+        let msg: Value = serde_json::from_str(login_line.trim())
+            .expect("the login line on the wire must be valid JSON");
+        assert_eq!(
+            msg.get("params").and_then(|p| p.get("login")).and_then(|l| l.as_str()),
+            Some(crate::donate::AUTHOR_ADDRESS),
+            "reconnect() must retry using self.wallet (the donation address), \
+             proving it is not stuck on a stale path: {login_line}"
+        );
+
+        let _ = server.join();
     }
 }

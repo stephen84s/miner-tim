@@ -334,6 +334,24 @@ pub struct PoolConnection {
     /// Mirrors `silence_timeout_ms`: tests shorten this field directly;
     /// production uses `ROTATION_SETTLE_LIMIT`'s default (#32).
     rotation_settle_ms: AtomicU64,
+    /// Set while a donation rotation is deferred waiting for outstanding
+    /// submissions to settle; `None` otherwise. Tied to the beneficiary
+    /// being deferred (checked in `rotation_settled`) AND cleared by
+    /// `reconnect()` on every call (#32 round 2, R2-F2).
+    ///
+    /// A field, not a `receiver_loop` local: `reconnect()`'s retry loop is
+    /// unbounded, so a real outage can span a FULL donation cycle or more
+    /// (#34 recorded 121 minutes; the default cycle is 100). The schedule
+    /// can then return to the *same* beneficiary that was originally being
+    /// deferred, with no intervening beneficiary ever observed by
+    /// `receiver_loop` to trigger the per-beneficiary mismatch check — the
+    /// first fix for this (checking only whether the stored beneficiary
+    /// differs from `want`) missed exactly this case, since nothing differs.
+    /// Clearing on every `reconnect()` ties invalidation to an actual
+    /// connection-discontinuity event instead of a beneficiary/time
+    /// heuristic — the same event that already clears `current_job`,
+    /// `stream` and `pending_shares`.
+    rotation_wait_since: Mutex<Option<(Beneficiary, Instant)>>,
 }
 
 impl Default for PoolConnection {
@@ -399,6 +417,7 @@ impl PoolConnection {
             submits_in_flight: AtomicU32::new(0),
             silence_timeout_ms: AtomicU64::new(POOL_SILENCE_TIMEOUT.as_millis() as u64),
             rotation_settle_ms: AtomicU64::new(ROTATION_SETTLE_LIMIT.as_millis() as u64),
+            rotation_wait_since: Mutex::new(None),
         }
     }
 
@@ -774,18 +793,14 @@ impl PoolConnection {
         // we start in the User slice.
         let donation_start = Instant::now();
         let mut active = Beneficiary::User;
-        // Set while a rotation is deferred waiting for outstanding
-        // submissions to settle; `None` otherwise. Tied to the beneficiary
-        // being deferred so a stale timestamp from an earlier, unrelated
-        // deferral episode cannot be reused by `rotation_settled` (#32).
-        let mut rotation_wait_since: Option<(Beneficiary, Instant)> = None;
-
         loop {
             // Rotate the login wallet between user/author/XMRig per the donation
             // schedule (see `crate::donate`). Switching re-logs-in on the same
-            // pool with the target wallet.
+            // pool with the target wallet. Deferral state for this now lives
+            // in the `rotation_wait_since` field, not a loop local — see its
+            // doc comment for why (#32 round 2, R2-F2).
             let want = self.donation.beneficiary_at(donation_start.elapsed().as_secs());
-            if want != active && self.rotation_settled(want, &mut rotation_wait_since) {
+            if want != active && self.rotation_settled(want) {
                 active = want;
                 let addr = self.beneficiary_address(want);
                 log::info!(
@@ -926,6 +941,13 @@ impl PoolConnection {
         }
         if let Ok(mut s) = self.stream.lock() {
             *s = None;
+        }
+        // Any donation-rotation deferral in progress is for a connection
+        // epoch that just ended — discard it rather than let its timestamp
+        // survive into whatever comes after reconnecting, however long that
+        // takes (#32 round 2, R2-F2; see the field's own doc comment).
+        if let Ok(mut w) = self.rotation_wait_since.lock() {
+            *w = None;
         }
         // Every reconnect goes through this one function, so this is the single
         // place a submission on the old connection can be declared lost rather
@@ -1219,18 +1241,16 @@ impl PoolConnection {
     /// Whether a pending donation rotation to `want` may proceed now. Called
     /// from the top of `receiver_loop`, with no lock held.
     ///
-    /// `wait_since` is `None` until the first deferral, then holds the
-    /// beneficiary being deferred and when the wait started; cleared again
-    /// once the rotation is allowed through.
+    /// `rotation_wait_since` is `None` until the first deferral, then holds
+    /// the beneficiary being deferred and when the wait started; cleared
+    /// again once the rotation is allowed through, and — more importantly —
+    /// by every call to `reconnect()` (#32 round 2, R2-F2; see the field's
+    /// own doc comment for why a time/beneficiary check alone isn't enough).
     ///
-    /// The stored beneficiary is checked against `want` before anything
-    /// else: `reconnect()`'s retry loop is unbounded, so the receiver thread
-    /// can block for far longer than a donation slice while a rotation is
-    /// deferred. If the schedule has moved on to a third, unrelated
-    /// beneficiary by the time it resumes, a timestamp left over from the
-    /// earlier deferral must not be reused — it would read as
-    /// already-waited-long-enough and let this new, unrelated rotation skip
-    /// its own deferral entirely (#32).
+    /// The stored beneficiary is still checked against `want` as a second,
+    /// cheaper line of defence: it catches a revert to a *different*
+    /// beneficiary within the same short, no-reconnect wait, without
+    /// needing to wait for a reconnect that may never happen in that case.
     ///
     /// Read order matters: `submits_in_flight` is read BEFORE
     /// `get_pending_shares()`. Reading `pending == 0` first would let a
@@ -1238,12 +1258,10 @@ impl PoolConnection {
     /// then read as `0` too, letting a rotation proceed past a share that
     /// just got registered. Reading in-flight first is safe because a
     /// submitter stays counted in-flight until after it registers (#32).
-    fn rotation_settled(
-        &self,
-        want: Beneficiary,
-        wait_since: &mut Option<(Beneficiary, Instant)>,
-    ) -> bool {
-        if matches!(wait_since, Some((b, _)) if *b != want) {
+    fn rotation_settled(&self, want: Beneficiary) -> bool {
+        let mut wait_since = self.rotation_wait_since.lock().unwrap();
+
+        if matches!(*wait_since, Some((b, _)) if b != want) {
             *wait_since = None;
         }
 
@@ -1266,6 +1284,10 @@ impl PoolConnection {
             }
             // No lock held here: the receiver has already released the
             // stream lock for this iteration by the time this is called.
+            // (The `rotation_wait_since` lock above is dropped at function
+            // return, well before this sleep — it's a short-lived guard
+            // around the decision, not held across the yield.)
+            drop(wait_since);
             thread::sleep(ROTATION_SETTLE_YIELD);
             false
         } else {
@@ -2669,9 +2691,8 @@ mod tls_tests {
     fn rotation_settled_defers_while_a_submission_is_in_flight() {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
         conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
-        let mut wait_since = None;
 
-        let proceeded = conn.rotation_settled(Beneficiary::Author, &mut wait_since);
+        let proceeded = conn.rotation_settled(Beneficiary::Author);
 
         assert!(
             !proceeded,
@@ -2679,29 +2700,28 @@ mod tls_tests {
              immediately and leave the share to be lost or go uncounted"
         );
         assert!(
-            wait_since.is_some(),
+            conn.rotation_wait_since.lock().unwrap().is_some(),
             "deferring for the first time must record when the wait started"
         );
     }
 
     /// A deferral episode's timestamp must not survive into an unrelated
-    /// rotation. `reconnect()`'s retry loop is unbounded, so the receiver
-    /// thread can block well past `ROTATION_SETTLE_LIMIT` during a real pool
-    /// outage; if the donation schedule has moved on to a third beneficiary
-    /// by the time it resumes, a stale timestamp left over from the earlier
-    /// deferral must be discarded rather than reused to let this new
-    /// rotation skip its own deferral (#32).
+    /// rotation *within the same no-reconnect wait*. This is the cheaper,
+    /// second line of defence described in `rotation_settled`'s doc comment
+    /// — the real fix for long outages is the field being cleared by
+    /// `reconnect()`, tested separately below.
     #[test]
     fn a_stale_wait_timestamp_for_a_different_beneficiary_is_discarded() {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
         // Simulate an old deferral episode for Author that started an hour ago --
         // long enough that `waited >= ROTATION_SETTLE_LIMIT` would trivially hold
         // if the stale timestamp were reused.
-        let mut wait_since = Some((Beneficiary::Author, Instant::now() - Duration::from_secs(3600)));
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Author, Instant::now() - Duration::from_secs(3600)));
         // One share still outstanding for a DIFFERENT, unrelated rotation to Xmrig.
         conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
 
-        let proceeded = conn.rotation_settled(Beneficiary::Xmrig, &mut wait_since);
+        let proceeded = conn.rotation_settled(Beneficiary::Xmrig);
 
         assert!(
             !proceeded,
@@ -2710,13 +2730,48 @@ mod tls_tests {
              already-waited-long-enough"
         );
         assert_eq!(
-            wait_since.map(|(b, _)| b),
+            conn.rotation_wait_since.lock().unwrap().map(|(b, _)| b),
             Some(Beneficiary::Xmrig),
             "the stale entry must be discarded and replaced with a fresh one for the \
              beneficiary actually being deferred now"
         );
 
         conn.submits_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// GitHub #32 round 2, R2-F2: the fix above (discard on beneficiary
+    /// mismatch) is NOT sufficient on its own. `reconnect()`'s retry loop is
+    /// unbounded, so a real outage can span a FULL donation cycle or more
+    /// (#34 recorded 121-minute outages; the default cycle is 100 minutes).
+    /// The schedule can then return to the exact SAME beneficiary that was
+    /// originally being deferred, with no intervening beneficiary ever
+    /// observed to trigger the mismatch check in the test above — so an
+    /// hour-old timestamp for the SAME beneficiary must also be discarded,
+    /// and the mechanism that does it is `reconnect()` clearing the field,
+    /// not a beneficiary comparison (which sees no mismatch here).
+    ///
+    /// This drives `reconnect()` itself, not a hand-set field, so it proves
+    /// the actual call path — not just that clearing-on-mismatch logic
+    /// would also happen to clear a same-beneficiary entry (it wouldn't).
+    #[test]
+    fn a_reconnect_discards_a_same_beneficiary_stale_wait_timestamp() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        // No address/wallet recorded, so `reconnect()` logs and returns
+        // `false` immediately after its teardown steps -- including the
+        // one under test -- without blocking on a real retry loop.
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Author, Instant::now() - Duration::from_secs(3600)));
+
+        let reconnected = conn.reconnect();
+
+        assert!(!reconnected, "no address/wallet recorded: reconnect() must fail fast");
+        assert!(
+            conn.rotation_wait_since.lock().unwrap().is_none(),
+            "reconnect() must discard any rotation-deferral timestamp, since it \
+             represents a connection epoch that has just ended — otherwise an \
+             hour-old entry for the SAME beneficiary survives into a later, \
+             unrelated deferral and lets it skip its own wait (R2-F2)"
+        );
     }
 
     /// Sets up a `PoolConnection` whose donation level (100%) rotates to the

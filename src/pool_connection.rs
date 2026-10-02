@@ -653,6 +653,15 @@ impl PoolConnection {
     // Lock order is stream -> pending_shares. Nothing takes them the other
     // way: `drain_pending_shares` and `handle_pool_message` take
     // `pending_shares` alone, after the stream guard has been released.
+    //
+    // A separate, independent order exists for `rotation_settled` (#32
+    // round 3, R3-F2): it holds `rotation_wait_since` while calling
+    // `get_pending_shares()`, i.e. rotation_wait_since -> pending_shares.
+    // No deadlock risk — only the receiver thread ever takes
+    // `rotation_wait_since`, and `reconnect()` releases it (via its own
+    // short `if let Ok(...)` block) before `drain_pending_shares()` runs —
+    // but documented here since it's a lock-order fact now true of the
+    // code, not because anything currently depends on it being checked.
     /// Returns `(lock_wait_ms, write_ms)` on success — timing instrumentation
     /// for issue #40, carried through from `main`'s version of this block
     /// (added directly inline there before this method existed; merged here
@@ -793,6 +802,9 @@ impl PoolConnection {
         // we start in the User slice.
         let donation_start = Instant::now();
         let mut active = Beneficiary::User;
+        // Tracks `want` across iterations for `note_donation_target` below —
+        // see its doc comment (#32 round 3, R3-F1).
+        let mut last_want = active;
         loop {
             // Rotate the login wallet between user/author/XMRig per the donation
             // schedule (see `crate::donate`). Switching re-logs-in on the same
@@ -800,6 +812,7 @@ impl PoolConnection {
             // in the `rotation_wait_since` field, not a loop local — see its
             // doc comment for why (#32 round 2, R2-F2).
             let want = self.donation.beneficiary_at(donation_start.elapsed().as_secs());
+            self.note_donation_target(want, &mut last_want);
             if want != active && self.rotation_settled(want) {
                 active = want;
                 let addr = self.beneficiary_address(want);
@@ -1238,19 +1251,55 @@ impl PoolConnection {
         self.request_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Clears any in-progress rotation deferral if `want` differs from the
+    /// value seen on the *previous* call — called unconditionally from the
+    /// top of `receiver_loop`, every iteration, before the `want != active`
+    /// branch that calls `rotation_settled`.
+    ///
+    /// This has to be unconditional, not folded into `rotation_settled`'s
+    /// own beneficiary-mismatch check, because that check only runs when
+    /// `rotation_settled` is called at all — which the call site skips
+    /// whenever `want == active`. That skip is exactly where a stale entry
+    /// survives in a **2-value ring**: at `--donate-level 100`, `User`'s
+    /// slice is zero-width, so the schedule only ever alternates
+    /// Author<->Xmrig. A deferred entry for Xmrig can then survive a full
+    /// trip back to Xmrig — the loop passes through `want == active` (the
+    /// *other* beneficiary, which by then IS `active`) without ever calling
+    /// `rotation_settled` to notice the mismatch, because at a 3-value ring
+    /// the "other" value is a third, different beneficiary that would
+    /// trigger it, but at a 2-value ring it's the exact one already stored
+    /// going the other direction (#32 round 3, R3-F1 — found after both the
+    /// beneficiary-mismatch check in `rotation_settled` and the `reconnect()`
+    /// clear from rounds 1-2 were already in place and still missed this).
+    ///
+    /// Extracted as its own method, not left inline in `receiver_loop`,
+    /// specifically so it has its own unit test — R3-F1's own review noted
+    /// that loop-local clearing logic "nothing exercises" is exactly the
+    /// shape of gap that let the first two rounds' fixes each miss something.
+    fn note_donation_target(&self, want: Beneficiary, last_want: &mut Beneficiary) {
+        if want != *last_want {
+            if let Ok(mut w) = self.rotation_wait_since.lock() {
+                *w = None;
+            }
+            *last_want = want;
+        }
+    }
+
     /// Whether a pending donation rotation to `want` may proceed now. Called
     /// from the top of `receiver_loop`, with no lock held.
     ///
     /// `rotation_wait_since` is `None` until the first deferral, then holds
     /// the beneficiary being deferred and when the wait started; cleared
-    /// again once the rotation is allowed through, and — more importantly —
-    /// by every call to `reconnect()` (#32 round 2, R2-F2; see the field's
-    /// own doc comment for why a time/beneficiary check alone isn't enough).
+    /// again once the rotation is allowed through, by every call to
+    /// `reconnect()` (#32 round 2, R2-F2), and by `note_donation_target`
+    /// above on every observed change of `want` (#32 round 3, R3-F1) — three
+    /// independent mechanisms, each closing a gap the others didn't.
     ///
-    /// The stored beneficiary is still checked against `want` as a second,
-    /// cheaper line of defence: it catches a revert to a *different*
-    /// beneficiary within the same short, no-reconnect wait, without
-    /// needing to wait for a reconnect that may never happen in that case.
+    /// The stored beneficiary is still checked against `want` here too, as
+    /// a third, cheaper line of defence reached on the same call that would
+    /// otherwise use the stale entry — redundant with `note_donation_target`
+    /// in the 3-value-ring case, not redundant in the 2-value-ring case if
+    /// `note_donation_target`'s own call site were ever changed.
     ///
     /// Read order matters: `submits_in_flight` is read BEFORE
     /// `get_pending_shares()`. Reading `pending == 0` first would let a
@@ -1284,9 +1333,10 @@ impl PoolConnection {
             }
             // No lock held here: the receiver has already released the
             // stream lock for this iteration by the time this is called.
-            // (The `rotation_wait_since` lock above is dropped at function
-            // return, well before this sleep — it's a short-lived guard
-            // around the decision, not held across the yield.)
+            // The `rotation_wait_since` lock is dropped explicitly right
+            // here (R3-F2: an earlier comment said "at function return",
+            // which was wrong — it's this `drop()`, not scope exit) so it
+            // isn't held across the sleep either.
             drop(wait_since);
             thread::sleep(ROTATION_SETTLE_YIELD);
             false
@@ -2771,6 +2821,64 @@ mod tls_tests {
              represents a connection epoch that has just ended — otherwise an \
              hour-old entry for the SAME beneficiary survives into a later, \
              unrelated deferral and lets it skip its own wait (R2-F2)"
+        );
+    }
+
+    /// GitHub #32 round 3, R3-F1: at `--donate-level 100` the rotation ring
+    /// has only two values (`User`'s slice is zero-width, so the schedule
+    /// alternates Author<->Xmrig). A deferred entry for Xmrig can survive a
+    /// full trip back to Xmrig — `want` passes through Author (which is
+    /// `active`) without ever calling `rotation_settled` to notice the
+    /// mismatch, since at a 2-value ring "the other beneficiary" IS the one
+    /// already stored, not a third, different one. Neither the beneficiary-
+    /// mismatch check inside `rotation_settled` nor `reconnect()`'s clear
+    /// (rounds 1-2) catches this — proven by the review that found it via a
+    /// direct call to `rotation_settled` with a backdated same-beneficiary
+    /// entry, which returned `true` with a share still in flight.
+    ///
+    /// This test drives `note_donation_target` directly rather than the full
+    /// `receiver_loop` (a real `CYCLE_SECS` cycle is 6000s minimum — not
+    /// something a test can wait out), but it's the exact method the loop
+    /// calls unconditionally every iteration, not a reimplementation of it.
+    #[test]
+    fn a_stale_entry_does_not_survive_a_two_value_ring_round_trip() {
+        let conn = PoolConnection::new(crate::donate::MAX_DONATE_LEVEL);
+        // Reflects a prior loop iteration having observed `want == Xmrig`,
+        // which is what led to the stale entry below being created.
+        let mut last_want = Beneficiary::Xmrig;
+
+        // An old deferral for Xmrig, hours in the past -- long enough that
+        // `waited >= ROTATION_SETTLE_LIMIT` would trivially hold if reused.
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Xmrig, Instant::now() - Duration::from_secs(3600)));
+
+        // The schedule moves to the ring's only OTHER value (Author, which
+        // is `active` at this point) -- this is exactly the transition
+        // `rotation_settled`'s own mismatch check cannot see, because the
+        // call site skips calling it whenever `want == active`.
+        conn.note_donation_target(Beneficiary::Author, &mut last_want);
+        assert!(
+            conn.rotation_wait_since.lock().unwrap().is_none(),
+            "a transition to the ring's other value must clear a stale \
+             deferral for the value being left behind"
+        );
+        assert_eq!(last_want, Beneficiary::Author);
+
+        // The schedule comes back around to Xmrig -- the SAME beneficiary
+        // the (now-cleared) stale entry was originally for.
+        conn.note_donation_target(Beneficiary::Xmrig, &mut last_want);
+
+        // End-to-end consequence: a fresh rotation to Xmrig with a share in
+        // flight must still defer -- proving the system doesn't just clear
+        // the field once, but behaves correctly on the next real rotation
+        // attempt for the value that was previously stale.
+        conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
+        let proceeded = conn.rotation_settled(Beneficiary::Xmrig);
+        assert!(
+            !proceeded,
+            "a fresh rotation to a value seen before in the ring must still \
+             defer for an in-flight submission, not inherit a stale timestamp \
+             from the previous visit to that same value"
         );
     }
 

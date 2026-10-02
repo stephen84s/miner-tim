@@ -39,7 +39,7 @@ AUDIT.md:7168 still says "no verification of the xmrig source was performed in t
 
 ### R2-F3 (minor, AUDIT accuracy) — the review paragraph misreports round 1's findings
 Header says "4 minors, 3 nits"; body lists "Two real findings" (F1, F2), F3 inline, and two nits. F4 (xmrig bullet) and N3 (no sealed prediction) are silently dropped — "Two real findings" reads as if the other minors were not real. Also the F1 bullet says the pre-fix code "silently read that as a successful login ... swallowing the pool's real rejection reason ... behind a generic error": those are two different behaviours (main: `Ok(())`, silent; pre-review branch: `Err("...no session id: null")`, loud but wrong reason). Round 1's ledger kept them apart.
-And the commit deleted the bullet that recorded the tier decision "before the review runs", which is the only pre-registration this entry had (N3 already noted there was no prediction); now there is not even the decision record. Unmerged entry, so editing in place is allowed — but the grading record lost content.
+(Sub-point downgraded to nit on reflection: the commit deleted the bullet recording the tier decision; that bullet's "has not yet run" was false once round 1 ran, so removing it was right — only the one-line tier rationale was lost.)
 
 ### R2-N1 (nit, format) — **Review (** paragraph is a lazy continuation of the last bullet
 AUDIT.md:7170 (last "Not established" bullet) is followed at :7171 by `**Review (Opus, ...` with no blank line, so GFM renders it as part of the "No live evidence" list item. `grep '^\*\*Review ('` still finds it; rendering does not. Every neighbouring entry (7065, 7113, 7132) has the blank line.
@@ -53,5 +53,15 @@ Old trailing branch was reached only when `result` was absent. New outcomes for 
 ### Q6 — green
 `rtk proxy cargo test --release`: 176 lib passed / 2 ignored, 20 bin. `rtk proxy cargo test` (debug): 176 / 2 ignored, 20. `cargo clippy --all-targets --release -- -D warnings`: clean. Concurrency/resources: this commit only changes response parsing and adds a test; no lock or allocation change.
 
+### R2-F4 (minor, false claim in src/) — the new test's doc comment describes main's behaviour as this branch's pre-F1 behaviour
+`src/pool_connection.rs`, doc comment on `a_login_rejection_with_a_null_result_reports_the_real_reason`: "Before the F1 fix, checking `result` first ... made this `Ok(())`: ... silently treated as a successful login". Q3 (my revert of F1 alone) shows the pre-F1 branch code returned `Err("Login response carried no session id: null")` — loud, wrong reason. `Ok(())` was **main's** behaviour (round 1 F1 kept the two apart). The same comment's last sentence ("rather than being replaced with a generic \"no session id\" message") describes the true pre-F1 behaviour, so the comment contradicts itself. Commit message repeats it ("the pre-fix code (same as main)"). Unlike the AUDIT copy (R2-F3), this one lands on main. Fix: "On main, ... made this `Ok(())`; after the session-id check but before F1, it failed with a generic \"no session id: null\" instead of the pool's reason."
+
+### Other worktree check (read-only)
+`.claude/worktrees/issue-32/src/pool_connection.rs`: 0 matches for this branch's new test name or "Login response carried no session id"; `git status --short` clean at 6f74358. No sign it was restored from my copy.
+
+### CI (re-queried at end)
+All six checks on 2c9aac2 SUCCESS: lint, test, audit, jit-macos, jit-linux-arm, mutation (advisory).
+
 ## Verdict
-**Mergeable.** 0 blockers, 0 majors, 3 minors (R2-F1 test gap; R2-F2, R2-F3 AUDIT accuracy), 1 nit. The code change is correct and its claims (Q3, Q4, Q5, Q6) all reproduce. Recommend before merge, since the entry is unmerged and cheap to fix: resolve the stale xmrig bullet (R2-F2) and add the blank line (R2-N1). R2-F1 is a one-test addition worth making in this PR. Not verified: CI's jit-* jobs (pending at check time); no live run.
+**Mergeable once R2-F2 and R2-F4 are corrected** (both text-only, no code change). Gating them for consistency with round 1, which gated F3: each is a false or self-contradicted claim in a load-bearing record (R2-F2 in AUDIT.md; R2-F4 in src/, which lands on main). R2-F1 (one success-login test with `"error":null`) is strongly recommended in this PR but not gating: a regression there is loud (every login fails at startup), not silent. R2-F3 and R2-N1 are cheap to fix alongside.
+Totals: 0 blockers, 0 majors, 4 minors (R2-F1..F4), 1 nit (+1 downgraded sub-point), 0 handed off. Code change itself (reorder, filters, dead-branch removal) is correct; Q3/Q4/Q5/Q6 all reproduce. Not verified: any live run.

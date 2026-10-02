@@ -663,11 +663,10 @@ impl PoolConnection {
     // but documented here since it's a lock-order fact now true of the
     // code, not because anything currently depends on it being checked.
     /// Returns `(lock_wait_ms, write_ms)` on success — timing instrumentation
-    /// for issue #40, carried through from `main`'s version of this block
-    /// (added directly inline there before this method existed; merged here
-    /// when rebasing past that change). `Instant` captures only; no lock
-    /// scope, ordering, or write/insert sequence changed from the version
-    /// without them.
+    /// for issue #40: time spent waiting for the stream lock, and time spent
+    /// in the write itself, each in milliseconds. (R4-N1: merge-history
+    /// detail on how these came to live here belongs in `AUDIT.md`, not
+    /// this comment — see NET-05's entry.)
     fn write_and_register(
         &self,
         rpc_id: u64,

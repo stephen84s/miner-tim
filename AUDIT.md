@@ -7581,3 +7581,37 @@ The "Sealed expectations" section of `tasks/PROC-09.md` (commit `c72e75f`, the r
 - Whether the `_shared-context.md` fix for the exits-141 gap reaches all six agents, not just the one (`ci-reviewer`) individually re-checked via V4b after the fix.
 - Why three of the twelve primary/worktree probe runs behind Finding 3 recorded `exit=1` in the probe script's own log while their `--output-format json` output reported successful completion (round-1 review, N5). The JSON-reported results were used throughout, consistent with the other nine runs, but the log/exit-code discrepancy itself was not investigated — it lives in a session scratchpad, not a repo artifact.
 - Whether the two new `pr-reviewer.md` bullets (review-tier format, stale-base check) are themselves complete — they came from one `grep` pass over past review findings in the time available, not a systematic inventory.
+
+### PROC-09-CLEANUP (2026-10-03): Mark PROC-09 completed after merge (#46)
+
+**Request / Goal**
+
+PROC-09 (#46) merged as `88701c1` after two independent Opus review rounds (see the PROC-09 entry above, "Review" section, for both rounds' findings and grading). Per this repo's own rule ("do not leave a task 'Active' once it is complete" — now also in `audit-writer.md`, added by PROC-09 itself), `tasks/PROC-09.md`'s `**Status:**` and `CLAUDE.md`'s "Current task" blurb both still said "Active"/"pending review" after the merge. This entry is the one-line follow-up that fixes that, on its own branch because `main` is protected and accepts no direct pushes regardless of triviality.
+
+**Files Changed**
+
+- `tasks/PROC-09.md`: `**Status:** Active` → `**Status:** Completed`.
+- `CLAUDE.md`: "Current task" blurb — "Active (implementation done, pending review)" → "Completed, merged as #46 (two independent review rounds, Opus tier)".
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `PROC-09` line — **missed in this entry's first draft, caught by round-1 review (blocker).** The brief's own stated purpose named two stale locations and there was a third; this is exactly the "silently dropped one of N items" pattern this repo's own protocol warns about, now happening to the entry that itself documents that warning.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping.
+
+**Verification Performed**
+
+- `rtk proxy cargo test --release`, `cargo clippy --all-targets --release -- -D warnings`, `make check`: all clean, no Rust source touched.
+- Confirmed `88701c1` is `origin/main`'s tip and is PR #46's merge commit (`gh pr view 46 --json state,mergeCommit`).
+- Round-1 review independently re-ran `git diff main...origin/docs/proc-09-mark-completed --stat`, confirmed the self-correction commit (`c912694`) actually removes the two accidentally-swept files from the branch tip (`git ls-tree`), and confirmed both the "audit-writer.md gained the rule" and "two independent Opus rounds" claims against `88701c1`'s own diff and this file's own line numbers.
+
+**No review ledger.** Scope too small to warrant one; the reviewer's findings are folded directly into this entry.
+
+**No sealed prediction was written before review spawned**, unlike PROC-09 itself — reasonable given the trivial scope, but named here rather than silently skipped, per this file's own grading-honesty rule.
+
+**Review**
+
+**Review (Sonnet, round 1): not mergeable as first pushed — one blocker, three process minors, all fixed in this same entry.** Blocker: `tasks/README.md` was missed (see "Files Changed" above). Minors: this paragraph was a literal unfilled `<pending>` placeholder at review time (fixed by writing this verdict in); no sealed prediction existed before the review ran (now named above rather than left implicit); no ledger existed (now stated explicitly above rather than left as an empty slot). The review also flagged, non-blocking, that the two files removed in the self-correction commit remain retrievable from pushed history (`1cdf2f7`, and `refs/pull/47/head`) even though gone from the branch tip — checked their contents for anything sensitive (wallet address, pool hostname, password): none found, only ephemeral Stratum session IDs and hashrate stats. **False positives: 0.**
+
+**Not Established**
+
+Nothing beyond what PROC-09's own entry already lists.

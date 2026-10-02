@@ -7130,3 +7130,44 @@ this session.
 **Not established.** Whether the silence-detection path itself works — the condition it exists to catch still did not occur. Silence detection remains unexercised in production; a real pool going silent is the only path that would exercise it.
 
 **Review (Sonnet, `pr-reviewer`):** 0 blockers, 0 majors, 1 minor, 0 false positives. The minor: the "longest job gap 22 seconds" figure had been copied from LIVE-02's own number rather than recomputed for this run; independently remeasured (two methods) at **24 seconds** — fixed above and in `tasks/LIVE-03.md`. Substance unchanged (still far below the 180s threshold, still 0 detections). Separately, the review traced a real pattern — found-to-submit latency averaging 7.8s, max 34s, visible by pairing `SHARE FOUND` to `Share submitted` by nonce — and ruled it out as a regression from #35/#36 (the same pattern pre-dates both fixes, visible in `LIVE8H_RUN.log`; the stream lock is held only for one bounded ~50ms read, nowhere near the observed latency). Filed as **#40** rather than fixed here, since it's a pre-existing characteristic outside this PR's scope, not something this entry's accuracy claims depend on. Ledger: `REVIEW_PR39.md`, removed from the tree in this commit; retrieve with `git show d596533:REVIEW_PR39.md`.
+
+### NET-04 (2026-10-02): Close stream-clear and session-id-check gaps in relogin and login (#37)
+
+**The bug.** GitHub #37 reported: "A failed donation relogin leaves a live stream behind with a stale session and a 30s read timeout." `relogin_as()` (the donation-rotation login path in `src/pool_connection.rs`) tears down the current stream, connects, and logs in with a new wallet. If `login()` failed after `connect()` had already succeeded, the function returned early via `?` without clearing the stream — leaving a live, unauthenticated connection behind with the *previous* session id still active and a 30-second read timeout (vs. the normal 50ms poll interval), during which the receiver loop's read holds the stream lock. Separately, `login()` treated any pool response containing a `"result"` key as a successful login, even if that result had no session `id` — meaning a submit-acknowledgement reply mistakenly read as the login reply (a real race: `connect()` installs the new stream before `login()` updates the session id, so a share submitted in that window writes onto the new socket) caused `login()` to return `Ok` with no session id update and no job installed, leaving a permanently stale session with no error at all.
+
+**The fix, two changes in `src/pool_connection.rs`:**
+
+1. `relogin_as`: on any failure of `connect().and_then(|_| login(wallet))`, the stream is now explicitly cleared (`*stream.lock() = None`) before returning `Err`. This sends the receiver loop's next read into `NotConnected`, which triggers the normal `reconnect()` path (retrying cleanly with `self.wallet`, already set to the donation address). The function's doc comment now states the postcondition plainly: on return, either the stream is `None`, or the connection is logged in with the 50ms poll interval restored.
+
+2. `login()`: a response with a `"result"` key but no string `"id"` field now returns `Err("Login response carried no session id: ...")` *before* any job is installed, rather than silently treating it as success. This matches xmrig's `Client::parseLogin`, which also refuses a login with no rpc id. Turns the "submit reply misread as login reply" case into a clean failure, which change (1) then handles.
+
+Two explanatory comments were also updated (not logic changes): the long comment in `submit_share` about the stale-session-id window (still open in general, but now notes what #37 specifically closed), and a receiver-loop comment that previously said "stream is torn down" in a case where, pre-fix, it sometimes wasn't.
+
+**Tests added**, in `mod tls_tests` in `src/pool_connection.rs`, under a `// --- GitHub #37: a failed relogin must not leave a live stream ---` heading:
+
+- `a_failed_relogin_login_leaves_no_stream_behind` — isolates the `relogin_as` fix: a login that gets an error reply must leave the stream `None`, not just return `Err` (the real bug was never caught by `.is_err()` alone, since the unfixed code also returns `Err` — the stream-is-none check is what's load-bearing).
+- `a_submit_reply_read_as_the_login_reply_fails_the_relogin` — covers the `login()` fix: a submit-ack-shaped reply (`{"id":99,"result":{"status":"OK"}}`, no session id inside `result`) must fail the relogin and leave `session_id` unchanged, not silently "succeed".
+- `a_successful_relogin_restores_the_poll_interval` — guards against a future deletion of the `set_read_timeout` restore call.
+- `a_failed_donation_relogin_reconnects_through_the_real_receiver_loop` — end-to-end: drives the real `receiver_loop` (not a helper) through a donation rotation whose login fails, and asserts a third connection attempt arrives within 15s, carrying the donation wallet — proving the fix actually reaches production code, not just a unit-level helper.
+
+**Files changed:** `src/pool_connection.rs` (stream-clear on `relogin_as` failure, session-id check in `login()`, comment updates, four new tests).
+
+**Verification performed:**
+
+- `rtk proxy cargo test --release`: 175 lib passed (0 failed, 2 ignored — same 2 as before this change), 20 bin passed. (+4 over the pre-change 171, exactly the four new tests.) Lead independently re-ran this and confirms the same counts.
+- `cargo clippy --all-targets --release -- -D warnings`: clean. Lead independently re-ran this and confirms clean.
+- `make check`: passes.
+- **Break-tested, three separate reverts, each restored and `cmp`-verified byte-identical afterward:**
+  1. Reverting only the `relogin_as` stream-clear: tests `a_failed_relogin_login_leaves_no_stream_behind`, `a_submit_reply_read_as_the_login_reply_fails_the_relogin`, and `a_failed_donation_relogin_reconnects_through_the_real_receiver_loop` all fail (the first two on the stream-is-none assertion specifically, the third on a 15s timeout waiting for a third connection attempt that never arrives).
+  2. Reverting only the `login()` session-id check: `a_submit_reply_read_as_the_login_reply_fails_the_relogin` and the end-to-end test fail; `a_failed_relogin_login_leaves_no_stream_behind` **still passes**, demonstrating it isolates the `relogin_as` fix independently of the `login()` fix, as intended.
+  3. Deleting the `set_read_timeout(RECV_POLL_INTERVAL)` restore line: `a_successful_relogin_restores_the_poll_interval` fails (asserting the read timeout is still ~30s instead of restored to ~50ms).
+- `./scripts/mutants.sh 'relogin_as|login' 'pool_connection::'`: 4 mutants tested, 2 caught (both functions' whole-body replacement with `Ok(())`), 2 unviable (don't compile — unrelated `&&`→`||` swaps inside existing let-chains). **Caveat:** cargo-mutants did not generate a mutant for the specific `*s = None` stream-clear line or the `let...else` early-return itself — so the "0 missed" mutants result does not by itself certify either fix; the three hand-written break-tests above are the actual evidence for those two specific lines.
+
+**Not established.**
+
+- The general stale-session-id window in `submit_share` (the `sid` read happens before any lock is taken, and `login()` writes `session_id` after `send_request` has released the stream lock) remains open. Filed as GitHub #41; two design options are summarized in that issue. This fix closes only the immediate failure path discovered in #37, not the general window.
+- Whether the xmrig `Client::parseLogin` equivalence claim is correct — this fix assumes that parser refuses a login with no rpc id, as stated in the plan; no verification of the xmrig source was performed in this session.
+- Whether test 2 (`a_submit_reply_read_as_the_login_reply_fails_the_relogin`) discriminates between the two fixes — the `session_id` unchanged assertion passes identically whether only the `relogin_as` fix or only the `login()` fix was reverted, so it is a sanity check the plan required but does not isolate the `login()` change alone from the `relogin_as` change. The test's true load-bearing assertion is the logged warning that relogin failed.
+- No live evidence yet with this fix deployed — the 7-hour run (LIVE-03) was on `main` before this branch existed.
+- Independent review has not yet run. The diff touches shared state (stream and session_id) and the stream lock; `CLAUDE.md`'s tier table puts review of concurrency and shared state on Opus, and the lead chose Sonnet for `pr-reviewer` despite this; that choice is recorded here for later analysis of review-tier performance.
+

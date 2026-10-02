@@ -46,3 +46,4 @@ Newest last.
 - **[NET-02](NET-02.md)** — Detect a silent pool instead of mining a stale job forever (#34). *(Completed)*
 - **[LIVE-02](LIVE-02.md)** — 12-hour verification run on silent-pool and share-id fixes; merged despite inconclusive result. *(Completed)*
 - **[LIVE-03](LIVE-03.md)** — Confirmatory 7-hour live run with both fixes deployed. *(Completed)*
+- **[NET-04](NET-04.md)** — Close stream-clear and session-id-check gaps in relogin and login (#37). *(Implemented; awaiting review)*

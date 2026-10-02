@@ -4,14 +4,14 @@ Reviewer: pr-reviewer (Opus), cold. Branch `fix/issue-32-rotation-share-loss` @ 
 Scope: diff touches AUDIT.md, CLAUDE.md, src/bin/minertim.rs, src/miner.rs, src/pool_connection.rs, tasks/. No jit/benches/workflows/Makefile/scripts/.cargo — nothing handed off.
 
 ## Coverage
-- [ ] 1 correctness of new code (F1/F2 fixes)
-- [ ] 2 silent failure
-- [ ] 3 safety switches (n/a expected)
-- [ ] 4 tests / break-tests (F1, F2, mutants)
-- [ ] 5 resource use
-- [ ] 6 docs/audit accuracy (F3, F4, ledger sha, rebase comment block)
-- [ ] 7 concurrency
-- [ ] up-to-date with main, CI on rebased head
+- [x] 1 correctness of new code (F1/F2 fixes) — R2-F2
+- [x] 2 silent failure — no new swallow; unsent/lost both logged+counted; ledger identity traced through miner.rs worker path, holds
+- [x] 3 safety switches — none touched
+- [x] 4 tests / break-tests (F1, F2, mutants) — reproduced; R2-F2 has no test
+- [x] 5 resource use — nothing new (one Option<(Beneficiary,Instant)> local)
+- [x] 6 docs/audit accuracy — R2-F1, R2-F3, R2-F4, R2-F5, R2-F6
+- [x] 7 concurrency — no new lock; gate still reads in_flight before pending; Gap-B window between gate-true and relogin_as nulling stream is the documented deferred window
+- [x] up-to-date with main, CI on rebased head — yes
 
 ## Findings
 
@@ -42,3 +42,15 @@ LIVE12H_FIX.log last stats line: `Shares: 870/0 (lost:3) (found:874)` — one sh
 
 ### R2-F4 (minor): verification counts are pre-rebase
 AUDIT says "180 lib passed (+9 over the pre-change 171)". On the rebased head: 186 passed (+9 over main's 177, per #42's entry). The delta is right, both absolutes are stale — the paragraph describes a tree that no longer exists ("verification measured the wrong tree" is a prior #29 finding shape).
+
+- mutants.sh 'submit_share|write_and_register|rotation_may_proceed|rotation_settled' 'pool_connection::': 17 tested / 13 caught / 1 unviable / 3 missed — reproduced exactly. All 3 MISSED on line 1255 (`in_flight + pending as u32 > 0`, chooses warn vs info log text) — equivalent for behaviour. Note: the new staleness check sits inside `matches!(...)`, which cargo-mutants does not mutate, and the removed/needed reset lives in `receiver_loop`, outside the regex — so "unchanged 17" means the new logic has ZERO mutant coverage, not that it is covered.
+
+### R2-F5 (minor): AUDIT/tasks cite NET-06 as confirmation, but NET-06 exists only on unmerged PR #45
+d5bf8ee added "since **confirmed directly** — see NET-06, which measured `lock_wait_ms` ... and traced two real share rejections to it". `### NET-06` is in dce3d73 on `investigate/issue-40-submit-latency` (PR #45, open), not on main or this branch. If #43 lands first, main's authoritative record cites an entry that does not exist and a result that has not been through its own review. Either merge #45 first or word it as "under investigation in PR #45 (NET-06, unmerged)". Not verified by me: the NET-06 measurements themselves.
+
+### R2-F6 (nit): statuses say "Completed" while the PR is still in review
+CLAUDE.md Current task, tasks/NET-05.md and tasks/README.md all say Completed; the review round this file records is still open. tasks/NET-05.md also gives 186 lib tests while AUDIT says 180 — the summary and the authoritative record disagree (see R2-F4).
+
+## Verdict
+**Not mergeable as it stands.** No blocker. R2-F2 is a defect introduced by the fix for round-1 F2: deleting the `want == active` reset re-opens the stale-timestamp path for a same-beneficiary return (A deferred -> outage in reconnect() past the slice -> back to User -> next cycle A proceeds without deferral), and AUDIT.md asserts the opposite ("closing the gap unconditionally", "subsumes it"). Behavioural impact is small and counted (a share lands in lost/unsent, not silently), so on impact alone it is minor — but it is a false claim in the authoritative record about the previous round's fix, it reopens a path the prior head closed, and the fix is one restored line plus one test. Fix before merge: restore the external reset (keep both), add a test, correct the AUDIT sentences; also R2-F1 (record 995a1ee, and re-record after any further rebase), R2-F4 (186/177), R2-F5 (NET-06 dependency). R2-F3/R2-F6 optional.
+Not verified: NET-06's data; behaviour under a real outage (reasoned + unit-modelled only); x86_64 CI beyond reading its green status.

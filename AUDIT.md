@@ -7392,3 +7392,128 @@ Round 1 ledger: `REVIEW_PR43.md`, removed from the tree before merge; retrieve w
 - **R4-N1 (nit, fixed)**: `write_and_register`'s doc comment told merge history that belongs in this file, not the source. Simplified in the source to just describe the return value.
 
 Round 4 ledger: `REVIEW_PR43_R4.md`, removed from the tree before merge; retrieve with `git show c0d1de0:REVIEW_PR43_R4.md`.
+
+### PROC-09 (2026-10-03): Subagents stop loading CLAUDE.md (omitClaudeMd: true + compensation)
+
+**Request / Goal**
+
+First PR of the Claude-Code-native migration (research phase in `AIDLC_MIGRATION_PLAN_RESEARCH.md`, committed in this worktree). Set `omitClaudeMd: true` on all six `.claude/agents/*.md` agent definitions and paste each agent's real CLAUDE.md dependencies directly into its own body (or into `_shared-context.md`) in the same PR, so no agent silently loses a fact it needs. No CLAUDE.md rewrite, no new rules/skills/hooks infrastructure — those are later, separate PRs.
+
+**Files Changed**
+
+- `.claude/agents/_shared-context.md`: added "Agents do not load CLAUDE.md" intro paragraph; rewrote caffeinate rule fully self-contained (previously said "see CLAUDE.md's rule"); added "CI runs only where a PR exists" bullet.
+- `.claude/agents/audit-writer.md`: corrected stale `description:` ("task-board rows" → "tasks/ files"); added three new bullets (correction rule, issue-numbering convention, ledger-sha requirement).
+- `.claude/agents/break-tester.md`: added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/ci-reviewer.md`: added "Facts about this repo's CI" section (trigger rules, five required checks and job names, jit-macos ~14min figure, ledger-check step name); added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/jit-reviewer.md`: added "Architecture facts (copied from CLAUDE.md...)" section (JIT two-mode summary, register allocation, CBRANCH i16→i32 cast rule, failed-mmap fallback, native-loop +6.8%-7.4% gain figure, Linux mprotect cost note); added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/pr-reviewer.md`: extended existing checklist items 2, 3, 6 in place (silent failure section gained ShareVerifier/classify_share/ShareVerdict facts; safety switches gained empty-value fail-safe and env-var-vs-mining.conf facts; AUDIT.md-append bullet corrected and gained issue-numbering-convention bullet); added "Local trap: filtered `cargo test`" section.
+- `.claude/agents/rust-implementer.md`: added paragraph of house Rust conventions (snake_case/PascalCase/UPPER_SNAKE_CASE, log macros, Result<T, String>).
+- `CLAUDE.md`: added new paragraph in step-0 "Reviewer agents" bullet stating agents don't load this file and that path-scoped rules still load lazily; inserted seven one-line HTML comments (`<!-- Copied into ... -->`) as drift guards; updated Current-task pointer to PROC-09.
+- All six `.claude/agents/*.md` files: added `omitClaudeMd: true` to their YAML frontmatter.
+
+Total: 8 files changed, 158 insertions, 8 deletions in the original commit before rebase.
+
+**Behaviour / Content Changes**
+
+All six agent definitions now carry `omitClaudeMd: true` in frontmatter, preventing auto-load of project `CLAUDE.md`, user-global `~/.claude/CLAUDE.md` (and its `@RTK.md` import), and user auto-memory. Path-scoped `.claude/rules/*.md` files still load lazily when an agent reads a matching file (verified empirically; see "Empirical evidence" below).
+
+Each agent gained compensation text — either a new section in its own body or pasted into `_shared-context.md` — containing the specific CLAUDE.md passages it needs to function. Examples: `jit-reviewer.md` gained register-allocation facts and the +6.8%-7.4% native-loop gain figure; `ci-reviewer.md` gained the trigger rule (pull_request/workflow_dispatch only, never push) and the ~14min jit-macos duration; `pr-reviewer.md`'s existing silent-failure checklist item was extended with actual code facts (ShareVerifier::reference, classify_share, ShareVerdict).
+
+Seven one-line HTML comments were inserted into CLAUDE.md's step-0 bullet, each naming the agent file(s) that received a copy of the passage it guards. These comments are not instructions — they are drift alerts: if that passage is edited later, the comments mark where each copy must be updated too.
+
+**Empirical Evidence (the core of this entry's "done" criterion)**
+
+**Finding 1: `omitClaudeMd: true` suppresses project CLAUDE.md, user-global `~/.claude/CLAUDE.md`, and auto-memory — but NOT path-scoped `.claude/rules/*.md` files.**
+
+Established by controlled probe (two throwaway agent definitions, identical except `omitClaudeMd: true` on one; a throwaway `.claude/rules/canary.md` scoped to `paths: ["src/hex.rs"]` containing a nonce string; three-step checks: before any read, after reading a non-matching file, after reading the matching file). Run headless via `claude -p` from this worktree (Claude Code 2.1.287), with control run from primary checkout (no omit). Verbatim results:
+
+Control (CLAUDE.md loaded):
+```
+STEP1: 1a=FOUND 1b=FOUND 1c=NONE
+STEP2: 1c=NONE
+STEP3: 1c=FOUND
+```
+(1a = "560k tokens" marker, 1b = "Rust Token Killer" marker, 1c = nonce)
+
+Flagged (omitClaudeMd: true):
+```
+STEP1: 1a=NONE 1b=NONE 1c=NONE
+STEP2: 1c=NONE
+STEP3: 1c=FOUND
+```
+
+Conclusion: `omitClaudeMd` removed global-file markers (1a, 1b both NONE); path-scoped rule still loaded correctly on path match (1c absent until the matching file was read). Resolves the research doc's stated open question on this point.
+
+**Finding 2: Token-usage delta, Haiku probes differing only in `omitClaudeMd`, trivial task ("say exactly 'ack-X'"), `--output-format json`.**
+
+Control (CLAUDE.md loaded): Haiku `modelUsage` showed `inputTokens: 10, cacheCreationInputTokens: 15404`.
+Flagged (`omitClaudeMd: true`): Haiku `modelUsage` showed `inputTokens: 3380, cacheCreationInputTokens: 0`.
+
+Delta: roughly 12.0k tokens of combined CLAUDE.md/RTK.md/auto-memory baseline. Note: this is one n=1 pair on trivial-task micro-baseline, not a measurement of real-agent spawns; Finding 3 covers those.
+
+**Finding 3: Real-agent behavioural + token verification (V3/V4/V5 combined) — the primary evidence.**
+
+For each of the six real agents, spawned twice headless via `claude -p` with `model: haiku` override and zero tool calls: once from primary checkout (control, pre-PROC-09 definitions) and once from this worktree (flagged, post-PROC-09 definitions). Each asked to report FOUND/NOT-FOUND for three markers — "Identity & Mandate" (CLAUDE.md), "Rust Token Killer" (RTK.md), "exits 141" (auto-memory) — plus one agent-specific functional-knowledge question. Verbatim results:
+
+| Agent | Tree | Identity & Mandate | Rust Token Killer | exits 141 | Functional check |
+|---|---|---|---|---|---|
+| jit-reviewer | primary | FOUND | FOUND | FOUND | x16 / falls through — correct |
+| jit-reviewer | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | x16 / falls through — correct |
+| ci-reviewer | primary | FOUND | FOUND | FOUND | pull_request, workflow_dispatch — correct |
+| ci-reviewer | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | pull_request, workflow_dispatch — correct |
+| pr-reviewer | primary | FOUND | FOUND | FOUND | "warns, leaves intact" — correct |
+| pr-reviewer | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | "warns, leaves intact" — correct, quoted from pasted text |
+| rust-implementer | primary | FOUND | FOUND | FOUND | UPPER_SNAKE_CASE — correct |
+| rust-implementer | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | UPPER_SNAKE_CASE — correct |
+| audit-writer | primary | FOUND | FOUND | FOUND | ledger sha + tier/found/missed/FP format — correct |
+| audit-writer | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | ledger sha + tier/found/missed/FP format — correct |
+| break-tester | primary | FOUND | FOUND | FOUND | exit code 2 = survivor — correct |
+| break-tester | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | exit code 2 = survivor — correct |
+
+**6/6 agents correct after omit.** Every control found all three markers, every flagged run found none of them, and every flagged agent answered its functional-knowledge question correctly from the pasted compensation content — no agent silently lost a fact it needs. This is the direct evidence this entry's "done" criterion rests on.
+
+Per-agent measured token delta (sum of `inputTokens + cacheReadInputTokens + cacheCreationInputTokens` from `modelUsage.claude-haiku-4-5-20251001`, primary minus worktree):
+
+- jit-reviewer: 20300 → 9342, delta ≈ 10,958
+- ci-reviewer: 20125 → 8836, delta ≈ 11,289
+- pr-reviewer: 20157 → 8880, delta ≈ 11,277
+- rust-implementer: 20123 → 8399, delta ≈ 11,724
+- audit-writer: 20469 → 8929, delta ≈ 11,540
+- break-tester: 20149 → 8346, delta ≈ 11,803
+
+All six deltas land in 10,958–11,803 range, closely matching and slightly exceeding the sealed prediction of "roughly 9-11k tokens." Token saving validated.
+
+**Correction to the plan's own premise: HTML comments do consume context.** The plan asserted comments "cost no context because comments are stripped before injection." A direct headless check (`claude -p` from this worktree, zero tool calls, asking whether its own context contains the literal text "Copied into") returned FOUND. The seven one-line comments consume some (not precisely measured — each ~100-150 tokens estimated for all seven combined) context in the main session only, not in subagent contexts. The comments remain a useful drift guard (cheap at hundreds of tokens against the whole file) and their usage is correct, but the plan's stated justification was wrong.
+
+**Verification Performed**
+
+- `rtk proxy cargo test --release` on rebased head: 188 lib passed / 0 failed / 4 ignored, 20 bin passed / 0 failed — matches `main` baseline exactly (no Rust source touched).
+- `cargo clippy --all-targets --release -- -D warnings` via `rtk proxy`: clean, 0 warnings.
+- `make check`: clean.
+- Static frontmatter check: all six agents confirmed carrying `omitClaudeMd: true` between `---` delimiters; `_shared-context.md` confirmed no YAML frontmatter (it's reference material, not an agent).
+- Presence checks (grep) for each pasted compensation block in its target file — all present (two plan-suggested patterns were single-line assumptions against wrapping text; content confirmed present with adjusted patterns, not a real gap).
+- Provenance check (lead's own verification, not delegated): facts pasted into `ci-reviewer.md`'s "Facts about this repo's CI" section (job-name `lint (clippy, x86_64 linux)` and ledger-check step `no review ledgers in the tree`) independently checked against actual `.github/workflows/ci.yml` and `gh api repos/.../branches/main/protection` — both confirmed exactly correct.
+- Full real-agent behavioural/token verification in Finding 3 above — run by the lead personally.
+- Primary checkout (`/Users/stephen/code/github/miner-tim`) confirmed untouched throughout (git status / git log verified before and after implementer's run): still session-start state plus two pre-existing untracked files unrelated to this work.
+- Branch rebased cleanly onto `origin/main` (tip `0be2000`, PR #43/NET-05) — two trivial append-order conflicts in `tasks/README.md` and CLAUDE.md's Current-task pointer, resolved by established convention (main's line first, then branch's append after).
+
+**Implementer's three self-resolved ambiguities**
+
+1. Plan's insertion anchor for one `pr-reviewer.md` edit (item 2, silent failure) said "append to end of paragraph" but named a phrase that wasn't the paragraph's last sentence (paragraph continued one more clause). Implementer inserted at the literal anchor given, mid-paragraph. **Lead accepts this placement** — reads correctly and the closing rhetorical question works fine following the inserted facts.
+
+2. Plan's indentation instruction for new CLAUDE.md paragraph said both "4 spaces" and "match existing indentation" (which is 6 spaces in other paragraphs). Implementer followed the latter (6 spaces). **Lead confirms 6 spaces is correct.**
+
+3. Plan's verification instruction said "expect 6" drift-guard comments but plan's own content listed seven insertion points. Implementer correctly implemented all seven (confirmed by lead: lines 61, 67, 273, 425, 589, 641, 661 in current CLAUDE.md). Lead flagged the plan's own verification instruction as the thing that was wrong.
+
+**Note: `rust-implementer` was used outside its stated scope** — it is scoped to Rust *source* changes; this PR touches only agent `.md` frontmatter/bodies and CLAUDE.md. No specialized agent exists for this work. Per this repo's rule, writing a one-off agent for a single PR was not justified. Record this honestly rather than silently implying a perfect fit.
+
+**Review**
+
+Not yet performed. Independent review pending before merge, to be added as a correction to this entry once a cold reviewer agent has completed. The "Sealed expectations" section of `tasks/PROC-09.md` (commit `c72e75f`, the rebased-equivalent sha of the original `19fb1aa`) documents the predictions written before implementation and before any reviewer.
+
+**Not Established**
+
+- Whether a smaller/re-homed CLAUDE.md actually reduces deviations in practice (the research doc's second open question) — not addressed by this PR, not something one PR can settle.
+- The exact token cost of the seven HTML drift-guard comments (estimated ~100-150 tokens total, not precisely measured).
+- Whether `omitClaudeMd` is available starting at Claude Code v2.1.271 specifically, as the research doc originally asserted — unverified; only "observed working on 2.1.286 (planner) and 2.1.287 (lead)" is established. (See `AIDLC_MIGRATION_PLAN_RESEARCH.md`'s status note on this.)
+- Whether auto-memory "exits 141" is suppressed by the same code path as CLAUDE.md (likely) or a separate one (possible) — established empirically that it IS suppressed, but not the *why*.

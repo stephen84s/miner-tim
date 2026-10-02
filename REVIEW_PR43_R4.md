@@ -55,3 +55,13 @@ R4-N1 (nit): write_and_register's `///` doc comment narrates merge history ("car
   release --ignored: quiet reproducer FAILED at 2.796s (as on main), chatty control ok at 5.2ms.
 - Full debug suite: 188 passed / 4 ignored lib, 20 bin. main --list: 181 total, 4 ignored.
 - clippy --all-targets clean. gh pr view 45: MERGED, mergeCommit bf4868b.
+
+R4-F4 (major, record): PR #43's description is stale from round 1 and becomes the squash commit
+  message. `gh pr view 43 --json body` says "7 new tests + 2 extended", "178 lib (+7)", mutants
+  "17 tested, 13 caught, 1 unviable, 3 missed" with the round-1 scope; nothing about rounds 2-3's
+  fixes (reconnect() clear, note_donation_target), nor the NET-06 merge resolution. Actual: 11 new
+  tests, 188 lib / 4 ignored. NET-06's own review graded a stale PR body as a major (AUDIT ~7254).
+
+Checked, no finding: the rebase's "now confirmed directly" upgrade for NET-06 is supported by
+  NET-06's merged text (AUDIT ~7217: lock_wait_ms within 2-3ms of found_to_submit_ms at every
+  percentile; ~7230: both rejections attributed to the starvation). PR #45 is MERGED (bf4868b).

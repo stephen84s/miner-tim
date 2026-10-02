@@ -568,7 +568,7 @@ thirteen removed in bulk.
 1. `Miner::initialize(pool, wallet, threads)` — creates `PoolConnection`, TCP/TLS connects, sends Stratum `login`
 2. Pool sends `job` (blob + target + job_id)
 3. `Miner::start()` — spawns N workers; `dataset_cache = Arc::new(Mutex::new(None))`
-4. Thread 0 calls `get_or_generate_dataset()` — generates 2 GiB dataset (~46s M2 Max); other threads wait on the same mutex
+4. Every worker calls `get_or_generate_dataset()`; the first one to reach a new `seed_hash` generates the 2 GiB dataset (~46s M2 Max, all CPU cores) while the others block on the same mutex — "thread 0" is not special-cased, it is whichever worker gets the lock first
 5. Each worker: `RandomXVm::new_full(seed, dataset)` → `prepare_scratchpad(blob)` → loop `calculate_hash_pipelined(next_blob)`
 6. On hash ≤ target: if the verifier is armed, recompute the hash on the
    reference path (`ShareVerifier::reference`, a second VM with
@@ -635,8 +635,8 @@ would otherwise be the interpreter and the comparison would be vacuous
 - Submit: `{"method":"submit","params":{"job_id":"...","nonce":"<8hex>","result":"<64hex>"}}`
 - Keepalive: `{"method":"keepalived"}` every 60s
 
-### Dataset & Cache (`dataset.rs`)
-`SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`. `DatasetCache` holds `seed_hash` + `Arc<RandomXDataset>`. Thread 0 generates; others call `get_or_generate_dataset()` which waits on the mutex, then clones the `Arc`.
+### Dataset & Cache (`miner.rs`, not `dataset.rs` — `dataset.rs` only computes individual dataset items)
+`SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`. `DatasetCache` holds `seed_hash` + `Arc<RandomXDataset>`. The first worker to call `get_or_generate_dataset()` for a new `seed_hash` generates; every other worker waits on the same mutex, then clones the `Arc`.
 
 <!-- Copied into .claude/agents/pr-reviewer.md (PROC-09); change both. -->
 ### Runtime switches (`bin/minertim.rs`)

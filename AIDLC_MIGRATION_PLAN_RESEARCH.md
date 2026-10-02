@@ -42,23 +42,35 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 >   review that followed measured it directly (`cacheCreationInputTokens`
 >   against a ~9k-token comment payload in scratch repos) and found the
 >   actual threshold is the comment's **indent level**: a comment indented
->   4 or more spaces is present in context and costs tokens — whether it
+>   exactly 4 spaces is present in context and costs tokens — whether it
 >   sits inside a list or at top level with no list at all — while a
 >   comment indented 0-3 spaces, including at column 0 between list items,
->   is stripped. The *mechanism* behind that threshold is still not
+>   is stripped. Only 0-3 and 4 spaces were tested; 5-or-more is untested
+>   and should not be assumed to behave like 4 (round-2 review correction —
+>   an earlier draft of this note said "4 or more", overclaiming beyond the
+>   data). The *mechanism* behind the threshold is still not
 >   established — it is not a plain CommonMark parse — so treat the
 >   threshold itself as "observed here," not a documented product
 >   guarantee, and re-verify before step 5 relies on it at scale. See the
 >   `PROC-09` entry in `AUDIT.md` for both rounds of probes.
 > - **PROC-09 implemented step 4's "subagents stop loading CLAUDE.md" before
->   step 1 (CI enforcement), reversing this document's own risk ordering,
->   and the reordering was never recorded at the time.** The commit that
->   added this document (`6d0d420`) describes PROC-09 as "the first,
+>   both step 1 (CI enforcement) and step 0 (the lesson-inventory
+>   traceability table), reversing this document's own risk ordering, and
+>   the reordering was never recorded at the time.** The commit that added
+>   this document (`6d0d420`) describes PROC-09 as "the first,
 >   lowest-risk step it identifies" — but §6 labels **step 1**, not step 4,
->   as "lowest risk, highest value". The reasoning given for skipping
->   straight to step 4 — "this PR deletes nothing" — does not fully cover
->   what step 4 actually does: an agent that stops loading `CLAUDE.md`
->   entirely is a larger behavioural change than deleting a passage from it.
+>   as "lowest risk, highest value", and §1 item 4 says step 4 should run
+>   "only after" each agent's CLAUDE.md dependencies have already been
+>   moved. The reasoning behind skipping ahead anyway — "this PR deletes
+>   nothing" — is the lead's own unrecorded planning rationale, not a
+>   quote traceable to anything in this repository (round-2 review,
+>   R2-N7); it does not fully cover what step 4 actually does, either: an
+>   agent that stops loading `CLAUDE.md` entirely is a larger behavioural
+>   change than deleting a passage from it. Worse, step 0 — this
+>   document's own named mitigation for "an agent silently dropping one of
+>   three requested items" — was skipped too, and that is exactly the risk
+>   that then materialized three times during PROC-09's own implementation
+>   (see the `PROC-09` `AUDIT.md` entry's grading of its sealed risk).
 >   Recorded here after the fact, rather than silently left implicit.
 >
 > Everything else below — the AI-DLC comparison, the six-step migration

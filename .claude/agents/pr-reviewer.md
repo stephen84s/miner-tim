@@ -31,11 +31,14 @@ name what you are handing off.
    (`ShareVerifier::reference`, a second VM with `set_native_loop(false)`).
    `classify_share` maps the outcome to a `ShareVerdict`, and a mismatch
    **withholds** the share. The verifier disarms whenever
-   `native_loop_effective()` is false — not only a missing JIT, but also the
-   switch set off, light mode (no dataset), or a version other than rx/0 —
-   because in every one of those cases both the mined path and the reference
-   path are already the interpreter, and comparing them would be vacuous.
-   Ask of every fallback: **if this fires, does anyone find out?**
+   `native_loop_effective()` is false: a failed `mmap(MAP_JIT)`, the switch
+   set off, light mode (no dataset), a version other than rx/0, or a
+   non-aarch64 build. In every one of those cases the mined path and the
+   reference path (`new_full` + `set_native_loop(false)`) collapse to the
+   *same* path — both the per-program body JIT if a `JitCompiler` exists,
+   otherwise both the interpreter — not necessarily the interpreter
+   specifically, so comparing them would be vacuous either way. Ask of every
+   fallback: **if this fires, does anyone find out?**
 3. **Safety switches and their fail-safe direction.** `--native-loop` fails to
    *off* (slower but cannot mine wrong hashes); `--verify-shares` fails to *on*
    (keeps the net). They are deliberately asymmetric. Check each one's direction
@@ -102,8 +105,9 @@ name what you are handing off.
 - **Threading.** One main thread (CLI, Ctrl+C, 10s stats print) plus one pool
   connection worker and N mining worker threads.
 - **Mining flow.** `Miner::initialize` connects and logs in; the pool sends a
-  `job`; thread 0 generates the shared dataset (`get_or_generate_dataset()`,
-  others wait on the same mutex) while each worker runs
+  `job`; every worker calls `get_or_generate_dataset()` — the first one to
+  reach a new `seed_hash` generates the shared dataset, the rest block on the
+  same mutex ("thread 0" is not special-cased) — while each worker runs
   `RandomXVm::new_full` → `prepare_scratchpad` → a loop of
   `calculate_hash_pipelined`; nonces are interleaved (`nonce += thread_count`);
   a new job with a changed seed reinitialises the VM.
@@ -112,11 +116,13 @@ name what you are handing off.
   `concat!("MinerTim/", env!("CARGO_PKG_VERSION"))` — **it tracks
   `Cargo.toml`, it is not the literal `MinerTim/1.0`.** A stale version
   string in a diff or a claim is a real finding. Keepalive fires every 60s.
-- **Dataset & cache.** `SharedDatasetCache = Arc<Mutex<Option<DatasetCache>>>`;
-  `DatasetCache` holds `seed_hash` plus an `Arc<RandomXDataset>`. Thread 0
-  generates (~46s for the full 2 GiB dataset on an M2 Max); every other
-  thread calls `get_or_generate_dataset()`, which waits on the mutex then
-  clones the `Arc` — cheap, not a second generation.
+- **Dataset & cache.** Defined in `miner.rs`, not `dataset.rs` (which only
+  computes individual dataset items). `SharedDatasetCache =
+  Arc<Mutex<Option<DatasetCache>>>`; `DatasetCache` holds `seed_hash` plus an
+  `Arc<RandomXDataset>`. The first worker to call `get_or_generate_dataset()`
+  for a new `seed_hash` generates (~46s for the full 2 GiB dataset on an M2
+  Max, all CPU cores); every other worker waits on the mutex then clones the
+  `Arc` — cheap, not a second generation.
 
 ## Local trap: filtered `cargo test`
 

@@ -26,8 +26,8 @@ written down first or grading is post-hoc):
   is additive compensation plus a frontmatter flag.
 - Risk being watched for specifically: a fact an agent needs that was not
   identified and not pasted anywhere — this is the one way this change
-  fails silently, per CLAUDE.md's own §0 risk ("`omitClaudeMd` hides a fact
-  an agent silently needed").
+  fails silently, per the research doc's own §7 risk table ("`omitClaudeMd`
+  hides a fact an agent silently needed").
 
 **Empirical finding established before implementation**, by two
 independent methods (this session's own headless `claude -p` probe pair,
@@ -42,9 +42,11 @@ Code 2.1.287, and verbatim STEP1/STEP2/STEP3 output from both the control
 and flagged runs) and the token-delta measurement (control 15,547 vs.
 flagged 3,515 subagent tokens for an otherwise-identical trivial Haiku
 probe, i.e. roughly 12.0k tokens of fixed CLAUDE.md-family baseline, n=1
-each — not a claim about real-agent spawns, which the V4 verification
-below measures directly) are saved at
-`/private/tmp/claude-501/-Users-stephen-code-github-miner-tim/e4ebdc35-b2fd-4f81-bf74-766924c82168/scratchpad/omit-probe/`.
+each — not a claim about real-agent spawns, which this entry's own
+per-agent V4 measurement covers separately) were saved to a session
+scratchpad that does not outlive the session; the reproducible parts
+(commands, verbatim output, exact token figures) are inlined in the
+`AUDIT.md` entry instead, which is the durable record.
 
 ---
 

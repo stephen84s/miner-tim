@@ -3,6 +3,38 @@
 *Research and plan only. Written 2026-10-02 from primary sources fetched that
 day (cited inline and listed at the end). Nothing in the repo was changed.*
 
+> **Status note (added 2026-10-03, PROC-09 implementation).** This document's
+> own proposed task-ID numbering (§6: "PROC-09 through PROC-14") collides with
+> the actual first PR, which also landed as **PROC-09** — `tasks/README.md`'s
+> highest existing prefix at the time was PROC-08, so the real numbering
+> shifts by one from what this document guesses throughout §6. Read any
+> "PROC-09" below as this document's own placeholder, not the real task.
+>
+> Two things this document leaves open (§5.1, §6 step 4.1) are now settled:
+> - **§6 step 4.1's open question — does `omitClaudeMd` block path-scoped
+>   `.claude/rules/` too?** Answered empirically, independently, twice (a
+>   sequenced before/after/match probe in the real worktree, and a separate
+>   scratch-repo probe by the planning agent): **no.** `omitClaudeMd: true`
+>   suppresses the project and user-global `CLAUDE.md` only; path-scoped
+>   rules and subdirectory `CLAUDE.md` files still load lazily when a
+>   matching file is read. See the `PROC-09` entry in `AUDIT.md` for the
+>   commands and verbatim output.
+> - **§6 step 4.1's proposed `InstructionsLoaded` hook observer does not work
+>   as described**, per the planning agent's own test on Claude Code 2.1.286:
+>   the hook fired for the main session's own startup loads but never fired
+>   for a subagent's startup loads, and the lazy-load events it did log
+>   carried no `agent_id`/`agent_type`. Use the transcript's `usage` field
+>   (or the per-model `modelUsage` breakdown in `--output-format json`)
+>   instead, which is what PROC-09's own verification did.
+> - **§5.1's "available from v2.1.271" is unverified.** The docs fetched for
+>   PROC-09 give no introduction version for `omitClaudeMd`; only "observed
+>   working on 2.1.287" (and the planner's run on 2.1.286) is established.
+>
+> Everything else below — the AI-DLC comparison, the six-step migration
+> outline, the risk table — is unchanged and still represents the state of
+> the research as written; only the two items above and the numbering were
+> corrected after a real PR exercised them.
+
 ---
 
 ## 1. Recommendation (read this if nothing else)

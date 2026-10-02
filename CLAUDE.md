@@ -406,7 +406,7 @@
 ## Current task
 
 **PROC-09 — Subagents stop loading CLAUDE.md.**
-Completed. See [`tasks/PROC-09.md`](tasks/PROC-09.md).
+Active (implementation done, pending review). See [`tasks/PROC-09.md`](tasks/PROC-09.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

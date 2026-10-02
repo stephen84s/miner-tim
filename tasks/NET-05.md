@@ -1,0 +1,9 @@
+# NET-05 — Wait out an in-flight share submission before a donation rotation (#32)
+
+**Status:** Implemented; independent review pending (Opus)
+
+A share found right as a donation rotation starts could be lost two ways: already written and registered in `pending_shares` when the rotation drains it (counted lost by #17), or `submit_share` failing outright because the stream was already nulled before the write completed (not counted at all, since the failure happened before registration). Live logs show 3 lost shares out of 870 found during 21 rotations; lock-starvation patterns indicate blocked submitters rarely get turns except when the receiver pauses. Fixed by adding an `unsent_shares` counter for Gap-B (write failures), and a bounded rotation-deferral gate that checks for both in-flight submissions (including those blocked on the stream lock, via RAII counter) and pending replies before proceeding with `relogin_as`. The gate waits (10ms yields, no lock held) up to 5 seconds, then proceeds anyway and logs a warning. **Seven new tests plus two extended**, all driving real `receiver_loop` or pinning decision-function boundaries. **Break-tested: eight mutations**, all caught (or proved equivalent) except one confirmed gap: the `wait_since` reset would persist if a rotation's target reverted during deferral, letting a later rotation skip its own deferral — but reachability analysis confirms this cannot occur given the schedule's minimum 30-second slice width versus the 5-second deferral bound. **Verification:** 178 lib + 20 bin tests pass; clippy clean; make check passes. Mutation testing: 17 mutants, 13 caught, 1 unviable, 3 missed (log-text equivalents only, no behaviour). Lead independently re-ran all verification steps and confirmed.
+
+---
+
+*Full record: the `NET-05` entry in [`AUDIT.md`](../AUDIT.md), which is authoritative. This file is the summary.*

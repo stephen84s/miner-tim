@@ -394,8 +394,8 @@
 
 ## Current task
 
-**NET-06 — Instrument found-to-submit latency; confirm stream-lock starvation and its real-world cost (#40).**
-Completed. See [`tasks/NET-06.md`](tasks/NET-06.md).
+**NET-05 — Wait out an in-flight share submission before a donation rotation (#32).**
+Completed. See [`tasks/NET-05.md`](tasks/NET-05.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

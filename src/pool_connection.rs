@@ -43,6 +43,13 @@ const POOL_SILENCE_TIMEOUT: Duration = Duration::from_secs(3 * KEEPALIVE_INTERVA
 /// Delay between reconnection attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
+/// Longest a donation rotation waits for outstanding submissions to be answered (#32).
+/// 8x the largest reply latency observed live (641ms, LIVE7H run, median 306ms).
+const ROTATION_SETTLE_LIMIT: Duration = Duration::from_secs(5);
+/// Lock-free pause per deferred iteration, so a submitter parked on the stream
+/// mutex can take it; the receiver otherwise re-locks within microseconds.
+const ROTATION_SETTLE_YIELD: Duration = Duration::from_millis(10);
+
 /// SHA-256 of a server certificate, as `tls-fingerprint` pins it.
 pub type CertFingerprint = [u8; 32];
 
@@ -192,6 +199,14 @@ struct PendingShare {
     sent_at: Instant,
 }
 
+/// Decrements `submits_in_flight` on drop, on every return path out of
+/// `submit_share` — including the early `?`s — because it is dropped at
+/// function exit regardless of how the function returns (#32).
+struct InFlight<'a>(&'a AtomicU32);
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+}
+
 /// Wraps either a plain TCP or TLS stream behind Read + Write.
 /// A single long-lived value, so the variant size difference is irrelevant.
 #[allow(clippy::large_enum_variant)]
@@ -297,6 +312,18 @@ pub struct PoolConnection {
     /// said no, so counting it as a rejection would blame the pool for a
     /// local reconnect.
     lost_shares: AtomicU32,
+    /// Shares `submit_share` was asked to send but never wrote — no stream,
+    /// a poisoned lock, or a write error. Distinct from `lost_shares` because
+    /// the pool never saw these at all: issue #17 established that a
+    /// never-written share must not be counted "lost" — its test
+    /// `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes`
+    /// asserts exactly this (#32).
+    unsent_shares: AtomicU32,
+    /// Number of `submit_share` calls currently executing, including ones
+    /// blocked waiting on the stream lock. Read by the rotation gate so a
+    /// rotation can't proceed while a submit is parked on the lock but not
+    /// yet registered (#32).
+    submits_in_flight: AtomicU32,
     /// How long the pool may be silent before the connection is treated as
     /// dead, in **milliseconds**. Defaults to `POOL_SILENCE_TIMEOUT`; tests
     /// shorten it so the real `receiver_loop` can be driven to the timeout in
@@ -304,6 +331,27 @@ pub struct PoolConnection {
     /// point — a test that called a helper would pass while the wiring was
     /// broken, which is how PR #22 shipped green three times.
     silence_timeout_ms: AtomicU64,
+    /// Mirrors `silence_timeout_ms`: tests shorten this field directly;
+    /// production uses `ROTATION_SETTLE_LIMIT`'s default (#32).
+    rotation_settle_ms: AtomicU64,
+    /// Set while a donation rotation is deferred waiting for outstanding
+    /// submissions to settle; `None` otherwise. Tied to the beneficiary
+    /// being deferred (checked in `rotation_settled`) AND cleared by
+    /// `reconnect()` on every call (#32 round 2, R2-F2).
+    ///
+    /// A field, not a `receiver_loop` local: `reconnect()`'s retry loop is
+    /// unbounded, so a real outage can span a FULL donation cycle or more
+    /// (#34 recorded 121 minutes; the default cycle is 100). The schedule
+    /// can then return to the *same* beneficiary that was originally being
+    /// deferred, with no intervening beneficiary ever observed by
+    /// `receiver_loop` to trigger the per-beneficiary mismatch check — the
+    /// first fix for this (checking only whether the stored beneficiary
+    /// differs from `want`) missed exactly this case, since nothing differs.
+    /// Clearing on every `reconnect()` ties invalidation to an actual
+    /// connection-discontinuity event instead of a beneficiary/time
+    /// heuristic — the same event that already clears `current_job`,
+    /// `stream` and `pending_shares`.
+    rotation_wait_since: Mutex<Option<(Beneficiary, Instant)>>,
 }
 
 impl Default for PoolConnection {
@@ -365,7 +413,11 @@ impl PoolConnection {
             rejected_shares: AtomicU32::new(0),
             pending_shares: Mutex::new(HashMap::new()),
             lost_shares: AtomicU32::new(0),
+            unsent_shares: AtomicU32::new(0),
+            submits_in_flight: AtomicU32::new(0),
             silence_timeout_ms: AtomicU64::new(POOL_SILENCE_TIMEOUT.as_millis() as u64),
+            rotation_settle_ms: AtomicU64::new(ROTATION_SETTLE_LIMIT.as_millis() as u64),
+            rotation_wait_since: Mutex::new(None),
         }
     }
 
@@ -517,6 +569,13 @@ impl PoolConnection {
         nonce: &str,
         result: &str,
     ) -> Result<(), String> {
+        // Counted from entry so a submit parked on the stream lock (not yet
+        // registered in `pending_shares`) is still visible to the rotation
+        // gate. Dropped on every return path out of this function, including
+        // the early `?`s inside `write_and_register` (#32).
+        self.submits_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _in_flight = InFlight(&self.submits_in_flight);
+
         let sid = self.session_id.lock()
             .map(|s| s.clone())
             .unwrap_or_default();
@@ -530,69 +589,21 @@ impl PoolConnection {
 
         let rpc_id = self.next_request_id();
 
-        // Write and register under the STREAM lock, as one step. Two earlier
-        // orderings each left a race, both found by review:
-        //
-        //   write, then insert (round 1): the receiver could read and handle
-        //     the reply in the gap, find nothing pending, discard it uncounted
-        //     — and the entry inserted afterwards was later drained as "lost"
-        //     although the pool had answered it.
-        //   insert, then write (round 2): a reconnect could null the stream and
-        //     drain the fresh entry as "lost" in the gap, and the write would
-        //     then go out on the NEW connection with the old session id and no
-        //     entry left to pair its reply with.
-        //
-        // Holding the stream lock across both closes each: the receiver reads
-        // under this same lock, so no reply can be handled before the entry
-        // exists; and `reconnect()`/`relogin_as()` must take this lock to null
-        // the stream, so a drain runs wholly before (we see no stream and
-        // insert nothing) or wholly after (the entry was written to the old
-        // stream, where no reply will ever be read, so "lost" is correct).
-        //
-        // What this does NOT close: `sid` above is read before any lock, and
-        // `connect()` installs the new stream before `login()` updates the
-        // session id. A submit that takes the lock in that window goes out on
-        // the new connection with the old session id. It IS registered, so the
-        // pool's answer is paired and counted — normally as a rejection, which
-        // is the pool's real verdict on it. The miscounting is closed; the
-        // stale id is not (review round 3, R3-1) — still open in general. What
-        // IS closed (#37): a submit-reply that `login()` mistakenly reads as
-        // the login reply (no session id in it) now fails the login outright
-        // instead of silently "succeeding" with the old id left in place, and
-        // a failed `relogin_as` now clears the stream so the receiver loop
-        // reconnects cleanly rather than being left on a stale, unauthenticated
-        // connection.
-        //
-        // Lock order is stream -> pending_shares. Nothing takes them the other
-        // way: `drain_pending_shares` and `handle_pool_message` take
-        // `pending_shares` alone, after the stream guard has been released.
-        let lock_requested = Instant::now();
-        let (lock_wait_ms, write_ms) = {
-            let mut stream_guard = self
-                .stream
-                .lock()
-                .map_err(|_| "Stream mutex poisoned".to_string())?;
-            let lock_acquired = Instant::now();
-            let stream = stream_guard
-                .as_mut()
-                .ok_or_else(|| "Not connected".to_string())?;
-            write_request(stream, rpc_id, "submit", params)?;
-            let write_done = Instant::now();
-            if let Ok(mut pending) = self.pending_shares.lock() {
-                pending.insert(
-                    rpc_id,
-                    PendingShare {
-                        job_id: job_id.to_string(),
-                        nonce: nonce.to_string(),
-                        sent_at: Instant::now(),
-                    },
-                );
-            }
-            (
-                (lock_acquired - lock_requested).as_secs_f64() * 1000.0,
-                (write_done - lock_acquired).as_secs_f64() * 1000.0,
-            )
-        };
+        let (lock_wait_ms, write_ms) =
+            match self.write_and_register(rpc_id, params, job_id, nonce) {
+                Ok(timings) => timings,
+                Err(e) => {
+                    self.unsent_shares.fetch_add(1, Ordering::Relaxed);
+                    log::warn!(
+                        "Share not sent: rpc_id={} job_id={} nonce={} — {}",
+                        rpc_id,
+                        job_id,
+                        nonce,
+                        e
+                    );
+                    return Err(e);
+                }
+            };
 
         log::info!(
             "Share submitted: rpc_id={} job_id={} nonce={} lock_wait_ms={:.3} write_ms={:.3}",
@@ -604,6 +615,90 @@ impl PoolConnection {
         );
 
         Ok(())
+    }
+
+    // Write and register under the STREAM lock, as one step. Two earlier
+    // orderings each left a race, both found by review:
+    //
+    //   write, then insert (round 1): the receiver could read and handle
+    //     the reply in the gap, find nothing pending, discard it uncounted
+    //     — and the entry inserted afterwards was later drained as "lost"
+    //     although the pool had answered it.
+    //   insert, then write (round 2): a reconnect could null the stream and
+    //     drain the fresh entry as "lost" in the gap, and the write would
+    //     then go out on the NEW connection with the old session id and no
+    //     entry left to pair its reply with.
+    //
+    // Holding the stream lock across both closes each: the receiver reads
+    // under this same lock, so no reply can be handled before the entry
+    // exists; and `reconnect()`/`relogin_as()` must take this lock to null
+    // the stream, so a drain runs wholly before (we see no stream and
+    // insert nothing) or wholly after (the entry was written to the old
+    // stream, where no reply will ever be read, so "lost" is correct).
+    //
+    // What this does NOT close: the caller (`submit_share`) reads `sid`
+    // before taking any lock, and `connect()` installs the new stream
+    // before `login()` updates the session id. A submit that takes the
+    // lock in that window goes out on the new connection with the old
+    // session id. It IS registered, so the pool's answer is paired and
+    // counted — normally as a rejection, which is the pool's real verdict
+    // on it. The miscounting is closed; the stale id is not (review round
+    // 3, R3-1) — still open in general. What IS closed (#37): a submit-reply
+    // that `login()` mistakenly reads as the login reply (no session id in
+    // it) now fails the login outright instead of silently "succeeding"
+    // with the old id left in place, and a failed `relogin_as` now clears
+    // the stream so the receiver loop reconnects cleanly rather than being
+    // left on a stale, unauthenticated connection.
+    //
+    // Lock order is stream -> pending_shares. Nothing takes them the other
+    // way: `drain_pending_shares` and `handle_pool_message` take
+    // `pending_shares` alone, after the stream guard has been released.
+    //
+    // A separate, independent order exists for `rotation_settled` (#32
+    // round 3, R3-F2): it holds `rotation_wait_since` while calling
+    // `get_pending_shares()`, i.e. rotation_wait_since -> pending_shares.
+    // No deadlock risk — only the receiver thread ever takes
+    // `rotation_wait_since`, and `reconnect()` releases it (via its own
+    // short `if let Ok(...)` block) before `drain_pending_shares()` runs —
+    // but documented here since it's a lock-order fact now true of the
+    // code, not because anything currently depends on it being checked.
+    /// Returns `(lock_wait_ms, write_ms)` on success — timing instrumentation
+    /// for issue #40: time spent waiting for the stream lock, and time spent
+    /// in the write itself, each in milliseconds. (R4-N1: merge-history
+    /// detail on how these came to live here belongs in `AUDIT.md`, not
+    /// this comment — see NET-05's entry.)
+    fn write_and_register(
+        &self,
+        rpc_id: u64,
+        params: Value,
+        job_id: &str,
+        nonce: &str,
+    ) -> Result<(f64, f64), String> {
+        let lock_requested = Instant::now();
+        let mut stream_guard = self
+            .stream
+            .lock()
+            .map_err(|_| "Stream mutex poisoned".to_string())?;
+        let lock_acquired = Instant::now();
+        let stream = stream_guard
+            .as_mut()
+            .ok_or_else(|| "Not connected".to_string())?;
+        write_request(stream, rpc_id, "submit", params)?;
+        let write_done = Instant::now();
+        if let Ok(mut pending) = self.pending_shares.lock() {
+            pending.insert(
+                rpc_id,
+                PendingShare {
+                    job_id: job_id.to_string(),
+                    nonce: nonce.to_string(),
+                    sent_at: Instant::now(),
+                },
+            );
+        }
+        Ok((
+            (lock_acquired - lock_requested).as_secs_f64() * 1000.0,
+            (write_done - lock_acquired).as_secs_f64() * 1000.0,
+        ))
     }
 
     pub fn get_accepted_shares(&self) -> u32 {
@@ -619,6 +714,12 @@ impl PoolConnection {
     /// pool never said no.
     pub fn get_lost_shares(&self) -> u32 {
         self.lost_shares.load(Ordering::Relaxed)
+    }
+
+    /// Submissions `submit_share` was asked to send but never wrote at all —
+    /// distinct from `lost_shares`, which the pool at least received (#32).
+    pub fn get_unsent_shares(&self) -> u32 {
+        self.unsent_shares.load(Ordering::Relaxed)
     }
 
     /// Submissions written to the pool with no response yet — neither
@@ -655,15 +756,17 @@ impl PoolConnection {
     pub fn reset_share_counters(&self) {
         self.accepted_shares.store(0, Ordering::SeqCst);
         self.rejected_shares.store(0, Ordering::SeqCst);
-        // Accepted, rejected and lost are one ledger: for *submitted* shares,
-        // submitted == accepted + rejected + lost + still-pending. This is
-        // not the same population as the stats line's "found" count, which
-        // increments the moment a hash clears the target — before the share
-        // verifier or `submit_share` itself has had a chance to withhold or
-        // fail it, so a found share is not guaranteed ever to become a
-        // submitted one. Resetting two of these three would let the
-        // arithmetic that exposed #34 silently stop balancing.
+        // The ledger identity is now complete: found == accepted + rejected +
+        // lost + unsent + pending + withheld (verify_failures) — every way a
+        // found share can go is now counted. `found` and `verify_failures`
+        // live in `miner.rs`'s own stats, not here, so this function cannot
+        // reset them itself — but it must reset every term that lives on
+        // this struct, or the arithmetic that exposed #34 would silently
+        // stop balancing. `unsent` is the newest term (#32): a share
+        // `submit_share` never wrote at all, so it is not "lost" (the pool
+        // never saw it), but it is still accounted for.
         self.lost_shares.store(0, Ordering::SeqCst);
+        self.unsent_shares.store(0, Ordering::SeqCst);
     }
 
     /// Spawn the receiver thread. It polls the shared stream with a short
@@ -698,13 +801,18 @@ impl PoolConnection {
         // we start in the User slice.
         let donation_start = Instant::now();
         let mut active = Beneficiary::User;
-
+        // Tracks `want` across iterations for `note_donation_target` below —
+        // see its doc comment (#32 round 3, R3-F1).
+        let mut last_want = active;
         loop {
             // Rotate the login wallet between user/author/XMRig per the donation
             // schedule (see `crate::donate`). Switching re-logs-in on the same
-            // pool with the target wallet.
+            // pool with the target wallet. Deferral state for this now lives
+            // in the `rotation_wait_since` field, not a loop local — see its
+            // doc comment for why (#32 round 2, R2-F2).
             let want = self.donation.beneficiary_at(donation_start.elapsed().as_secs());
-            if want != active {
+            self.note_donation_target(want, &mut last_want);
+            if want != active && self.rotation_settled(want) {
                 active = want;
                 let addr = self.beneficiary_address(want);
                 log::info!(
@@ -845,6 +953,13 @@ impl PoolConnection {
         }
         if let Ok(mut s) = self.stream.lock() {
             *s = None;
+        }
+        // Any donation-rotation deferral in progress is for a connection
+        // epoch that just ended — discard it rather than let its timestamp
+        // survive into whatever comes after reconnecting, however long that
+        // takes (#32 round 2, R2-F2; see the field's own doc comment).
+        if let Ok(mut w) = self.rotation_wait_since.lock() {
+            *w = None;
         }
         // Every reconnect goes through this one function, so this is the single
         // place a submission on the old connection can be declared lost rather
@@ -1134,6 +1249,119 @@ impl PoolConnection {
     fn next_request_id(&self) -> u64 {
         self.request_id.fetch_add(1, Ordering::SeqCst)
     }
+
+    /// Clears any in-progress rotation deferral if `want` differs from the
+    /// value seen on the *previous* call — called unconditionally from the
+    /// top of `receiver_loop`, every iteration, before the `want != active`
+    /// branch that calls `rotation_settled`.
+    ///
+    /// This has to be unconditional, not folded into `rotation_settled`'s
+    /// own beneficiary-mismatch check, because that check only runs when
+    /// `rotation_settled` is called at all — which the call site skips
+    /// whenever `want == active`. That skip is exactly where a stale entry
+    /// survives in a **2-value ring**: at `--donate-level 100`, `User`'s
+    /// slice is zero-width, so the schedule only ever alternates
+    /// Author<->Xmrig. A deferred entry for Xmrig can then survive a full
+    /// trip back to Xmrig — the loop passes through `want == active` (the
+    /// *other* beneficiary, which by then IS `active`) without ever calling
+    /// `rotation_settled` to notice the mismatch, because at a 3-value ring
+    /// the "other" value is a third, different beneficiary that would
+    /// trigger it, but at a 2-value ring it's the exact one already stored
+    /// going the other direction (#32 round 3, R3-F1 — found after both the
+    /// beneficiary-mismatch check in `rotation_settled` and the `reconnect()`
+    /// clear from rounds 1-2 were already in place and still missed this).
+    ///
+    /// Extracted as its own method, not left inline in `receiver_loop`,
+    /// specifically so it has its own unit test — R3-F1's own review noted
+    /// that loop-local clearing logic "nothing exercises" is exactly the
+    /// shape of gap that let the first two rounds' fixes each miss something.
+    fn note_donation_target(&self, want: Beneficiary, last_want: &mut Beneficiary) {
+        if want != *last_want {
+            if let Ok(mut w) = self.rotation_wait_since.lock() {
+                *w = None;
+            }
+            *last_want = want;
+        }
+    }
+
+    /// Whether a pending donation rotation to `want` may proceed now. Called
+    /// from the top of `receiver_loop`, with no lock held.
+    ///
+    /// `rotation_wait_since` is `None` until the first deferral, then holds
+    /// the beneficiary being deferred and when the wait started; cleared
+    /// again once the rotation is allowed through, by every call to
+    /// `reconnect()` (#32 round 2, R2-F2), and by `note_donation_target`
+    /// above on every observed change of `want` (#32 round 3, R3-F1) — three
+    /// independent mechanisms, each closing a gap the others didn't.
+    ///
+    /// The stored beneficiary is still checked against `want` here too, as
+    /// a third, cheaper line of defence reached on the same call that would
+    /// otherwise use the stale entry — redundant with `note_donation_target`
+    /// in the 3-value-ring case, not redundant in the 2-value-ring case if
+    /// `note_donation_target`'s own call site were ever changed.
+    ///
+    /// Read order matters: `submits_in_flight` is read BEFORE
+    /// `get_pending_shares()`. Reading `pending == 0` first would let a
+    /// submitter register and exit between the two reads, with `in_flight`
+    /// then read as `0` too, letting a rotation proceed past a share that
+    /// just got registered. Reading in-flight first is safe because a
+    /// submitter stays counted in-flight until after it registers (#32).
+    fn rotation_settled(&self, want: Beneficiary) -> bool {
+        let mut wait_since = self.rotation_wait_since.lock().unwrap();
+
+        if matches!(*wait_since, Some((b, _)) if b != want) {
+            *wait_since = None;
+        }
+
+        let in_flight = self.submits_in_flight.load(Ordering::SeqCst);
+        let pending = self.get_pending_shares();
+
+        let waited = wait_since.map(|(_, t)| t.elapsed()).unwrap_or(Duration::ZERO);
+        let limit = Duration::from_millis(self.rotation_settle_ms.load(Ordering::Relaxed));
+
+        if !rotation_may_proceed(in_flight, pending, waited, limit) {
+            if wait_since.is_none() {
+                log::info!(
+                    "Donation rotation to {:?} deferred: {} submission(s) in flight, {} \
+                     awaiting a pool response",
+                    want,
+                    in_flight,
+                    pending
+                );
+                *wait_since = Some((want, Instant::now()));
+            }
+            // No lock held here: the receiver has already released the
+            // stream lock for this iteration by the time this is called.
+            // The `rotation_wait_since` lock is dropped explicitly right
+            // here (R3-F2: an earlier comment said "at function return",
+            // which was wrong — it's this `drop()`, not scope exit) so it
+            // isn't held across the sleep either.
+            drop(wait_since);
+            thread::sleep(ROTATION_SETTLE_YIELD);
+            false
+        } else {
+            if wait_since.is_some() {
+                if in_flight + pending as u32 > 0 {
+                    log::warn!(
+                        "Donation rotation proceeding after {}ms with {} submission(s) \
+                         still unanswered; they will be counted lost/unsent",
+                        waited.as_millis(),
+                        in_flight + pending as u32
+                    );
+                } else {
+                    log::info!("Donation rotation settled after {}ms", waited.as_millis());
+                }
+            }
+            *wait_since = None;
+            true
+        }
+    }
+}
+
+/// Pure decision: may a donation rotation proceed now? True once nothing is
+/// outstanding, or once the wait has reached `limit` regardless (#32).
+fn rotation_may_proceed(in_flight: u32, pending: usize, waited: Duration, limit: Duration) -> bool {
+    (in_flight == 0 && pending == 0) || waited >= limit
 }
 
 fn write_request(
@@ -2323,6 +2551,8 @@ mod tls_tests {
             "a submission that never left the machine must not leave an orphan entry \
              in pending_shares"
         );
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_lost_shares(), 0);
     }
 
     /// The complement of the test below: this one pins round 1's ordering.
@@ -2435,6 +2665,553 @@ mod tls_tests {
             0,
             "a share that was never written must not be counted lost"
         );
+        assert_eq!(
+            conn.get_unsent_shares(),
+            1,
+            "a never-written share is counted unsent, not lost (#32)"
+        );
+    }
+
+    /// Complement of `submit_share_write_failure_leaves_nothing_pending`: there
+    /// the stream was never established at all, so the failure is "Not
+    /// connected". Here a real connection is made and then its write half is
+    /// shut down, so the write itself fails partway through
+    /// `write_and_register` — a different code path to the same `unsent`
+    /// counter (#32).
+    #[test]
+    fn a_write_failure_on_an_established_stream_counts_as_unsent() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let _server = thread::spawn(move || {
+            let _held = listener.accept();
+            thread::sleep(Duration::from_secs(3));
+        });
+
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect to the local listener");
+
+        // Shut down the write half of the underlying TCP stream so the next
+        // write fails, without touching the mutex (submit_share needs to lock
+        // it itself).
+        conn.stream
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .tcp()
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown write half");
+
+        let err = conn
+            .submit_share("j1", "00000000", &"c".repeat(64))
+            .expect_err("a write to a write-shutdown socket must fail");
+        assert!(
+            err.contains("Write failed") || err.contains("Flush failed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_lost_shares(), 0);
+        assert!(
+            conn.pending_shares.lock().unwrap().is_empty(),
+            "a write that failed must not leave an entry registered"
+        );
+    }
+
+    /// Pure unit test on the free function: no sockets, no threads. Pins the
+    /// exact boundary condition (`waited >= limit`, not `>`) and that either
+    /// `in_flight` or `pending` alone blocks the gate (#32).
+    #[test]
+    fn rotation_may_proceed_truth_table() {
+        let l = Duration::from_secs(1);
+        assert!(rotation_may_proceed(0, 0, Duration::ZERO, l));
+        assert!(!rotation_may_proceed(1, 0, Duration::ZERO, l));
+        assert!(!rotation_may_proceed(0, 1, Duration::ZERO, l));
+        assert!(rotation_may_proceed(1, 1, l, l), "exact boundary must count as settled");
+        assert!(!rotation_may_proceed(1, 0, l - Duration::from_millis(1), l));
+    }
+
+    /// Direct, deterministic unit-level test on `rotation_settled` itself: no
+    /// sockets, no timing races. Exercises the exact line a mutation could
+    /// replace with a hardcoded `0u32` (`submits_in_flight.load(...)`) and
+    /// pins that the gate defers while a submission is outstanding (#32).
+    #[test]
+    fn rotation_settled_defers_while_a_submission_is_in_flight() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
+
+        let proceeded = conn.rotation_settled(Beneficiary::Author);
+
+        assert!(
+            !proceeded,
+            "a rotation must defer while a submission is in flight, not proceed \
+             immediately and leave the share to be lost or go uncounted"
+        );
+        assert!(
+            conn.rotation_wait_since.lock().unwrap().is_some(),
+            "deferring for the first time must record when the wait started"
+        );
+    }
+
+    /// A deferral episode's timestamp must not survive into an unrelated
+    /// rotation *within the same no-reconnect wait*. This is the cheaper,
+    /// second line of defence described in `rotation_settled`'s doc comment
+    /// — the real fix for long outages is the field being cleared by
+    /// `reconnect()`, tested separately below.
+    #[test]
+    fn a_stale_wait_timestamp_for_a_different_beneficiary_is_discarded() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        // Simulate an old deferral episode for Author that started an hour ago --
+        // long enough that `waited >= ROTATION_SETTLE_LIMIT` would trivially hold
+        // if the stale timestamp were reused.
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Author, Instant::now() - Duration::from_secs(3600)));
+        // One share still outstanding for a DIFFERENT, unrelated rotation to Xmrig.
+        conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
+
+        let proceeded = conn.rotation_settled(Beneficiary::Xmrig);
+
+        assert!(
+            !proceeded,
+            "a stale hour-old timestamp from a different beneficiary's deferral must \
+             not let a new rotation skip its own deferral just because it reads as \
+             already-waited-long-enough"
+        );
+        assert_eq!(
+            conn.rotation_wait_since.lock().unwrap().map(|(b, _)| b),
+            Some(Beneficiary::Xmrig),
+            "the stale entry must be discarded and replaced with a fresh one for the \
+             beneficiary actually being deferred now"
+        );
+
+        conn.submits_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// GitHub #32 round 2, R2-F2: the fix above (discard on beneficiary
+    /// mismatch) is NOT sufficient on its own. `reconnect()`'s retry loop is
+    /// unbounded, so a real outage can span a FULL donation cycle or more
+    /// (#34 recorded 121-minute outages; the default cycle is 100 minutes).
+    /// The schedule can then return to the exact SAME beneficiary that was
+    /// originally being deferred, with no intervening beneficiary ever
+    /// observed to trigger the mismatch check in the test above — so an
+    /// hour-old timestamp for the SAME beneficiary must also be discarded,
+    /// and the mechanism that does it is `reconnect()` clearing the field,
+    /// not a beneficiary comparison (which sees no mismatch here).
+    ///
+    /// This drives `reconnect()` itself, not a hand-set field, so it proves
+    /// the actual call path — not just that clearing-on-mismatch logic
+    /// would also happen to clear a same-beneficiary entry (it wouldn't).
+    #[test]
+    fn a_reconnect_discards_a_same_beneficiary_stale_wait_timestamp() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        // No address/wallet recorded, so `reconnect()` logs and returns
+        // `false` immediately after its teardown steps -- including the
+        // one under test -- without blocking on a real retry loop.
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Author, Instant::now() - Duration::from_secs(3600)));
+
+        let reconnected = conn.reconnect();
+
+        assert!(!reconnected, "no address/wallet recorded: reconnect() must fail fast");
+        assert!(
+            conn.rotation_wait_since.lock().unwrap().is_none(),
+            "reconnect() must discard any rotation-deferral timestamp, since it \
+             represents a connection epoch that has just ended — otherwise an \
+             hour-old entry for the SAME beneficiary survives into a later, \
+             unrelated deferral and lets it skip its own wait (R2-F2)"
+        );
+    }
+
+    /// GitHub #32 round 3, R3-F1: at `--donate-level 100` the rotation ring
+    /// has only two values (`User`'s slice is zero-width, so the schedule
+    /// alternates Author<->Xmrig). A deferred entry for Xmrig can survive a
+    /// full trip back to Xmrig — `want` passes through Author (which is
+    /// `active`) without ever calling `rotation_settled` to notice the
+    /// mismatch, since at a 2-value ring "the other beneficiary" IS the one
+    /// already stored, not a third, different one. Neither the beneficiary-
+    /// mismatch check inside `rotation_settled` nor `reconnect()`'s clear
+    /// (rounds 1-2) catches this — proven by the review that found it via a
+    /// direct call to `rotation_settled` with a backdated same-beneficiary
+    /// entry, which returned `true` with a share still in flight.
+    ///
+    /// This test drives `note_donation_target` directly rather than the full
+    /// `receiver_loop` (a real `CYCLE_SECS` cycle is 6000s minimum — not
+    /// something a test can wait out), but it's the exact method the loop
+    /// calls unconditionally every iteration, not a reimplementation of it.
+    #[test]
+    fn a_stale_entry_does_not_survive_a_two_value_ring_round_trip() {
+        let conn = PoolConnection::new(crate::donate::MAX_DONATE_LEVEL);
+        // Reflects a prior loop iteration having observed `want == Xmrig`,
+        // which is what led to the stale entry below being created.
+        let mut last_want = Beneficiary::Xmrig;
+
+        // An old deferral for Xmrig, hours in the past -- long enough that
+        // `waited >= ROTATION_SETTLE_LIMIT` would trivially hold if reused.
+        *conn.rotation_wait_since.lock().unwrap() =
+            Some((Beneficiary::Xmrig, Instant::now() - Duration::from_secs(3600)));
+
+        // The schedule moves to the ring's only OTHER value (Author, which
+        // is `active` at this point) -- this is exactly the transition
+        // `rotation_settled`'s own mismatch check cannot see, because the
+        // call site skips calling it whenever `want == active`.
+        conn.note_donation_target(Beneficiary::Author, &mut last_want);
+        assert!(
+            conn.rotation_wait_since.lock().unwrap().is_none(),
+            "a transition to the ring's other value must clear a stale \
+             deferral for the value being left behind"
+        );
+        assert_eq!(last_want, Beneficiary::Author);
+
+        // The schedule comes back around to Xmrig -- the SAME beneficiary
+        // the (now-cleared) stale entry was originally for.
+        conn.note_donation_target(Beneficiary::Xmrig, &mut last_want);
+
+        // End-to-end consequence: a fresh rotation to Xmrig with a share in
+        // flight must still defer -- proving the system doesn't just clear
+        // the field once, but behaves correctly on the next real rotation
+        // attempt for the value that was previously stale.
+        conn.submits_in_flight.fetch_add(1, Ordering::SeqCst);
+        let proceeded = conn.rotation_settled(Beneficiary::Xmrig);
+        assert!(
+            !proceeded,
+            "a fresh rotation to a value seen before in the ring must still \
+             defer for an in-flight submission, not inherit a stale timestamp \
+             from the previous visit to that same value"
+        );
+    }
+
+    /// Sets up a `PoolConnection` whose donation level (100%) rotates to the
+    /// Author address on the very first `receiver_loop` iteration, with no
+    /// timing trickery needed to hit the rotation path. Mirrors the setup
+    /// `a_silent_pool_is_detected_and_reconnected_to` uses for `address` /
+    /// `wallet`, plus `user_wallet` since a real login would set it and these
+    /// tests never call `login()` (#32).
+    fn new_rotation_conn(addr: &str) -> Arc<PoolConnection> {
+        let conn = Arc::new(PoolConnection::new(100));
+        conn.connect(addr).expect("connect to the local listener");
+        *conn.address.lock().unwrap() = addr.to_string();
+        *conn.wallet.lock().unwrap() = "4user".to_string();
+        *conn.user_wallet.lock().unwrap() = "4user".to_string();
+        conn
+    }
+
+    /// The core end-to-end defect test for #32 (Gap B): a share found right as
+    /// a donation rotation starts must be answered on the OLD session before
+    /// the rotation tears it down, not lost or left unsent.
+    ///
+    /// `submit_share` is called, and so is registered in `pending_shares`,
+    /// BEFORE `receiver_loop` is even spawned — so without the rotation gate,
+    /// the very first loop iteration (donate level 100%, so `want != active`
+    /// immediately) rotates straight into `relogin_as`, which drains the
+    /// pending entry as lost before the pool ever gets a chance to answer it.
+    ///
+    /// Must FAIL against the unfixed code: `accepted == 0, lost == 1`. If
+    /// reverting the fix does not reproduce that, the test is not covering
+    /// the defect.
+    #[test]
+    fn a_share_outstanding_at_a_rotation_is_answered_before_the_relogin() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = tx.send(n as u8);
+                if n == 0 {
+                    // Answer the queued submit on the OLD session.
+                    let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .expect("a submit line from the queued share");
+                    let v: serde_json::Value =
+                        serde_json::from_str(line.trim()).expect("valid JSON-RPC");
+                    let id = v["id"].as_u64().expect("numeric rpc id");
+                    let mut w = sock.try_clone().expect("clone for write");
+                    let _ = w.write_all(
+                        format!(
+                            "{{\"id\":{},\"jsonrpc\":\"2.0\",\"error\":null,\
+                             \"result\":{{\"status\":\"OK\"}}}}\n",
+                            id
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = w.flush();
+                    held.push(sock);
+                } else {
+                    // The relogin on the Author wallet.
+                    let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line); // login line
+                    let mut w = sock.try_clone().expect("clone for write");
+                    let _ = w.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"id\":\"sess2\",\
+                          \"job\":{\"blob\":\"00\",\"job_id\":\"j2\",\"target\":\"ffffffff\"},\
+                          \"status\":\"OK\"}}\n",
+                    );
+                    let _ = w.flush();
+                    held.push(sock);
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+            }
+        });
+
+        let conn = new_rotation_conn(&addr);
+        conn.submit_share("j1", "00000000", &"a".repeat(64))
+            .expect("queue the share before the receiver loop even starts");
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection (old session)");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(1),
+            "second connection (the Author relogin)"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while conn.get_accepted_shares() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            conn.get_accepted_shares(),
+            1,
+            "the share queued before the rotation must be accepted, not dropped by it"
+        );
+        assert_eq!(conn.get_lost_shares(), 0, "a share answered on the old session is not lost");
+        assert_eq!(conn.get_unsent_shares(), 0);
+
+        let _ = server.join();
+    }
+
+    /// The rotation gate must not wait forever: if the pool never answers,
+    /// the rotation proceeds anyway once `rotation_settle_ms` elapses, and
+    /// the outstanding share is counted lost when the stream is torn down.
+    ///
+    /// This also passes against the unfixed code — it guards the time
+    /// limit's existence, not the Gap-B defect itself (which this suite's
+    /// other new test establishes). Do not read a pass here as evidence the
+    /// core defect is fixed.
+    #[test]
+    fn a_rotation_waits_at_most_the_settle_limit() {
+        use std::sync::mpsc;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = tx.send(n as u8);
+                if n == 0 {
+                    // Never answer the submit; just hold the socket open.
+                    held.push(sock);
+                } else {
+                    use std::io::{BufRead as _, BufReader, Write as _};
+                    let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line);
+                    let mut w = sock.try_clone().expect("clone for write");
+                    let _ = w.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"id\":\"sess2\",\
+                          \"job\":{\"blob\":\"00\",\"job_id\":\"j2\",\"target\":\"ffffffff\"},\
+                          \"status\":\"OK\"}}\n",
+                    );
+                    let _ = w.flush();
+                    held.push(sock);
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+            }
+        });
+
+        let conn = new_rotation_conn(&addr);
+        conn.rotation_settle_ms.store(300, Ordering::SeqCst);
+        conn.submit_share("j1", "00000000", &"a".repeat(64))
+            .expect("queue the share before the receiver loop even starts");
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(1),
+            "the rotation must proceed once the settle limit elapses, even with no reply"
+        );
+
+        assert_eq!(conn.get_lost_shares(), 1);
+        assert_eq!(conn.get_accepted_shares(), 0);
+
+        let _ = server.join();
+    }
+
+    /// Pins the in-flight term specifically: a submitter blocked on the
+    /// stream lock (not yet registered in `pending_shares`) must still be
+    /// visible to the rotation gate via `submits_in_flight` (#32).
+    #[test]
+    fn a_submitter_blocked_on_the_stream_lock_counts_as_in_flight() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let _server = thread::spawn(move || {
+            let _held = listener.accept();
+            thread::sleep(Duration::from_secs(3));
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        let guard = conn.stream.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter =
+            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while conn.submits_in_flight.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            conn.get_pending_shares(),
+            0,
+            "still blocked on the stream lock, so not yet registered"
+        );
+
+        drop(guard);
+        submitter.join().expect("submitter thread").expect("submit succeeds");
+
+        assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(conn.get_pending_shares(), 1);
+    }
+
+    /// Every return path out of `submit_share` must release the in-flight
+    /// count, including the earliest possible failure — no connection at
+    /// all (#32).
+    #[test]
+    fn in_flight_is_released_on_every_error_path() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        let err = conn.submit_share("j1", "00000000", "ff");
+        assert!(err.is_err());
+        assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    /// Does not deterministically distinguish "the gate checks pending only"
+    /// from "the gate also checks in-flight", since which thread wins the
+    /// lock race between the submitter and `receiver_loop` is
+    /// non-deterministic — `rotation_may_proceed_truth_table` is what pins
+    /// the in-flight term specifically. What this test does establish is that
+    /// a submission blocked on the stream lock at the moment a rotation
+    /// fires is still sent and answered on the old session (#32).
+    #[test]
+    fn a_blocked_submitter_at_rotation_is_sent_and_answered_on_the_old_session() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<u8>();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let _ = tx.send(n as u8);
+                if n == 0 {
+                    let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .expect("a submit line from the queued share");
+                    let v: serde_json::Value =
+                        serde_json::from_str(line.trim()).expect("valid JSON-RPC");
+                    let id = v["id"].as_u64().expect("numeric rpc id");
+                    let mut w = sock.try_clone().expect("clone for write");
+                    let _ = w.write_all(
+                        format!(
+                            "{{\"id\":{},\"jsonrpc\":\"2.0\",\"error\":null,\
+                             \"result\":{{\"status\":\"OK\"}}}}\n",
+                            id
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = w.flush();
+                    held.push(sock);
+                } else {
+                    let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line);
+                    let mut w = sock.try_clone().expect("clone for write");
+                    let _ = w.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"id\":\"sess2\",\
+                          \"job\":{\"blob\":\"00\",\"job_id\":\"j2\",\"target\":\"ffffffff\"},\
+                          \"status\":\"OK\"}}\n",
+                    );
+                    let _ = w.flush();
+                    held.push(sock);
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+            }
+        });
+
+        let conn = new_rotation_conn(&addr);
+
+        let guard = conn.stream.lock().unwrap();
+        let submitter_conn = Arc::clone(&conn);
+        let submitter = thread::spawn(move || {
+            submitter_conn.submit_share("j1", "00000000", &"a".repeat(64))
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while conn.submits_in_flight.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 1);
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+
+        drop(guard);
+        submitter.join().expect("submitter thread").expect("submit succeeds");
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(0), "first connection (old session)");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(1), "second connection (relogin)");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while conn.get_accepted_shares() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(conn.get_accepted_shares(), 1);
+        assert_eq!(conn.get_lost_shares(), 0);
+        assert_eq!(conn.get_unsent_shares(), 0);
+
+        let _ = server.join();
     }
 
     // --- GitHub #37: a failed relogin must not leave a live stream ---

@@ -48,3 +48,4 @@ Newest last.
 - **[LIVE-03](LIVE-03.md)** — Confirmatory 7-hour live run with both fixes deployed. *(Completed)*
 - **[NET-04](NET-04.md)** — Close stream-clear and session-id-check gaps in relogin and login (#37). *(Completed)*
 - **[NET-06](NET-06.md)** — Instrument found-to-submit latency; confirm stream-lock starvation and its real-world cost (#40). *(Completed)*
+- **[NET-05](NET-05.md)** — Wait out an in-flight share submission before a donation rotation (#32). *(Completed)*

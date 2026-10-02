@@ -173,6 +173,7 @@ fn main() {
         let accepted = miner.get_accepted_shares();
         let rejected = miner.get_rejected_shares();
         let lost = miner.get_lost_shares();
+        let unsent = miner.get_unsent_shares();
         let pending = miner.get_pending_shares();
         let verify_failures = miner.get_verify_failures();
         let difficulty = miner.get_difficulty();
@@ -239,6 +240,14 @@ fn main() {
             String::new()
         };
 
+        // Shown only when non-zero, same pattern as `lost_str`: never written
+        // at all, because the connection was down at submit time (#32).
+        let unsent_str = if unsent > 0 {
+            format!(" (unsent:{})", unsent)
+        } else {
+            String::new()
+        };
+
         // Shown only when non-zero, same reasoning as `lost_str`: an
         // outstanding submission is the normal, momentary state between
         // write and response, not something worth a line on every tick.
@@ -249,13 +258,14 @@ fn main() {
         };
 
         log::info!(
-            "H/s 1m:{} 5m:{} 10m:{} | Shares: {}/{}{}{} (found:{}) | Diff: {} | {} elapsed ({}, avg {}) | {}",
+            "H/s 1m:{} 5m:{} 10m:{} | Shares: {}/{}{}{}{} (found:{}) | Diff: {} | {} elapsed ({}, avg {}) | {}",
             fmt_rate(snap.rate_1m),
             fmt_rate(snap.rate_5m),
             fmt_rate(snap.rate_10m),
             accepted,
             rejected,
             lost_str,
+            unsent_str,
             pending_str,
             share_stats.total_found,
             difficulty,
@@ -268,10 +278,11 @@ fn main() {
 
     miner.stop();
     log::info!(
-        "Miner stopped. Final stats: {} accepted, {} rejected, {} lost, {} pending",
+        "Miner stopped. Final stats: {} accepted, {} rejected, {} lost, {} unsent, {} pending",
         miner.get_accepted_shares(),
         miner.get_rejected_shares(),
         miner.get_lost_shares(),
+        miner.get_unsent_shares(),
         miner.get_pending_shares(),
     );
 }

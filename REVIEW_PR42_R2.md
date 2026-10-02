@@ -24,3 +24,9 @@ The scratchpad dir is shared with at least one other concurrent agent (files `po
 
 ### Q3 (F2 break-test) — reproduced
 Revert F1 only (result-first, no filters, trailing `else if error` restored, byte-matching 2c9aac2~1's login()): `a_login_rejection_with_a_null_result_reports_the_real_reason` FAILS at :2468 with `got: Login response carried no session id: null`; 38 others pass. Matches the claim.
+
+### Q4 (F3 correction) — reproduced; corrected bullet is accurate
+- Revert A (relogin_as clear -> `connect()?; login()?`): test 2 FAILS at the stream-is-none assert ("a failed relogin must clear the stream"). Also fail: test 1 (stream assert), test 4 (15s third-accept timeout), and the new F2 test (its stream assert).
+- Revert B (login let-else -> main's `if let Some(id)`): test 2 FAILS at `.is_err()` ("must fail, not succeed silently"); test 4 fails (timeout); test 1 passes.
+- `session_id == "old"` cannot discriminate: under A the fixed login() errs before writing sid; under B main's code skips the write when no id. Bullet's claim correct.
+All restored via `git checkout HEAD -- src/pool_connection.rs`, `git diff --quiet 2c9aac2 -- src/` OK.

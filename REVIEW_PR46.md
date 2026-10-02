@@ -38,7 +38,8 @@ Makefile, scripts, .cargo — nothing to hand off.
 AUDIT PROC-09 "Not Established" bullet 2: "list-nested vs. column-0 block is this entry's working
 hypothesis" — directly contradicts the F1 correction paragraph above it. "Known, acknowledged gap"
 paragraph: "a guard nested inside a list item costs real (if small) tokens while a column-0 guard
-above a heading appears to cost none" — same superseded framing. Research doc is consistent; AUDIT
+above a heading appears to cost none" — same superseded framing. Third instance: "Behaviour /
+Content Changes" para ends "the nesting distinction between the two groups turns out to matter". Research doc is consistent; AUDIT
 argues with itself (exactly the stale-claim failure mode).
 
 ### R2-F2 (minor) — F5 fix introduces a false rationale
@@ -73,6 +74,11 @@ materialised three times. Neither AUDIT nor the status note says step 0 was skip
 - R2-N4 Known-gap paragraph's list of unguarded copied passages not updated for the new
   Mining-Flow/Stratum/Dataset copy in pr-reviewer.md (no drift guard added for it in CLAUDE.md).
 
+- R2-N6 ">=4 spaces survives" (AUDIT F1 para, research-doc status note, PR body) extrapolates:
+  round 1 measured 0/1/2/3 (stripped) and 4 (survives, nested and top-level) only; no 5+ point.
+  Only "4 survives" is measured; step 5 plans to rely on the threshold.
+- R2-N7 Research-doc status note quotes "this PR deletes nothing" as "the reasoning given"; its
+  only source is the out-of-repo PLAN_PROC09.md scratch plan — untraceable from the repo.
 - R2-N5 PR body test plan: "all twelve runs behaving as predicted" — the F4 tension AUDIT now
   resolves (exits-141 NOT-FOUND was a gap, not a prediction met) survives in the PR description.
 
@@ -82,11 +88,12 @@ materialised three times. Neither AUDIT nor the status note says step 0 was skip
   materialisations requested (exits-141; tier/sealing + stale-base by lead grep; F5 by review).
   Round 1 counted tier/sealing and stale-base separately, so "at least three" is conservative. OK.
 - CI at check time (1ae4155): lint, audit, mutation pass; test, jit-macos, jit-linux-arm pending.
-- This round's ledger commits (ae1bad7, aa7c3f4, + verdict) are LOCAL on the branch, not pushed:
-  the lead must drop/rm them before pushing or the no-ledger CI step fails.
+- This round's ledger commits are LOCAL on the branch, not pushed. Do NOT drop them: keep them,
+  `git rm REVIEW_PR46.md` in the next fix commit (the CI step checks the head tree, not history),
+  and record this round's final ledger sha in AUDIT.md, as round 1's 2340ad1 was.
 
 ## Verdict
-Mergeable on content once CI is green: 0 blockers, 0 majors, 4 minors (R2-F1..F4), 5 nits — all
+Mergeable on content once CI is green: 0 blockers, 0 majors, 4 minors (R2-F1..F4), 7 nits — all
 documentation accuracy. Round-1 fixes F2, F3, N1-N5 verified correct; F1, F5, F6 partially
 (R2-F1, R2-F2/F3, R2-F4). R2-F1 and R2-F2 are worth fixing before merge (AUDIT self-contradiction;
 a false fact in a reviewer's sole context). Not verified: CI completion; any probe re-run (none

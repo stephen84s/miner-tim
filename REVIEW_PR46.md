@@ -7,17 +7,17 @@ Makefile, scripts, .cargo — nothing to hand off.
 ## Coverage ledger
 | # | Item | Status |
 |---|---|---|
-| 1 | F1 indentation rule consistent | pending |
-| 2 | F2 exits-141 direction | pending |
-| 3 | F3 figures recomputed | pending |
-| 4 | F4 contradiction + "at least three times" | pending |
-| 5 | F5 pr-reviewer.md facts vs src | pending |
-| 6 | F6 reordering note | pending |
-| 7 | N1-N3, N5 | pending |
-| 8 | N4 PR body | pending |
-| 9 | Ledger removal + sha 2340ad1 | pending |
-| 10 | CI status | pending |
-| 11 | Fresh-eyes pass on fix diff | pending |
+| 1 | F1 indentation rule consistent | done |
+| 2 | F2 exits-141 direction | done |
+| 3 | F3 figures recomputed | done |
+| 4 | F4 contradiction + "at least three times" | done |
+| 5 | F5 pr-reviewer.md facts vs src | done |
+| 6 | F6 reordering note | done |
+| 7 | N1-N3, N5 | done |
+| 8 | N4 PR body | done |
+| 9 | Ledger removal + sha 2340ad1 | done |
+| 10 | CI status | done |
+| 11 | Fresh-eyes pass on fix diff | done |
 
 ## Findings
 
@@ -72,3 +72,22 @@ materialised three times. Neither AUDIT nor the status note says step 0 was skip
   Totals correct; attribution incomplete.
 - R2-N4 Known-gap paragraph's list of unguarded copied passages not updated for the new
   Mining-Flow/Stratum/Dataset copy in pr-reviewer.md (no drift guard added for it in CLAUDE.md).
+
+- R2-N5 PR body test plan: "all twelve runs behaving as predicted" — the F4 tension AUDIT now
+  resolves (exits-141 NOT-FOUND was a gap, not a prediction met) survives in the PR description.
+
+### Also checked
+- N4: PR body now files the token miss under tasks/PROC-09.md and records round 1. Fixed.
+- F4: AUDIT para now separates "mechanism worked" from "nothing missed" and names the three
+  materialisations requested (exits-141; tier/sealing + stale-base by lead grep; F5 by review).
+  Round 1 counted tier/sealing and stale-base separately, so "at least three" is conservative. OK.
+- CI at check time (1ae4155): lint, audit, mutation pass; test, jit-macos, jit-linux-arm pending.
+- This round's ledger commits (ae1bad7, aa7c3f4, + verdict) are LOCAL on the branch, not pushed:
+  the lead must drop/rm them before pushing or the no-ledger CI step fails.
+
+## Verdict
+Mergeable on content once CI is green: 0 blockers, 0 majors, 4 minors (R2-F1..F4), 5 nits — all
+documentation accuracy. Round-1 fixes F2, F3, N1-N5 verified correct; F1, F5, F6 partially
+(R2-F1, R2-F2/F3, R2-F4). R2-F1 and R2-F2 are worth fixing before merge (AUDIT self-contradiction;
+a false fact in a reviewer's sole context). Not verified: CI completion; any probe re-run (none
+needed for this round's claims); whether the 4-space threshold holds on the real file.

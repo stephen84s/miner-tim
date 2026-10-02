@@ -566,15 +566,18 @@ impl PoolConnection {
         // Lock order is stream -> pending_shares. Nothing takes them the other
         // way: `drain_pending_shares` and `handle_pool_message` take
         // `pending_shares` alone, after the stream guard has been released.
-        {
+        let lock_requested = Instant::now();
+        let (lock_wait_ms, write_ms) = {
             let mut stream_guard = self
                 .stream
                 .lock()
                 .map_err(|_| "Stream mutex poisoned".to_string())?;
+            let lock_acquired = Instant::now();
             let stream = stream_guard
                 .as_mut()
                 .ok_or_else(|| "Not connected".to_string())?;
             write_request(stream, rpc_id, "submit", params)?;
+            let write_done = Instant::now();
             if let Ok(mut pending) = self.pending_shares.lock() {
                 pending.insert(
                     rpc_id,
@@ -585,13 +588,19 @@ impl PoolConnection {
                     },
                 );
             }
-        }
+            (
+                (lock_acquired - lock_requested).as_secs_f64() * 1000.0,
+                (write_done - lock_acquired).as_secs_f64() * 1000.0,
+            )
+        };
 
         log::info!(
-            "Share submitted: rpc_id={} job_id={} nonce={}",
+            "Share submitted: rpc_id={} job_id={} nonce={} lock_wait_ms={:.3} write_ms={:.3}",
             rpc_id,
             job_id,
-            nonce
+            nonce,
+            lock_wait_ms,
+            write_ms
         );
 
         Ok(())

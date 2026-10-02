@@ -2421,13 +2421,15 @@ mod tls_tests {
 
     /// GitHub #37 review (PR #42, F1/F2): a real pool rejects a login this
     /// way — sammy007/monero-stratum answers with `result` present but
-    /// `null` alongside a populated `error`, not with `error` alone. Before
-    /// the F1 fix, checking `result` first (even though it's `null`) made
-    /// this `Ok(())`: the pool's genuine rejection (bad wallet, banned IP,
-    /// etc.) was silently treated as a successful login with no session id
-    /// and no job. This pins that `error` is now checked first, and that
-    /// the real rejection reason reaches the caller rather than being
-    /// replaced with a generic "no session id" message.
+    /// `null` alongside a populated `error`, not with `error` alone.
+    /// Before the F1 fix (but after #37's base fix in this same PR), login()
+    /// already checked `result` first and failed on a missing session id —
+    /// so this didn't silently succeed, but the error it raised was the
+    /// generic "no session id: null", not the pool's real rejection reason.
+    /// (`Ok(())` is `main`'s behaviour, two states further back — `main`'s
+    /// login() doesn't fail on a missing id at all.) This pins that `error`
+    /// is now checked first, so the real rejection reason reaches the
+    /// caller instead of being replaced with that generic message.
     #[test]
     fn a_login_rejection_with_a_null_result_reports_the_real_reason() {
         use std::io::{BufRead as _, BufReader, Write as _};
@@ -2535,6 +2537,63 @@ mod tls_tests {
             "a successful relogin must restore the short poll interval, not leave \
              the 30s login-wait timeout in place; got {timeout:?}"
         );
+
+        let _ = server.join();
+    }
+
+    /// GitHub #37 review round 2 (R2-F1): both reference pool implementations
+    /// send `"error":null` on a *successful* login, not an absent `error`
+    /// field. The F1 fix's `.filter(|v| !v.is_null())` on the `error` check
+    /// matters for every real-pool login, not just the rejection case R2's
+    /// other new test covers — without the filter, `response.get("error")`
+    /// would return `Some(Null)` on every success and `login()` would fail
+    /// every real login with `"Login error: null"`. No prior test used this
+    /// shape; `a_successful_relogin_restores_the_poll_interval` omits `error`
+    /// entirely, so it can't catch a missing filter here.
+    #[test]
+    fn a_successful_login_with_an_explicit_null_error_still_succeeds() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = thread::spawn(move || {
+            let mut held = Vec::new();
+            for (n, incoming) in listener.incoming().enumerate() {
+                let mut sock = match incoming {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                if n == 1 {
+                    let mut reader = BufReader::new(sock.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a login request line");
+                    let _ = sock.write_all(
+                        b"{\"id\":1,\"jsonrpc\":\"2.0\",\"error\":null,\"result\":\
+                          {\"id\":\"sess3\",\"job\":{\"blob\":\"00\",\"job_id\":\"j1\",\
+                          \"target\":\"ffffffff\"},\"status\":\"OK\"}}\n",
+                    );
+                    let _ = sock.flush();
+                    thread::sleep(Duration::from_secs(1));
+                    return;
+                }
+                held.push(sock);
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener (accept 0)");
+
+        let result = conn.relogin_as("4test");
+
+        assert!(
+            result.is_ok(),
+            "an explicit `\"error\":null` alongside a real result must not be \
+             mistaken for a rejection: {result:?}"
+        );
+        assert_eq!(*conn.session_id.lock().unwrap(), "sess3");
 
         let _ = server.join();
     }

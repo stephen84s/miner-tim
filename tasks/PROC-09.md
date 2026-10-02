@@ -1,6 +1,6 @@
 # PROC-09 — Subagents stop loading CLAUDE.md
 
-**Status:** Completed
+**Status:** Active
 
 First PR of the Claude-Code-native migration described in
 `AIDLC_MIGRATION_PLAN_RESEARCH.md`. Sets `omitClaudeMd: true` on all six

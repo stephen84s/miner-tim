@@ -40,6 +40,7 @@ Look for these specifically. Each one passed a green test suite.
 | Doc comments **orphaned** by splicing a new function under an existing one | New code inserted directly beneath a doc comment |
 | Reported RSS figures **did not reproduce** — a 2.7× overstatement | Any measurement quoted without a reproduction |
 | A test's `#[ignore]`/filter matched nothing, so libtest reported **success** | Test filters; renamed modules |
+| A guard tested only against bad input proves nothing; a shell guard like `producer \| grep -q pattern` under `pipefail` **exits 141** (SIGPIPE) if `grep` matches early, not a clean pass/fail | Any test-guards-both-directions claim; pipeline guards under `set -o pipefail` |
 
 ## Break-testing is required, not optional
 

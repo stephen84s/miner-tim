@@ -7401,7 +7401,7 @@ First PR of the Claude-Code-native migration (research phase in `AIDLC_MIGRATION
 
 **Files Changed**
 
-- `.claude/agents/_shared-context.md`: added "Agents do not load CLAUDE.md" intro paragraph; rewrote caffeinate rule fully self-contained (previously said "see CLAUDE.md's rule"); added "CI runs only where a PR exists" bullet.
+- `.claude/agents/_shared-context.md`: added "Agents do not load CLAUDE.md" intro paragraph; rewrote caffeinate rule fully self-contained (previously said "see CLAUDE.md's rule"); added "CI runs only where a PR exists" bullet; added a new failure-modes table row for shell-pipeline SIGPIPE/exit-141 guards (added after verification found all six agents lacked this fact).
 - `.claude/agents/audit-writer.md`: corrected stale `description:` ("task-board rows" → "tasks/ files"); added three new bullets (correction rule, issue-numbering convention, ledger-sha requirement).
 - `.claude/agents/break-tester.md`: added "Local trap: filtered `cargo test`" section.
 - `.claude/agents/ci-reviewer.md`: added "Facts about this repo's CI" section (trigger rules, five required checks and job names, jit-macos ~14min figure, ledger-check step name); added "Local trap: filtered `cargo test`" section.
@@ -7425,7 +7425,7 @@ Seven one-line HTML comments were inserted into CLAUDE.md's step-0 bullet, each 
 
 **Finding 1: `omitClaudeMd: true` suppresses project CLAUDE.md, user-global `~/.claude/CLAUDE.md`, and auto-memory — but NOT path-scoped `.claude/rules/*.md` files.**
 
-Established by controlled probe (two throwaway agent definitions, identical except `omitClaudeMd: true` on one; a throwaway `.claude/rules/canary.md` scoped to `paths: ["src/hex.rs"]` containing a nonce string; three-step checks: before any read, after reading a non-matching file, after reading the matching file). Run headless via `claude -p` from this worktree (Claude Code 2.1.287), with control run from primary checkout (no omit). Verbatim results:
+Established by controlled probe (two throwaway agent definitions, identical except `omitClaudeMd: true` on one; a throwaway `.claude/rules/canary.md` scoped to `paths: ["src/hex.rs"]` containing a nonce string; three-step checks: before any read, after reading a non-matching file, after reading the matching file). Both control (no omitClaudeMd) and flagged (omitClaudeMd: true) probes run headless via `claude -p` from this worktree (Claude Code 2.1.287). Verbatim results:
 
 Control (CLAUDE.md loaded):
 ```
@@ -7470,7 +7470,9 @@ For each of the six real agents, spawned twice headless via `claude -p` with `mo
 | break-tester | primary | FOUND | FOUND | FOUND | exit code 2 = survivor — correct |
 | break-tester | worktree | NOT-FOUND | NOT-FOUND | NOT-FOUND | exit code 2 = survivor — correct |
 
-**6/6 agents correct after omit.** Every control found all three markers, every flagged run found none of them, and every flagged agent answered its functional-knowledge question correctly from the pasted compensation content — no agent silently lost a fact it needs. This is the direct evidence this entry's "done" criterion rests on.
+**Every tested marker/fact behaved as expected across all twelve runs.** Every control found all three markers, every flagged run found none of them, and every flagged agent answered its functional-knowledge question correctly from the pasted compensation content.
+
+**Caveat: what the functional-knowledge tests actually prove.** The functional questions only tested facts that were either pasted as compensation text or native to the agent's own body — never facts sourced from CLAUDE.md in the first place. Examples: break-tester's mutants.sh exit-code knowledge (native to its domain), audit-writer's review-tier format (native to audit machinery), ci-reviewer's trigger-rule (pasted as compensation). Such tests cannot by themselves prove no fact was missed — they only verify that compensated facts work and that native facts were not overwritten by omit.
 
 Per-agent measured token delta (sum of `inputTokens + cacheReadInputTokens + cacheCreationInputTokens` from `modelUsage.claude-haiku-4-5-20251001`, primary minus worktree):
 
@@ -7483,7 +7485,7 @@ Per-agent measured token delta (sum of `inputTokens + cacheReadInputTokens + cac
 
 All six deltas land in 10,958–11,803 range, closely matching and slightly exceeding the sealed prediction of "roughly 9-11k tokens." Token saving validated.
 
-**Correction to the plan's own premise: HTML comments do consume context.** The plan asserted comments "cost no context because comments are stripped before injection." A direct headless check (`claude -p` from this worktree, zero tool calls, asking whether its own context contains the literal text "Copied into") returned FOUND. The seven one-line comments consume some (not precisely measured — each ~100-150 tokens estimated for all seven combined) context in the main session only, not in subagent contexts. The comments remain a useful drift guard (cheap at hundreds of tokens against the whole file) and their usage is correct, but the plan's stated justification was wrong.
+**Correction to the plan's own premise: HTML comments do consume context.** The plan asserted comments "cost no context because comments are stripped before injection." A direct headless check (`claude -p` from this worktree, zero tool calls, asking whether its own context contains the literal text "Copied into") returned FOUND. The seven one-line comments consume some (not precisely measured — each ~100-150 tokens estimated for all seven combined) context in the main session only, not in subagent contexts. Confirmed by a second, independent check using a non-leading prompt (asking the agent to enumerate HTML comments generally, without naming the target phrase): it correctly quoted three of the seven comments verbatim unprompted. The comments remain a useful drift guard (cheap at hundreds of tokens against the whole file) and their usage is correct, but the plan's stated justification was wrong.
 
 **Verification Performed**
 
@@ -7496,6 +7498,16 @@ All six deltas land in 10,958–11,803 range, closely matching and slightly exce
 - Full real-agent behavioural/token verification in Finding 3 above — run by the lead personally.
 - Primary checkout (`/Users/stephen/code/github/miner-tim`) confirmed untouched throughout (git status / git log verified before and after implementer's run): still session-start state plus two pre-existing untracked files unrelated to this work.
 - Branch rebased cleanly onto `origin/main` (tip `0be2000`, PR #43/NET-05) — two trivial append-order conflicts in `tasks/README.md` and CLAUDE.md's Current-task pointer, resolved by established convention (main's line first, then branch's append after).
+
+**Gap found during verification, closed before this entry was finalized**
+
+**User auto-memory (MEMORY.md) fact missing from initial compensation.** All six flagged agents reported "exits 141" (a marker from this user's own auto-memory file: `test guards both directions; grep -q under pipefail exits 141`) as NOT-FOUND during the V3 verification probe. This marker is suppressed by `omitClaudeMd` exactly like CLAUDE.md is. **This specific fact — that an unguarded `grep -q` in a shell pipeline silently returns success when no match is found, hiding logic errors — is directly relevant to ci-reviewer's domain** (correctness of shell-based CI checks, guard patterns, exit codes). 
+
+**Resolution: added to `.claude/agents/_shared-context.md` in this PR.** A new row was inserted into the "Failure modes this repo has actually produced" table (read by all six agents), right after the existing "#[ignore]/filter matched nothing" row:
+
+| A guard tested only against bad input proves nothing; a shell guard like `producer \| grep -q pattern` under `pipefail` **exits 141** (SIGPIPE) if `grep` matches early, not a clean pass/fail | Any test-guards-both-directions claim; pipeline guards under `set -o pipefail` |
+
+This closes the gap before the PR proceeds to review.
 
 **Implementer's three self-resolved ambiguities**
 

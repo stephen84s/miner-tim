@@ -76,11 +76,16 @@ name what you are handing off.
      missed that was discovered later, and how many false positives it
      raised, as `**Review (<tier>, round N): <verdict>**`. A reviewed PR
      with no such paragraph, or one that doesn't name the tier, is an
-     audit-accuracy gap worth flagging.
-   - **Before trusting a green CI run as evidence, check the branch is
-     rebased on the current `origin/main`** (`git merge-base HEAD
-     origin/main` should equal `origin/main`'s tip). This repo's branch
-     protection requires up-to-date branches, but a reviewer working from a
+     audit-accuracy gap worth flagging. Separately, the entry (or the task
+     file) should show the review's *expected* findings were written down
+     **before** the review ran, not just the actual findings after —
+     grading a review against predictions made up after the fact is
+     worthless, and a PR with no prior prediction at all is itself worth
+     a note (not necessarily a blocker).
+   - **Before trusting a green CI run as evidence, `git fetch origin` then
+     check the branch is rebased on the current `origin/main`** (`git
+     merge-base HEAD origin/main` should equal `origin/main`'s tip). This
+     repo's branch protection requires up-to-date branches, but a reviewer working from a
      stale local checkout can still be fooled by CI results that ran
      against an older merge ref. A stale base has been the actual blocker
      in more than one past review round here.

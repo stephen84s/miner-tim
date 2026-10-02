@@ -1413,6 +1413,136 @@ mod tls_tests {
         let _ = server.join();
     }
 
+    /// Reproducer for #40: does `receiver_loop` starve `submit_share` of the
+    /// `stream` lock when the pool is quiet? The receiver re-takes the lock
+    /// every `RECV_POLL_INTERVAL` (50ms) to attempt a read; if the OS mutex
+    /// hands the lock back to the receiver ahead of a parked `submit_share`
+    /// call under load, a share can sit for seconds before it reaches the
+    /// wire — the #40 symptom (mean 7.8s, max 34s in a live run).
+    ///
+    /// `#[ignore]`d because the assertion is about real scheduling latency,
+    /// not program correctness: it is a diagnostic reproducer, not something
+    /// CI should gate on. Run manually with:
+    /// `rtk proxy cargo test --release --lib -- --ignored --nocapture \
+    ///  a_submit_is_not_held_hostage control_a_chatty`
+    #[test]
+    #[ignore = "reproduces #40: receiver_loop may starve submit_share of the stream \
+                lock; un-ignore once a fix lands"]
+    fn a_submit_is_not_held_hostage_by_a_quiet_receiver() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<()>();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            // Hold the socket open for the whole test — never close it.
+            // Silence on an open connection is the condition under test, not
+            // EOF (that is #34's scenario, covered elsewhere).
+            thread::sleep(Duration::from_secs(3));
+            let _ = sock.write_all(
+                b"{\"id\":999999,\"result\":{\"status\":\"KEEPALIVED\"}}\n",
+            );
+            let _ = sock.flush();
+            // Keep holding the socket until the test signals teardown.
+            let _ = rx.recv();
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        // Far above the 3s the server stays quiet, so the silence-timeout
+        // reconnect path (#34) cannot fire and confound this measurement.
+        conn.silence_timeout_ms.store(60_000, Ordering::Relaxed);
+        conn.connect(&addr).expect("connect to the local listener");
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+        thread::sleep(Duration::from_millis(200));
+
+        let start = Instant::now();
+        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let elapsed = start.elapsed();
+        eprintln!("a_submit_is_not_held_hostage_by_a_quiet_receiver: submit_share took {:?}", elapsed);
+        result.expect("submit_share must succeed against a connected stream");
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "submit took {:?}, expected well under 500ms if the stream lock isn't starved",
+            elapsed
+        );
+
+        let _ = tx.send(());
+        let _ = server.join();
+    }
+
+    /// Control for the reproducer above: same shape, but the server writes a
+    /// keepalive-shaped line every ~100ms instead of staying quiet for 3s. If
+    /// #40 is specifically about a *quiet* connection — the receiver blocked
+    /// in its read for the full `RECV_POLL_INTERVAL` with nothing to do other
+    /// than re-contend for the lock — a chatty connection should behave
+    /// differently, since each incoming line gives the receiver (and hence
+    /// the lock) something else to do between read attempts. Same assertion
+    /// as T1; this one is expected to stay fast.
+    ///
+    /// `#[ignore]`d for the same reason as the reproducer above. Run manually
+    /// with: `rtk proxy cargo test --release --lib -- --ignored --nocapture \
+    ///  a_submit_is_not_held_hostage control_a_chatty`
+    #[test]
+    #[ignore = "control for #40's reproducer; diagnostic timing, not a correctness gate"]
+    fn control_a_chatty_receiver_lets_a_submit_through() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<()>();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            loop {
+                let _ = sock.write_all(
+                    b"{\"id\":999999,\"result\":{\"status\":\"KEEPALIVED\"}}\n",
+                );
+                let _ = sock.flush();
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    _ => break,
+                }
+            }
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.silence_timeout_ms.store(60_000, Ordering::Relaxed);
+        conn.connect(&addr).expect("connect to the local listener");
+        *conn.address.lock().unwrap() = addr.clone();
+        *conn.wallet.lock().unwrap() = "4test".to_string();
+
+        let worker = conn.clone();
+        thread::spawn(move || worker.receiver_loop());
+        thread::sleep(Duration::from_millis(200));
+
+        let start = Instant::now();
+        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let elapsed = start.elapsed();
+        eprintln!("control_a_chatty_receiver_lets_a_submit_through: submit_share took {:?}", elapsed);
+        result.expect("submit_share must succeed against a connected stream");
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "submit took {:?}, expected well under 500ms — a chatty connection \
+             should not starve the lock",
+            elapsed
+        );
+
+        let _ = tx.send(());
+        let _ = server.join();
+    }
+
     /// A local listener accepts, then sends a megabyte and a half with no
     /// newline. If the buffer is bounded, the loop gives up on the stream and
     /// calls `reconnect`, which the listener observes as a **second accept**. If

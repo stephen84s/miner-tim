@@ -39,12 +39,14 @@ Mechanical token test (scratch repos, `claude -p "Reply with exactly: ack" --out
 - column-0 above heading 20,871 (+3, stripped) | column-0 after paragraph 20,882 (stripped)
 - column-0 *between list items* 20,872 (stripped) | 1-space top-level 20,826 (stripped)
 - **4-space indent at top level, no list at all: 29,834 (SURVIVES)**
-So the variable is >=4-space indentation (CommonMark indented code block), not "nested inside a
-list item". The entry's conclusion about *which of the seven* survive is right; its stated rule is
-wrong, and the research-doc status note propagates the wrong rule ("nested inside a list item").
-Consequence: the three surviving guards could simply be dedented to column 0 and cost nothing; step 5
-can keep "why" comments free if they start at column 0-3. Confirms the 50-80-token cost estimate is
-plausible but it remains unmeasured on the real file.
+Also 2-space and 3-space top-level: 20,826 (stripped, same as 1-space).
+So empirically: indent 0-3 stripped, >=4 survives, whether or not inside a list. The entry's
+conclusion about *which of the seven* survive is right; its stated rule ("nested inside a list item")
+is wrong, and the research-doc status note propagates it. Mechanism not established (it is not a
+plain CommonMark parse: inside `0.  ` the 4-space comment is list content, which CommonMark treats as
+an HTML block, yet it survives). Remedy NOT verified: dedenting the three guards to column 0 would
+likely end the `0.` list item and break GitHub rendering of the rest of step 0 — check rendering first.
+The 50-80-token cost estimate remains unmeasured on the real file.
 
 ### F2 (minor) — AUDIT entry describes the exits-141 fact backwards
 Entry: "an unguarded `grep -q` in a shell pipeline silently returns success when no match is found".
@@ -95,9 +97,16 @@ AUDIT entry nor the research-doc status note records that the ordering was chang
   premises" — it is the task file's prediction.
 - N5 three v345 runs logged exit=1 while their JSON reports success, unmentioned.
 
+## Item 6 note
+The three sealed prediction bullets are unchanged since c72e75f; post-seal edits touched only the
+risk citation and the artefact-location paragraph, both disclosed in 7a83ff3. The seal predicted
+9-11k while citing a measured 12.0k baseline in the same file, so the token miss was built in at
+sealing; honest disclosure suffices.
+
 ## Verdict
-Mergeable once fixed-forward, minors only: 0 blockers, 0 majors, 6 minors, 5 nits. Sealed prediction
-("mergeable with at most minors") holds. Conditions: push 09802cc (and remove this ledger), let
+NOT mergeable right now (process, not content): jit-* pending on eddcdc8, reviewed head 09802cc
+never pushed/run, and the entry's audit-writer fix exists only in 09802cc. Content: minors only: 0 blockers, 0 majors, 6 minors, 5 nits. Sealed prediction
+("mergeable with at most minors") holds on content. Conditions: push 09802cc (and remove this ledger), let
 jit-macos/jit-linux-arm finish green on the pushed head, and correct F2/F3 in the entry since AUDIT.md
 is trusted later. F1 should also correct the research-doc status note before step 5 relies on it.
 Not verified: the five other agent pairs (only pr-reviewer re-run); real-file token cost of the three

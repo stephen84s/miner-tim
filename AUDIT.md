@@ -7781,12 +7781,12 @@ None functional. Pure status bookkeeping, matching PROC-09-CLEANUP's precedent e
 **Verification Performed**
 
 - Confirmed `401be2c` is `origin/main`'s tip's merge commit for PR #49 (`gh pr view 49 --json state,mergeCommit`).
-- Confirmed issue #44 auto-closed by the merge (`closedAt` matches the merge timestamp to the second).
+- Confirmed issue #44 auto-closed by the merge (`closedAt` 2026-10-03T11:47:00Z is 1 second after `mergedAt` 2026-10-03T11:46:59Z — within a second, not identical as an earlier draft of this line claimed, caught by review).
 - `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched by this entry).
 
-**Review**
+**Review (Sonnet, round 1): not mergeable as first pushed — one minor, one nit, both fixed in this same entry.** Minor: `tasks/NET-07.md`'s own body paragraph (not just its `**Status:**` line) still ended in a stale `**Mergeable.**` — the exact shape PROC-09-CLEANUP's review had already named ("the brief's own stated purpose named two stale locations and there was a third"), repeated here because this entry's own verification grep (`grep -rn "NET-07" ...`) searched for the task ID, not for status words, so it was structurally incapable of finding a stale claim inside a paragraph that doesn't repeat the ID. Fixed: that sentence now reads "**Merged** as `401be2c` (#49)." Nit: the "closedAt matches the merge timestamp to the second" claim above was off by one second (fixed in place, since this correction lands before this entry itself has reached `main`). **False positives: 0.**
 
-Not independently reviewed — scope is a direct copy of PROC-09-CLEANUP's already-reviewed pattern, applied mechanically to NET-07's three status locations. Self-checked by the lead against the three files listed above (no fourth stale-status location found via `grep -rn "NET-07" tasks/README.md tasks/NET-07.md CLAUDE.md`, learning PROC-09-CLEANUP's own round-1 lesson about checking for a missed third location before claiming done).
+The reviewer independently confirmed: the merge commit sha and PR number are correct against real git history; the branch is rebased on current `origin/main`; the `AUDIT.md` diff is a pure append with zero deletions; and `grep -rln "NET-07" .` across the whole repo returns exactly the four files this PR touches, so the three named locations were exhaustive at the *file* level — the miss was intra-file. Not fully verified by round 1: full CI on this PR's own head (only `lint`/`audit` had reported at review time) and the underlying NET-07/#44 fix itself (correctly out of scope for a docs-only follow-up).
 
 **Not Established**
 

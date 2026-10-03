@@ -78,6 +78,69 @@ day (cited inline and listed at the end). Nothing in the repo was changed.*
 > the research as written; only the six items above and the numbering were
 > corrected after a real PR exercised them.
 
+> **Status note 2 (added 2026-10-03, PROC-10): an independent Opus pass was
+> asked to actively try to overturn "don't adopt AI-DLC" and to survey
+> anything else, open-source or Anthropic-native, that might standardize
+> this repo's process better.** It fetched AI-DLC's current state (stable
+> `v2.10.0`, 2026-09-24; ~30 commits landed 2026-10-01–02; a full read of
+> the `AI-DLC-Workflows-2.0-Specification.pdf`, which the original pass
+> did not read), checked this repo's own `AUDIT.md` review-tier track
+> record, and surveyed Spec Kit, OpenSpec, BMAD, AutoGen, CrewAI and
+> LangGraph. Full report, sources and "could not verify" list are the
+> `PROC-10` entry in `AUDIT.md`; the following is what changes this
+> document.
+>
+> **The rejection holds, reaffirmed on different grounds than this
+> document gave.** Three reasons beyond §4's original list, specific to
+> this repo: AI-DLC's Bugfix/Express profiles make review advisory-only or
+> off entirely, while most of this repo's own work is fixes whose
+> reviewers need to be able to block (`Review (` entries in `AUDIT.md`
+> that returned NOT MERGEABLE are exactly this in action); its two
+> built-in reviewers check architectural soundness, not the specific
+> silent-defect shapes this repo's reviewers are tuned for (a
+> sign-extended `imm19`, a test filter matching nothing); and its
+> rule-learning loop appends every kept correction to a project file
+> forever — the same unbounded accumulation this migration exists to
+> escape, automated rather than fixed.
+>
+> **Two AI-DLC ideas are worth taking without installing the engine,
+> folded into the still-pending steps below rather than added as a new
+> step:** its "three-compartment" model (every rule is either checkable
+> by a program or needs human judgement, stated explicitly) sharpens step
+> 0 into "tag each row: can a script check this, yes or no" — do this
+> when step 0 is actually run, which status note 1 already flagged as
+> skipped; and its reviewer-robustness pattern (a turn limit, and a
+> missing/partial verdict recorded as NOT-READY rather than silently
+> dropped) is directly available on Claude Code today via a subagent's
+> `maxTurns` setting — no AI-DLC dependency needed, and a cheap fix for
+> the 560k-token cold-reviewer incident this repo already hit once.
+>
+> **No outside framework fits better, for a shared reason: this repo's
+> hard problem is verification, not unclear requirements, and nothing
+> surveyed targets that.** Spec Kit, OpenSpec and BMAD are all
+> spec-driven — they turn a vague ask into a written plan, which is not
+> this repo's bottleneck. AutoGen, CrewAI and LangGraph are agent
+> runtimes, not development processes, and adopting one would mean
+> leaving Claude Code, the tool actually in use here — ruled out on that
+> basis alone, independent of their individual merits.
+>
+> **The pass's actual new finding: this repo already runs a second,
+> undisclosed process layer.** The `superpowers` plugin is enabled in
+> `~/.claude/settings.json` (user-global) and injects a session-start
+> directive — "if you think there is even a 1% chance a skill might
+> apply … you ABSOLUTELY MUST invoke it" — into every main session; found
+> present in all 11 of this repo's recorded session transcripts. Neither
+> this document nor `CLAUDE.md` had ever mentioned it. At least one of
+> its skills conflicts with this repo's own rules (its TDD skill says
+> delete code written before its test; this repo's own break-testing rule
+> explicitly allows a test added after a fix, provided the fix is proven
+> to break it). No `AUDIT.md` incident traces to it, so this was a risk
+> that had not fired, not a demonstrated failure — but see `PROC-10` for
+> the decision taken on it.
+>
+> Everything else in this document — including status note 1 — is
+> unchanged by this pass.
+
 ---
 
 ## 1. Recommendation (read this if nothing else)

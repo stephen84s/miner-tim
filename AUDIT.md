@@ -7615,3 +7615,61 @@ None functional. Pure status bookkeeping.
 **Not Established**
 
 Nothing beyond what PROC-09's own entry already lists.
+
+### PROC-10 (2026-10-03): Second AI-DLC/alternatives research pass; disable Superpowers for this repo
+
+**Request / Goal**
+
+The maintainer asked, verbatim: "Are you sure AIDLC is not a good idea? (check with Opus also). Is there nothing else from Anthropic or any open framework we can migrate to, to standardize the development process" — an explicit instruction to challenge PROC-09's research conclusion rather than confirm it, and to widen the search beyond AI-DLC vs. "re-home onto Claude Code primitives".
+
+**What was done**
+
+Dispatched a fresh, cold Opus `general-purpose` agent with an adversarial brief: re-fetch AI-DLC's current state and its full v2.0 spec PDF (the original research hadn't read it), steelman AI-DLC specifically for this repo, check whether "adopt AI-DLC" vs. "re-home" is a false dichotomy, and separately survey Spec Kit, OpenSpec, BMAD, AutoGen, CrewAI and LangGraph for a better third option — explicitly checking whether any of them even run inside Claude Code, the actual runtime in use here. The agent hit a session rate limit mid-run (Opus quota reset 1pm Sydney) after finishing its research but before writing up; it was resumed from its own transcript rather than restarted, per its own report "the research was finished before the rate-limit cutoff... every conclusion below rests on files actually fetched in this session."
+
+**Findings (full detail in the agent's report; this is the record of what changed this repo's own documents)**
+
+1. **The AI-DLC rejection holds**, on three grounds beyond the original research: (a) AI-DLC's Bugfix profile makes review advisory-only and Express turns it off entirely, while this repo's own reviewers do sometimes return a blocking NOT MERGEABLE verdict — real, demonstrated capability AI-DLC's profiles lack, but not "most" of the record: `grep -n '\*\*Review (' AUDIT.md` (round-2 review, excluding this entry's own self-citation) counts 16 real entries, of which 7 are NOT MERGEABLE (one of those process-only, 0 content blockers) against 9 MERGEABLE or conditionally-mergeable — a minority, corrected here after this entry's own round-1 review caught the overclaim; (b) its two built-in reviewers (product-lead, architecture) check soundness and NFR achievability, not this repo's specific silent-defect shapes; (c) its rule-learning loop appends every kept correction to a project file permanently — the agent's words: "that is the same accumulation that grew CLAUDE.md to 41 KB, with a routine that makes it grow faster."
+2. **Two AI-DLC ideas are worth taking without the engine**: the "three-compartment" model (tag every rule as script-checkable or judgement-needed, from the spec PDF's principles 3/4/7) sharpens the still-pending step 0; and its reviewer-robustness pattern (turn limit + a missing/partial verdict recorded as NOT-READY rather than dropped silently) maps directly onto Claude Code's own subagent `maxTurns` setting — available now, no AI-DLC dependency, and a direct answer to this repo's own 560k-token cold-reviewer incident (see the "spawn cold" rule in `CLAUDE.md` step 0).
+3. **No surveyed outside framework fits better.** Spec Kit, OpenSpec and BMAD are spec-driven (solve unclear requirements, which isn't this repo's problem). AutoGen, CrewAI and LangGraph are runtimes, not processes, and adopting one means leaving Claude Code — ruled out on that basis alone, before weighing their individual merits.
+4. **New finding, not identified by the original research: the `superpowers` plugin was enabled in `~/.claude/settings.json` (user-global, applies across all this maintainer's projects) and silently injecting a second, undisclosed process layer into every main session.** The research agent's own broader survey found it present in all 11 session transcripts recorded for this repo at the time it checked. Separately, and with narrower scope, the lead ran its own independent spot-check before acting on that claim rather than trusting it outright: `grep -c "You have superpowers" ~/.claude/projects/-Users-stephen-code-github-miner-tim/*.jsonl` returned nonzero counts for the three session files present at *that* moment (2, 2, and 6 — the last being this session's own still-growing transcript, recurring because the injection is re-sent on each context compaction). "11" and "3" are not in tension — different checks, different times, the second narrower by design, not a recount of the first (round-1 review, finding 5). Its `using-superpowers` skill text includes "if you think there is even a 1% chance a skill might apply ... you ABSOLUTELY MUST invoke it." At least one of its rules conflicts with this repo's own: its `test-driven-development` skill says delete and restart if code was written before its test; this repo's break-testing rule explicitly permits a test added after a fix, provided the fix is shown to break under reintroduction of the defect. No `AUDIT.md` entry traces an actual incident to it — this was unaccounted-for context and latent rule conflict, not a demonstrated failure.
+
+**Decision taken, and why it belongs in a project setting rather than a personal one**
+
+The agent's own recommendation was to disable Superpowers via `.claude/settings.local.json` (gitignored, per-machine) and flagged local-overrides-user precedence as **untested**. Two deviations from that recommendation, both deliberate:
+
+- **This was put in the tracked `.claude/settings.json` instead of the untracked `.claude/settings.local.json`.** The project file's own header comment in `.gitignore` (line ~40) says shared, reviewable settings belong in the tracked file and per-machine ones in the untracked one; whether Superpowers runs against this codebase is a project-wide process decision that should be visible in a PR and to any future session or contributor, not a personal override invisible to both.
+- **The "untested" precedence claim was verified empirically before relying on it**, rather than accepted on the agent's word, consistent with this repo's own "verify, do not accept" rule:
+  1. Edited `.claude/settings.json` to add `"enabledPlugins": {"superpowers@claude-plugins-official": false}` (user-global still has it `true`).
+  2. Spawned a fresh headless probe from this repo's directory: `claude -p "say exactly 'ack-probe'" --model haiku --output-format json`, session `78375b37-9883-45e5-85fc-f527a7a1f9d4`.
+  3. `grep -c "You have superpowers\|EXTREMELY_IMPORTANT" ~/.claude/projects/-Users-stephen-code-github-miner-tim/78375b37-9883-45e5-85fc-f527a7a1f9d4.jsonl` → **0**, against a same-machine baseline that was nonzero for every pre-change session. Project-level `false` does override user-level `true` for this plugin, confirmed rather than inferred.
+
+**Files Changed**
+
+- `.claude/settings.json`: added `"enabledPlugins": {"superpowers@claude-plugins-official": false}` (3-line diff — `git diff --numstat` confirms 3 insertions/0 deletions; the closing `}` is reused, not new — additive).
+- `AIDLC_MIGRATION_PLAN_RESEARCH.md`: added "Status note 2" directly after status note 1, summarizing this pass's findings (same structure, dated and scoped the same way).
+- `tasks/PROC-10.md` (new), `tasks/README.md` (one line), `CLAUDE.md` Current-task pointer: standard task bookkeeping, done in the same batch this time rather than a separate follow-up PR (see PROC-09-CLEANUP for why that matters).
+
+**Behaviour / Content Changes**
+
+Future Claude Code sessions started from this repo's directory no longer load the `superpowers` plugin's injected skill-priority directive, regardless of the maintainer's user-global setting. No other enabled plugin (`code-review`, `pr-review-toolkit`, etc.) was touched — the override is scoped to one key.
+
+**Verification Performed**
+
+- The empirical precedence test above (0 hits post-change against a nonzero baseline).
+- `rtk proxy cargo test --release`, `cargo clippy --all-targets --release -- -D warnings`, `make check`: clean, no Rust source touched.
+
+**Not Established**
+
+- ~~Whether the other enabled plugins (`code-review@claude-plugins-official`, `pr-review-toolkit@claude-plugins-official`, etc.) remain enabled after this change~~ — **resolved by round-1 review, finding 6, using data already on disk rather than a fresh probe:** the post-change probe transcript (`78375b37-...jsonl`) shows `code-review`, `pr-review-toolkit`, `databricks`, `frontend-design` and `skill-creator` all still firing (including a live `databricks` SessionStart hook message), while `superpowers` is 0 — and a same-mechanism pre-change transcript shows `superpowers` at 73 hits with the same other-plugin mentions alongside it. The override is scoped to exactly the one key, confirmed rather than inferred.
+- Whether the Superpowers session-start injection ever reached subagents (as opposed to main sessions) before this change — the research agent found no evidence it did, but also no doc confirming it didn't; moot now for this repo either way, but relevant if the same question comes up for a plugin this repo does want.
+- Whether disabling Superpowers here has any actual effect on agent behavior beyond removing the injected text — no behavioral regression test was run, since the plugin had caused no recorded incident to begin with.
+
+**Review**
+
+**Review (Sonnet, round 1): mergeable, no blockers or majors.** Tier chosen for the same reason PROC-09-CLEANUP used Sonnet: a JSON settings key plus documentation, no silent-failure surface (`CLAUDE.md`'s step-0 tiering rule, not "this file's" — an earlier draft of this sentence misattributed it to `AUDIT.md`, caught in round 1).
+
+Found and fixed, all above: the "4-line diff" miscount (actually 3, finding 1); the misattribution just named (finding 2); the "most... NOT MERGEABLE" overclaim against the actual 7-of-16 count (finding 3); the "11 vs 3" transcript-count juxtaposition needing one reconciling sentence, not a contradiction (finding 5); and the "Not Established" hedge on other plugins, which the review resolved outright from existing data rather than leaving open (finding 6, a positive finding that strengthens the entry).
+
+**Recurring process gap, named rather than silently repeated: no sealed prediction was written before this review ran, for the second PR in a row** (PROC-09-CLEANUP's review made the identical finding one entry above this one). `CLAUDE.md` step 0 requires predictions before a review spawns or grading is post-hoc. Twice now the lead has spawned a review for small process/doc PRs without sealing one first — recorded honestly as a pattern, not a one-off, since the point of logging it is to notice when it keeps happening.
+
+CI: `lint`, `audit`, `mutation testing`, `test` passed on the reviewed head; `jit-macos`/`jit-linux-arm` were still pending at review time (expected to pass — no source changes — but not confirmed green by the reviewer). **False positives: 0.**

@@ -18,5 +18,8 @@
       "Bash(tar tzf *)",
       "Bash(shasum *)"
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false
   }
 }

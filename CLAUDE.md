@@ -405,8 +405,8 @@
 
 ## Current task
 
-**PROC-09 — Subagents stop loading CLAUDE.md.**
-Completed, merged as #46 (two independent review rounds, Opus tier). See [`tasks/PROC-09.md`](tasks/PROC-09.md).
+**PROC-10 — Second AI-DLC/alternatives research pass; disable Superpowers for this repo.**
+Completed. See [`tasks/PROC-10.md`](tasks/PROC-10.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

@@ -52,3 +52,4 @@ Newest last.
 - **[PROC-09](PROC-09.md)** — Subagents stop loading CLAUDE.md. *(Completed)*
 - **[PROC-10](PROC-10.md)** — Second AI-DLC/alternatives research pass; disable Superpowers for this repo. *(Completed)*
 - **[NET-07](NET-07.md)** — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`). *(Completed)*
+- **[PROC-11](PROC-11.md)** — Refine the implementation-tier rule: a fully-specified plan can stay at Sonnet even on a concurrency/shared-state diff. *(Completed)*

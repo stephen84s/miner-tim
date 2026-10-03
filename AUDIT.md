@@ -7791,3 +7791,41 @@ The reviewer independently confirmed: the merge commit sha and PR number are cor
 **Not Established**
 
 Nothing beyond what the NET-07 entry above already lists (#41 remains open; longer-duration/different-pool behavior unverified).
+### PROC-11 (2026-10-04): Refine the implementation-tier rule — a fully-specified plan can stay at Sonnet on concurrency/shared-state diffs
+
+**Request / Goal**
+
+During planning/implementation of #41 (tracked as NET-08, a separate in-flight task on a different branch), the lead invoked `rust-implementer` at `model: opus` for a concurrency/shared-state change (adding a `generation` counter to refuse stale-session share submissions). The user objected directly: "why was the implementation in Opus tier — it should be Sonnet/Haiku tier, the plan should be detailed enough for them to execute." The lead acknowledged: the brief given to `rust-implementer` was written with exact line numbers, verbatim before/after code, and exact test/break-test specifications — specifically *so* a cheaper model could execute it reliably. `CLAUDE.md`'s own design principle states that a sufficiently detailed plan is what lets work move down the tier ladder, since judgment is retired at planning time, not execution time. The lead had defaulted to Opus based on "this touches the same lock as a prior Opus-tier task" rather than any remaining judgment call in the brief — a weaker justification than the rule actually requires.
+
+**Decision taken**
+
+Refine `CLAUDE.md`'s Operational Protocol's delegation section: add an explicit paragraph, placed after the tiering table and the "rust-implementer is barred from JIT paths" paragraph, clarifying that the silent-failure row (concurrency/shared-state) governs **review** unconditionally, but not **implementation**. Implementation may stay at Sonnet on such a diff *if* the plan handed to the implementer has already retired the judgment calls — exact line numbers, verbatim before/after code (not "add a check here"), exact test and break-test specs. The question to ask before choosing the implementer's tier is "does anything remain here for the implementer to decide," not "is this file path on the Opus list." Review's tier is unaffected by this refinement — it stays Opus for concurrency/shared-state regardless of plan detail, since review's job (catching a mechanical slip a faithful transcription can still make) is a different question from whether the implementer had to exercise judgment.
+
+**Files Changed**
+
+- `CLAUDE.md`: one new paragraph added in the Operational Protocol's delegation section, after the tiering table and before the "If no agent fits, write one before delegating" paragraph. The paragraph explains the refinement, its rationale (plan detail as the criterion), the specific case that raised it (#41/NET-08), and the unchanged guarantee that review stays Opus. Three new sentences added to `CLAUDE.md`'s "Current task" pointer, updating it to point to PROC-11 (already done by the lead; recorded here for completeness).
+- `tasks/PROC-11.md`: new file (summary of this entry).
+- `tasks/README.md`: one new line appended (PROC-11 entry).
+- `.claude/agents/_shared-context.md` and `.claude/agents/audit-writer.md`: fixed in the same change, below — not part of the planned scope, caught while writing this entry.
+
+**Addendum: the write-up of this very entry repeated a known incident.** The `audit-writer` run that drafted this entry wrote `AUDIT.md`, `tasks/PROC-11.md` and `tasks/README.md` straight into the **primary checkout** (on `main`) instead of the worktree its brief named — the exact failure `audit-writer.md`'s existing "Confirm you are in the right tree" section was already written to prevent, after a near-identical incident on an earlier task. The lead caught it via `git status` in the primary checkout, captured the diffs with `git diff`/`cp`, reverted the primary checkout with `git checkout -- AUDIT.md tasks/README.md` plus `rm tasks/PROC-11.md`, and reapplied the same content into the correct worktree with `git apply`. Root cause, established by rereading `audit-writer.md`'s existing rule: it tells the agent to check `pwd`/branch in Bash, but `Edit`/`Write` take an absolute `file_path` argument that does not inherit Bash's working directory — a `pwd` check passing is not evidence the *path typed into `Edit`/`Write`* contains the worktree segment rather than the bare, also-valid primary-checkout path. Fixed by adding a shared, agent-wide paragraph to `_shared-context.md` ("Confirm the worktree before every Edit/Write, not just once") stating this distinction explicitly, and sharpening `audit-writer.md`'s own section to require reading the literal `file_path` argument before each call rather than only checking shell state. Recorded here, in the entry the mistake happened while writing, rather than in a separate follow-up — the same reasoning NET-07-CLEANUP and PROC-09-CLEANUP used for not letting a stale status sit until its own cleanup task.
+
+**Behaviour / Content Changes**
+
+No functional changes — this is a policy/process clarification in `CLAUDE.md`'s own text. No code touched; no agent definition file edited. The tiering table itself remains unchanged; the new paragraph refines how the table is *interpreted*, not what it says. This changes future tiering decisions the lead makes, not any existing agent definition file.
+
+**Verification Performed**
+
+- Confirmed the new paragraph is placed correctly in `CLAUDE.md` and reads clearly. `git diff main -- CLAUDE.md` shows the new text inserted between the "rust-implementer is barred from JIT paths" paragraph and the "If no agent fits" paragraph, with no other edits to those surrounding sections.
+- Reviewed the new paragraph for internal consistency: it does not contradict the tiering table (which still lists concurrency/shared-state in the Opus row), does not weaken the review-tier guarantee (explicitly stated: "Review always escalates on a concurrency/shared-state or silent-failure diff — nothing below changes that"), and clarifies the implementation-tier condition (now judgment-focused, not file-path-focused).
+- No Rust source touched — `cargo build`, `cargo clippy` were not re-run since nothing compiles differently.
+
+**Not Established**
+
+Whether a future task will actually test this refinement in practice — i.e., whether the lead correctly judges "plan retires the judgment calls" vs. "plan still leaves something to decide" on a real case. This is a process change whose value is proven over time, not by this entry itself.
+
+**No review ledger.** Scope is small (a single new paragraph of clarification) and the content is a direct transcription of a decision already made in conversation between the lead and the user, not a factual claim that benefits from independent verification the way a code change does. Precedent: NET-07-CLEANUP's "No review ledger. Scope too small" applied identically.
+
+**Review**
+
+No review spawned for this entry as of the time this was written. Scope and nature (process refinement, not a code change or a factual claim requiring verification) make review optional rather than mandatory — see NET-07-CLEANUP's precedent. If a review is spawned later, findings will be added below rather than editing this entry in place (per this repo's rule: entries already on `main` are appended to, not edited).

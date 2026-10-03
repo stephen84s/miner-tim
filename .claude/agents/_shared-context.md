@@ -90,6 +90,27 @@ the bug it was written for.
   matches some other process's assertion and reports success. Under `nohup`
   the launched process showing `ppid 1` is normal, not orphaning.
 
+## Confirm the worktree before every Edit/Write, not just once
+
+Your brief names a worktree. `cd`-ing there in Bash, or running `pwd` and
+seeing the right path, does **not** make `Edit`/`Write` resolve relative to
+it — those tools take an absolute `file_path` argument and know nothing about
+your shell's current directory. A `pwd` check that passes in Bash tells you
+nothing about whether the path you then type into `Edit`/`Write` actually
+includes the worktree segment (`.../.claude/worktrees/<branch>/...`) rather
+than the bare repo path, which also happens to exist — at the primary
+checkout, on `main`.
+
+This is exactly how PROC-11's own write-up (an `audit-writer` run) landed on
+`main` in the primary checkout instead of its named worktree: the agent's
+report never showed the file path it was about to pass to `Edit`, so the
+mistake wasn't visible until the lead checked `git status` in the primary
+checkout afterward. **Before your first `Edit`/`Write` call, and spot-check
+again before committing: read the `file_path` you are about to pass and
+confirm it literally contains your branch's worktree directory name.** If it
+doesn't, you are about to write to (or just wrote to) the wrong tree — stop,
+say so, and do not "helpfully" continue from wherever you landed.
+
 ## Context budget — this has killed reviewers before
 
 An earlier reviewer was kept alive across rounds until its context reached 560k

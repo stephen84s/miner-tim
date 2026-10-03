@@ -200,6 +200,28 @@
       this reason. If that code must change, raise the model deliberately, keep
       the JIT gate in the loop, and review with `jit-reviewer`.
 
+      **Refinement (PROC-11): the silent-failure row governs review unconditionally,
+      but not implementation.** Review always escalates on a concurrency/shared-state
+      or silent-failure diff — nothing below changes that. Implementation may stay at
+      Sonnet on such a diff *if* the plan handed to the implementer has already
+      retired the judgment calls: exact line numbers, verbatim before/after code
+      (not "add a check here"),
+      exact test and break-test specs. The question to ask before choosing the
+      implementer's tier is "does anything remain here for the implementer to decide,"
+      not "is this file path on the Opus list." A plan that still leaves a design
+      choice, a wording judgment, or an ambiguous edge case to the implementer keeps
+      Opus; a plan that is a transcription job does not need it — the judgment was
+      already spent writing the plan, not executing it.
+
+      This was raised explicitly during #41/NET-08's `rust-implementer` call: the
+      brief was detailed enough that the choice of Opus added cost without a
+      corresponding reduction in risk, since little judgment was left to exercise.
+      Corrected going forward rather than only once. Does not touch the review
+      tier, which stays Opus for concurrency/shared-state regardless of how
+      detailed the plan was — review's job is catching a mechanical slip a
+      faithful transcription can still make, which is a different question from
+      whether the implementer had to exercise judgment.
+
       **If no agent fits, write one before delegating** — a few paragraphs in
       `.claude/agents/`, committed, rather than a one-off brief that dies with
       the session. That is the difference between a lesson that compounds and
@@ -405,10 +427,9 @@
 
 ## Current task
 
-**NET-07 — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`).**
-Completed, merged as `401be2c` (#49). Reviewed Opus round 1 (no
-blockers/majors); live 1h run confirmed `lock_wait_ms` max dropped from 81.4s
-to 51.7ms with a clean 71/71 share ledger. See [`tasks/NET-07.md`](tasks/NET-07.md).
+**PROC-11 — Refine the implementation-tier rule: a fully-specified plan can
+stay at Sonnet even on a concurrency/shared-state diff; review stays Opus
+regardless.** Completed. See [`tasks/PROC-11.md`](tasks/PROC-11.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

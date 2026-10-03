@@ -406,10 +406,9 @@
 ## Current task
 
 **NET-07 — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`).**
-Mergeable — PR [#49](https://github.com/stephen84s/miner-tim/pull/49), reviewed
-(Opus, round 1, no blockers/majors), all CI green, live 1h run confirms
-`lock_wait_ms` max dropped from 81.4s to 51.7ms with a clean 71/71 share
-ledger. Merging next. See [`tasks/NET-07.md`](tasks/NET-07.md).
+Completed, merged as `401be2c` (#49). Reviewed Opus round 1 (no
+blockers/majors); live 1h run confirmed `lock_wait_ms` max dropped from 81.4s
+to 51.7ms with a clean 71/71 share ledger. See [`tasks/NET-07.md`](tasks/NET-07.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

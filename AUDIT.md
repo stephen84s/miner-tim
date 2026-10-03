@@ -7760,3 +7760,34 @@ Not verified by round 1, left outstanding below: live-pool behavior, the 1-hour 
 **Not established.**
 - Whether `FairMutex`'s behaviour holds over a much longer window (NET-06/LIVE-02/LIVE-03 ran 1-12h) or under different pool/network conditions than this one hour against `monerohash.com`.
 - #41 (the stale session-id window) remains open, deliberately out of scope for this change — see the scope decision above.
+
+### NET-07-CLEANUP (2026-10-03): Mark NET-07 completed after merge (#44)
+
+**Request / Goal**
+
+NET-07 (#44) merged as `401be2c` (PR #49) after one Opus review round and a live 1-hour acceptance run (see the NET-07 entry above for both). Per this repo's own rule ("do not leave a task 'Active' once it is complete"), `tasks/NET-07.md`'s `**Status:**`, `tasks/README.md`'s `(Active)` tag, and `CLAUDE.md`'s "Current task" blurb all still said "Active"/"Mergeable" after the merge. This entry is the one-line follow-up that fixes that, on its own branch because `main` is protected and accepts no direct pushes regardless of triviality — the exact shape of PROC-09-CLEANUP above.
+
+**Files Changed**
+
+- `tasks/NET-07.md`: `**Status:** Active` → `**Status:** Completed`.
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `NET-07` line.
+- `CLAUDE.md`: "Current task" blurb — "Mergeable ... Merging next" → "Completed, merged as `401be2c` (#49)".
+- `AUDIT.md`'s own NET-07 entry is **not** edited in place — it is already on `main`, so this append is the correction rather than touching that entry's `**Status: Mergeable.**` line directly.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping, matching PROC-09-CLEANUP's precedent exactly.
+
+**Verification Performed**
+
+- Confirmed `401be2c` is `origin/main`'s tip's merge commit for PR #49 (`gh pr view 49 --json state,mergeCommit`).
+- Confirmed issue #44 auto-closed by the merge (`closedAt` matches the merge timestamp to the second).
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched by this entry).
+
+**Review**
+
+Not independently reviewed — scope is a direct copy of PROC-09-CLEANUP's already-reviewed pattern, applied mechanically to NET-07's three status locations. Self-checked by the lead against the three files listed above (no fourth stale-status location found via `grep -rn "NET-07" tasks/README.md tasks/NET-07.md CLAUDE.md`, learning PROC-09-CLEANUP's own round-1 lesson about checking for a missed third location before claiming done).
+
+**Not Established**
+
+Nothing beyond what the NET-07 entry above already lists (#41 remains open; longer-duration/different-pool behavior unverified).

@@ -51,3 +51,4 @@ Newest last.
 - **[NET-05](NET-05.md)** — Wait out an in-flight share submission before a donation rotation (#32). *(Completed)*
 - **[PROC-09](PROC-09.md)** — Subagents stop loading CLAUDE.md. *(Completed)*
 - **[PROC-10](PROC-10.md)** — Second AI-DLC/alternatives research pass; disable Superpowers for this repo. *(Completed)*
+- **[NET-07](NET-07.md)** — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`). *(Active)*

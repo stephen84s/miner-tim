@@ -15,8 +15,27 @@ use rustls::{ClientConfig, RootCertStore};
 use serde::Serialize;
 use serde_json::Value;
 
+use parking_lot::FairMutex;
+
+/// The mutex type guarding `PoolConnection::stream`, and only that field —
+/// see the field's doc comment for why it must be a *fair* lock. Every call
+/// site goes through this alias rather than naming `FairMutex`, so the choice
+/// is made in exactly one place.
+type StreamLock<T> = FairMutex<T>;
+
 /// How long the receiver blocks on a socket read (also the max time it holds the
-/// stream lock, i.e. the worst-case share-submit latency). Kept short so that
+/// stream lock per read). Because the stream lock is fair (see
+/// `PoolConnection::stream`), a share submit waiting on it gets the lock after
+/// the read in progress, or the one after that if it had not yet parked when
+/// the first ended. So against the receiver's polling, this bounds
+/// share-submit lock latency to about two intervals. That bound does not
+/// cover `login()`'s synchronous request/response (`send_request`), which
+/// holds the lock until the reply arrives, for up to its 30s read timeout, on
+/// connect, reconnect and donation relogin. The receiver's polling did not
+/// have this bound before #44
+/// either: with an unfair lock the receiver could re-take the lock ahead of
+/// a parked submit read after read, and a live run measured waits of up to
+/// 81s. Kept short so that
 /// under full-core mining, new jobs are picked up and shares submitted promptly —
 /// large values here cause stale "Invalid job id" rejects.
 const RECV_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -280,7 +299,36 @@ fn is_tls_port(address: &str) -> bool {
 pub struct PoolConnection {
     /// Single shared session: the receiver thread, share submits, and
     /// keepalives all go through this one stream, guarded by the mutex.
-    stream: Mutex<Option<PoolStream>>,
+    ///
+    /// The mutex must be **fair** (`parking_lot::FairMutex`, via `StreamLock`)
+    /// (#44). `receiver_loop` holds this lock for each read (up to
+    /// `RECV_POLL_INTERVAL`, 50ms), releases it, and takes it again almost
+    /// at once. `std::sync::Mutex` makes no fairness promise, and on both
+    /// macOS and Linux the receiver re-took it ahead of a parked
+    /// `submit_share` read after read. A live run measured the submit's wait
+    /// at mean 11.6s and max 81.4s, and shares were rejected as stale.
+    /// `FairMutex` hands the lock straight to a parked waiter on every unlock.
+    /// So a submit waits for the read in progress, or for one more read if it
+    /// was still in the lock's brief spin phase, not yet parked, when that
+    /// read ended. Its wait behind the receiver's polling is bounded at about
+    /// two reads. Other holders are not covered by that bound. In particular,
+    /// `send_request` (login) holds the lock until the reply arrives, for up
+    /// to its 30s read timeout.
+    ///
+    /// Do not "simplify" this to `parking_lot::Mutex`. That lock is only
+    /// *eventually* fair: it hands off to a parked waiter only once a timer
+    /// has run out (`parking_lot_core`'s `FairTimeout`, reset to a random
+    /// 0-1ms after each fair handoff), and barges otherwise. At this lock's
+    /// ~50ms hold times that timer has almost certainly already expired, so
+    /// `parking_lot::Mutex` would probably behave correctly here too — which
+    /// is exactly the problem: its fairness is a probabilistic side effect of
+    /// hold duration, not a guarantee. `FairMutex` hands off unconditionally,
+    /// every time, regardless of how long the lock was held. During #44 this
+    /// was checked by swapping in plain `parking_lot::Mutex`: it passed every
+    /// test in this file, so nothing here can tell a guarantee apart from a
+    /// coincidence — keep fairness explicit rather than re-derived from a
+    /// passing suite.
+    stream: StreamLock<Option<PoolStream>>,
     current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
     request_id: AtomicU64,
@@ -312,8 +360,8 @@ pub struct PoolConnection {
     /// said no, so counting it as a rejection would blame the pool for a
     /// local reconnect.
     lost_shares: AtomicU32,
-    /// Shares `submit_share` was asked to send but never wrote — no stream,
-    /// a poisoned lock, or a write error. Distinct from `lost_shares` because
+    /// Shares `submit_share` was asked to send but never wrote — no stream
+    /// or a write error. Distinct from `lost_shares` because
     /// the pool never saw these at all: issue #17 established that a
     /// never-written share must not be counted "lost" — its test
     /// `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes`
@@ -398,7 +446,7 @@ impl PoolConnection {
             .with_no_client_auth();
 
         Self {
-            stream: Mutex::new(None),
+            stream: StreamLock::new(None),
             current_job: Mutex::new(None),
             connected: AtomicBool::new(false),
             request_id: AtomicU64::new(1),
@@ -485,9 +533,7 @@ impl PoolConnection {
             *addr = address.to_string();
         }
 
-        if let Ok(mut s) = self.stream.lock() {
-            *s = Some(pool_stream);
-        }
+        *self.stream.lock() = Some(pool_stream);
 
         self.connected.store(true, Ordering::SeqCst);
         Ok(())
@@ -675,10 +721,7 @@ impl PoolConnection {
         nonce: &str,
     ) -> Result<(f64, f64), String> {
         let lock_requested = Instant::now();
-        let mut stream_guard = self
-            .stream
-            .lock()
-            .map_err(|_| "Stream mutex poisoned".to_string())?;
+        let mut stream_guard = self.stream.lock();
         let lock_acquired = Instant::now();
         let stream = stream_guard
             .as_mut()
@@ -843,10 +886,7 @@ impl PoolConnection {
             // Hold the stream lock only for the duration of one read so
             // submits/keepalives from other threads can interleave.
             let read_result = {
-                let mut guard = match self.stream.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
+                let mut guard = self.stream.lock();
                 match guard.as_mut() {
                     Some(s) => s.read(&mut chunk),
                     None => Err(std::io::Error::new(ErrorKind::NotConnected, "no stream")),
@@ -951,9 +991,7 @@ impl PoolConnection {
         if let Ok(mut job) = self.current_job.lock() {
             *job = None;
         }
-        if let Ok(mut s) = self.stream.lock() {
-            *s = None;
-        }
+        *self.stream.lock() = None;
         // Any donation-rotation deferral in progress is for a connection
         // epoch that just ended — discard it rather than let its timestamp
         // survive into whatever comes after reconnecting, however long that
@@ -983,9 +1021,7 @@ impl PoolConnection {
                     return true;
                 }
                 Err(e) => {
-                    if let Ok(mut s) = self.stream.lock() {
-                        *s = None;
-                    }
+                    *self.stream.lock() = None;
                     log::warn!(
                         "Reconnect failed: {} (retrying in {}s)",
                         e,
@@ -1023,9 +1059,7 @@ impl PoolConnection {
         if let Ok(mut job) = self.current_job.lock() {
             *job = None;
         }
-        if let Ok(mut s) = self.stream.lock() {
-            *s = None;
-        }
+        *self.stream.lock() = None;
         // This replaces the stream without going through `reconnect()`, so it
         // needs its own drain — otherwise a submission sent just before a
         // donation-slice switch is orphaned in the pending map forever.
@@ -1040,9 +1074,7 @@ impl PoolConnection {
         // (which retries cleanly using `self.wallet`, already set to the
         // donation address).
         if let Err(e) = self.connect(&address).and_then(|_| self.login(wallet)) {
-            if let Ok(mut s) = self.stream.lock() {
-                *s = None;
-            }
+            *self.stream.lock() = None;
             return Err(e);
         }
         self.set_read_timeout(RECV_POLL_INTERVAL);
@@ -1197,8 +1229,8 @@ impl PoolConnection {
     }
 
     fn set_read_timeout(&self, timeout: Duration) {
-        if let Ok(guard) = self.stream.lock()
-            && let Some(s) = guard.as_ref()
+        let guard = self.stream.lock();
+        if let Some(s) = guard.as_ref()
             && let Err(e) = s.tcp().set_read_timeout(Some(timeout))
         {
             log::warn!("Failed to set read timeout: {}", e);
@@ -1209,10 +1241,7 @@ impl PoolConnection {
     /// for login, before/while the receiver polls; reads byte-by-byte so no
     /// buffered data is lost to a throwaway reader.
     fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let mut stream_guard = self
-            .stream
-            .lock()
-            .map_err(|_| "Stream mutex poisoned".to_string())?;
+        let mut stream_guard = self.stream.lock();
 
         let stream = stream_guard
             .as_mut()
@@ -1236,10 +1265,7 @@ impl PoolConnection {
     /// *not* found in `pending_shares`. `submit_share` does its own write,
     /// because it must register the id under the stream lock — see there.
     fn send_message(&self, method: &str, params: Value) -> Result<(), String> {
-        let mut stream_guard = self
-            .stream
-            .lock()
-            .map_err(|_| "Stream mutex poisoned".to_string())?;
+        let mut stream_guard = self.stream.lock();
         let stream = stream_guard
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
@@ -1641,22 +1667,20 @@ mod tls_tests {
         let _ = server.join();
     }
 
-    /// Reproducer for #40: does `receiver_loop` starve `submit_share` of the
-    /// `stream` lock when the pool is quiet? The receiver re-takes the lock
-    /// every `RECV_POLL_INTERVAL` (50ms) to attempt a read; if the OS mutex
-    /// hands the lock back to the receiver ahead of a parked `submit_share`
-    /// call under load, a share can sit for seconds before it reaches the
-    /// wire — the #40 symptom (mean 7.8s, max 34s in a live run).
+    /// Shared body of the #40/#44 reproducers: does `receiver_loop` starve
+    /// `submit_share` of the `stream` lock when the pool is quiet? The
+    /// receiver re-takes the lock every `RECV_POLL_INTERVAL` (50ms) to
+    /// attempt a read; if the mutex hands the lock back to the receiver ahead
+    /// of a parked `submit_share` call, a share can sit for seconds before it
+    /// reaches the wire — the #40 symptom (mean 7.8s, max 34s in a live run;
+    /// #44 measured mean 11.6s, max 81.4s).
     ///
-    /// `#[ignore]`d because the assertion is about real scheduling latency,
-    /// not program correctness: it is a diagnostic reproducer, not something
-    /// CI should gate on. Run manually with:
-    /// `rtk proxy cargo test --release --lib -- --ignored --nocapture \
-    ///  a_submit_is_not_held_hostage control_a_chatty`
-    #[test]
-    #[ignore = "reproduces #40: receiver_loop may starve submit_share of the stream \
-                lock; un-ignore once a fix lands"]
-    fn a_submit_is_not_held_hostage_by_a_quiet_receiver() {
+    /// `busy_threads` CPU-bound spinners run alongside, to reproduce the
+    /// full-core mining load the live runs were under. Returns how long the
+    /// `submit_share` call took. The spinners are stopped and joined before
+    /// anything here can panic, so a failing submit cannot leave them
+    /// spinning for the rest of the suite.
+    fn quiet_receiver_submit_latency(busy_threads: usize) -> Duration {
         use std::io::Write as _;
         use std::net::TcpListener;
         use std::sync::mpsc;
@@ -1667,10 +1691,15 @@ mod tls_tests {
 
         let server = thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            // Hold the socket open for the whole test — never close it.
+            // Hold the socket open, silent, for up to 3s — never close it.
             // Silence on an open connection is the condition under test, not
-            // EOF (that is #34's scenario, covered elsewhere).
-            thread::sleep(Duration::from_secs(3));
+            // EOF (that is #34's scenario, covered elsewhere). Under the bug,
+            // this keepalive at ~3s is what finally let the submit through
+            // (hence the 2.80s baseline); a teardown signal ends the wait
+            // early so a passing run does not cost 3s.
+            if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+                return;
+            }
             let _ = sock.write_all(
                 b"{\"id\":999999,\"result\":{\"status\":\"KEEPALIVED\"}}\n",
             );
@@ -1687,6 +1716,19 @@ mod tls_tests {
         *conn.address.lock().unwrap() = addr.clone();
         *conn.wallet.lock().unwrap() = "4test".to_string();
 
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinners: Vec<_> = (0..busy_threads)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                thread::spawn(move || {
+                    let mut x: u64 = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        x = std::hint::black_box(x.wrapping_add(1));
+                    }
+                })
+            })
+            .collect();
+
         let worker = conn.clone();
         thread::spawn(move || worker.receiver_loop());
         thread::sleep(Duration::from_millis(200));
@@ -1694,15 +1736,144 @@ mod tls_tests {
         let start = Instant::now();
         let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
-        eprintln!("a_submit_is_not_held_hostage_by_a_quiet_receiver: submit_share took {:?}", elapsed);
-        result.expect("submit_share must succeed against a connected stream");
 
+        stop.store(true, Ordering::Relaxed);
+        for s in spinners {
+            let _ = s.join();
+        }
+        // An empty address makes `reconnect()` return false, so the receiver
+        // loop exits on the EOF that follows teardown instead of retrying
+        // forever against a dead port for the rest of the test process.
+        conn.address.lock().unwrap().clear();
+        let _ = tx.send(());
+        let _ = server.join();
+
+        eprintln!(
+            "quiet_receiver_submit_latency(busy_threads={}): submit_share took {:?}",
+            busy_threads, elapsed
+        );
+        result.expect("submit_share must succeed against a connected stream");
+        elapsed
+    }
+
+    /// Regression test for #40/#44 on an otherwise idle machine. See
+    /// `quiet_receiver_submit_latency` for the scenario.
+    #[test]
+    fn a_submit_is_not_held_hostage_by_a_quiet_receiver() {
+        let elapsed = quiet_receiver_submit_latency(0);
         assert!(
             elapsed < Duration::from_millis(500),
             "submit took {:?}, expected well under 500ms if the stream lock isn't starved",
             elapsed
         );
+    }
 
+    /// The same reproducer with every core busy, as it is while mining —
+    /// the condition both live runs (#40, #44) measured the starvation under.
+    #[test]
+    fn a_submit_is_not_held_hostage_under_full_cpu_load() {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let elapsed = quiet_receiver_submit_latency(n);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "submit took {:?} with {} busy threads, expected well under 500ms if the \
+             stream lock isn't starved",
+            elapsed,
+            n
+        );
+    }
+
+    /// #44: proves the stream lock is *handed* to a parked submitter on
+    /// release, not merely that submits happen to be fast. The test thread
+    /// holds the lock, lets a `submit_share` park on it, releases, and then
+    /// immediately asks for the lock again with a **blocking** `lock()`. A
+    /// fair lock gives it to the parked submitter first, so by the time the
+    /// test thread holds it again the share is already registered in
+    /// `pending_shares`. An unfair lock lets the releasing thread barge
+    /// straight back in — exactly what `receiver_loop` does to a submit in
+    /// production — and the share is not there yet.
+    ///
+    /// Deliberately not `try_lock()` after the release: that would race the
+    /// test thread's own scheduling against the handoff and flake on a loaded
+    /// runner. The blocking re-lock has no such race.
+    ///
+    /// The only timing dependency is the settle sleep after the submitter is
+    /// seen in flight, to let it get from `submit_share`'s entry to parked on
+    /// the lock. It can only fail in one direction: too short and the
+    /// submitter is not yet parked (still running, or still spinning in the
+    /// lock's adaptive phase), there is no handoff, and the test goes red on
+    /// a correct lock. It is very unlikely to turn a barging lock green: that
+    /// would need the test thread itself to be preempted between `drop(guard)`
+    /// and the re-lock, letting the releaser's barge land first by accident.
+    /// Review's break-test still failed this at iteration 0 on 8/8 runs
+    /// against a real barging lock, so the gate holds in practice.
+    #[test]
+    fn a_released_stream_lock_goes_to_the_parked_submitter_not_back_to_the_releaser() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        const ITERATIONS: usize = 10;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            // Accept and hold the socket open, silent, for the whole test.
+            let (_sock, _) = listener.accept().expect("accept");
+            let _ = rx.recv();
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        for i in 0..ITERATIONS {
+            let guard = conn.stream.lock();
+
+            let submitter_conn = Arc::clone(&conn);
+            let submitter = thread::spawn(move || {
+                submitter_conn.submit_share("j", &format!("{:08x}", i), &"a".repeat(64))
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while conn.submits_in_flight.load(Ordering::SeqCst) == 0
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                conn.submits_in_flight.load(Ordering::SeqCst),
+                1,
+                "iteration {i}: the submitter never entered submit_share"
+            );
+            // Settle: from entry to parked on the stream lock is a session-id
+            // read and a JSON build — microseconds. 100ms is a wide margin.
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                conn.pending_shares.lock().unwrap().len(),
+                i,
+                "iteration {i}: the submitter registered without the stream lock"
+            );
+
+            drop(guard);
+            let guard = conn.stream.lock();
+            assert_eq!(
+                conn.pending_shares.lock().unwrap().len(),
+                i + 1,
+                "iteration {i}: the released stream lock went back to the releasing \
+                 thread instead of the submitter parked on it — the barging that lets \
+                 receiver_loop starve a share submission (#44)"
+            );
+            drop(guard);
+
+            submitter
+                .join()
+                .expect("submitter thread")
+                .expect("submit_share must succeed against a connected stream");
+        }
+
+        assert_eq!(conn.pending_shares.lock().unwrap().len(), ITERATIONS);
         let _ = tx.send(());
         let _ = server.join();
     }
@@ -1716,11 +1887,13 @@ mod tls_tests {
     /// the lock) something else to do between read attempts. Same assertion
     /// as T1; this one is expected to stay fast.
     ///
-    /// `#[ignore]`d for the same reason as the reproducer above. Run manually
-    /// with: `rtk proxy cargo test --release --lib -- --ignored --nocapture \
-    ///  a_submit_is_not_held_hostage control_a_chatty`
+    /// `#[ignore]`d because it gates nothing: it was green both before and
+    /// after the #44 fair-lock fix, so it cannot catch a regression. Kept as a
+    /// diagnostic. Run manually with:
+    /// `rtk proxy cargo test --release --lib -- --ignored --nocapture control_a_chatty`
     #[test]
-    #[ignore = "control for #40's reproducer; diagnostic timing, not a correctness gate"]
+    #[ignore = "diagnostic control for #44's reproducer; green before and after the \
+                fix, so it gates nothing"]
     fn control_a_chatty_receiver_lets_a_submit_through() {
         use std::io::Write as _;
         use std::net::TcpListener;
@@ -2595,7 +2768,7 @@ mod tls_tests {
         thread::sleep(Duration::from_millis(100)); // let it arrive at the insert
 
         assert!(
-            conn.stream.try_lock().is_err(),
+            conn.stream.try_lock().is_none(),
             "the stream must still be locked while the share is being registered — \
              releasing it first lets the receiver handle the reply before the entry \
              exists, so it goes uncounted and the share is later counted lost"
@@ -2638,7 +2811,7 @@ mod tls_tests {
         conn.connect(&addr).expect("connect to the local listener");
 
         // Stand in for reconnect(): it must hold this lock to null the stream.
-        let mut guard = conn.stream.lock().unwrap();
+        let mut guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
             thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
@@ -2697,7 +2870,6 @@ mod tls_tests {
         // it itself).
         conn.stream
             .lock()
-            .unwrap()
             .as_ref()
             .unwrap()
             .tcp()
@@ -3082,7 +3254,7 @@ mod tls_tests {
         let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
         conn.connect(&addr).expect("connect to the local listener");
 
-        let guard = conn.stream.lock().unwrap();
+        let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
             thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
@@ -3181,7 +3353,7 @@ mod tls_tests {
 
         let conn = new_rotation_conn(&addr);
 
-        let guard = conn.stream.lock().unwrap();
+        let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter = thread::spawn(move || {
             submitter_conn.submit_share("j1", "00000000", &"a".repeat(64))
@@ -3265,7 +3437,7 @@ mod tls_tests {
 
         assert!(result.is_err(), "a denied login must fail relogin_as");
         assert!(
-            conn.stream.lock().unwrap().is_none(),
+            conn.stream.lock().is_none(),
             "a failed relogin must clear the stream, not leave the new, \
              unauthenticated connection installed"
         );
@@ -3323,7 +3495,7 @@ mod tls_tests {
             "a login response with no session id must fail, not succeed silently"
         );
         assert!(
-            conn.stream.lock().unwrap().is_none(),
+            conn.stream.lock().is_none(),
             "a failed relogin must clear the stream"
         );
         assert_eq!(
@@ -3389,7 +3561,7 @@ mod tls_tests {
              replaced with a generic \"no session id\" message; got: {err}"
         );
         assert!(
-            conn.stream.lock().unwrap().is_none(),
+            conn.stream.lock().is_none(),
             "a failed relogin must clear the stream"
         );
 
@@ -3440,7 +3612,7 @@ mod tls_tests {
         assert_eq!(*conn.session_id.lock().unwrap(), "sess2");
 
         let timeout = {
-            let guard = conn.stream.lock().unwrap();
+            let guard = conn.stream.lock();
             guard
                 .as_ref()
                 .expect("stream must be installed on success")

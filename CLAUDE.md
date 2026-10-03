@@ -405,8 +405,11 @@
 
 ## Current task
 
-**PROC-10 — Second AI-DLC/alternatives research pass; disable Superpowers for this repo.**
-Completed. See [`tasks/PROC-10.md`](tasks/PROC-10.md).
+**NET-07 — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`).**
+Mergeable — PR [#49](https://github.com/stephen84s/miner-tim/pull/49), reviewed
+(Opus, round 1, no blockers/majors), all CI green, live 1h run confirms
+`lock_wait_ms` max dropped from 81.4s to 51.7ms with a clean 71/71 share
+ledger. Merging next. See [`tasks/NET-07.md`](tasks/NET-07.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

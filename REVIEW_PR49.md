@@ -6,13 +6,13 @@ Base check: `git merge-base HEAD origin/main` == origin/main tip 646080f (after 
 Scope: touches src/pool_connection.rs, Cargo.toml/lock, AUDIT.md, CLAUDE.md, tasks/. No jit/, benches/, workflows, Makefile, scripts/. Nothing to hand off.
 
 ## Coverage ledger
-1. Correctness of change — in progress
-2. Silent failure — pending
-3. Safety switches — pending (none touched expected)
-4. Tests / break-test — pending
-5. Resource use — pending
-6. Docs/audit accuracy — in progress
-7. Concurrency — pending
+1. Correctness of change — done. Every critical section is the same as before; only the mutex type changed. No new nesting. Lock order stream -> pending_shares holds.
+2. Silent failure — done. Dropping poisoning removes a silent path: on main, `receiver_loop` did `Err(_) => return` with no log on a poisoned stream lock, so job updates would stop and nobody would be told. No panic="abort" in Cargo.toml, so the poisoning change is live in release builds. Pre-existing `if let Ok` on pending_shares in write_and_register is unchanged and out of scope.
+3. Safety switches — n/a. No --native-loop/--verify-shares code is touched.
+4. Tests / break-test — done (see below). Flake check: pool_connection:: module 10/10 green, full suite 3/3 green, T1 latencies 4-128ms against a 500ms bound. x86_64 CI `test` passed on head 8abb44d (T1/T2 ok).
+5. Resource use — done. Spinners are joined before any assert. The helper clears `address`, and I confirmed `reconnect()` then returns false (L1003), so the leaked receiver exits. Nothing new allocated.
+6. Docs/audit accuracy — done (F1-F6).
+7. Concurrency — done. FairMutex hands off on every unlock, so a parked receiver cannot be starved by submits either, and FIFO among workers. send_request still holds the lock up to 30s on login; that is disclosed in the docs and unchanged.
 
 ## Findings
 
@@ -38,3 +38,17 @@ AUDIT NET-07 ("Commits (3 ... not yet pushed/merged)", "PR is not yet open"), CL
 
 ### F4 (note) — no sealed prediction before this review
 No prediction in tasks/NET-07.md or the NET-07 entry. Third consecutive PR (after PROC-09-CLEANUP and PROC-10) without one; AUDIT already names this pattern. Not a blocker.
+
+### F5 (nit) — `stream` field doc on parking_lot::Mutex reads backwards
+"Otherwise it barges. With 50ms hold times that timer has nearly always run out." If the FairTimeout has run out, the unlock is fair, so this sentence argues that plain `parking_lot::Mutex` *would* hand off here. That matches M2, where it passed everything. The actual reason to keep FairMutex is that it guarantees the handoff rather than making it probabilistic. Say that, so a future reader does not read it as "plain Mutex was seen to barge".
+
+### F6 (nit) — T2 doc "It cannot turn a barging lock green"
+That is too strong. If the test thread is preempted between `drop(guard)` and `lock()`, the woken submitter can win the lock on a barging lock, and that iteration goes green. 10 iterations make an all-green run improbable (observed 8/8 red at iteration 0), so the gate itself is sound. Suggest "is very unlikely to".
+
+### Not verified
+- Live pool behaviour and the 1h `lock_wait_ms` rerun. The PR itself lists this as required before merge, and it has not run.
+- Break-test on x86_64 Linux (CI's `test` platform). I ran it on macOS only. The author's Linux evidence is from arm64 Docker. std's futex mutex is the same code on both arches, so I expect the same result, but did not run it.
+- jit-macos / jit-linux-arm were still pending at review time. No JIT code is touched.
+
+## Verdict
+The code review passes. No blocker, no major. F1-F3 are audit-accuracy fixes to the unmerged NET-07 entry and the status lines. F5 and F6 are doc nits. **Not mergeable yet**: the PR's own "required before merge" live acceptance run is outstanding, and the jit gates had not finished. False-positive risk: F5 and F6 are wording only.

@@ -22,6 +22,7 @@ webpki-roots = "1.0"
 # provider; named here so the fingerprint check does not vendor a second hash.
 ring = "0.17"
 ctrlc = "3.4"
+parking_lot = "0.12.5"
 
 [dev-dependencies]
 # default-features off drops plotters/rayon/html-report — we only need timing.

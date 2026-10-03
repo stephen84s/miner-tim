@@ -392,8 +392,9 @@ pub struct PoolConnection {
     /// said no, so counting it as a rejection would blame the pool for a
     /// local reconnect.
     lost_shares: AtomicU32,
-    /// Shares `submit_share` was asked to send but never wrote — no stream
-    /// or a write error. Distinct from `lost_shares` because
+    /// Shares `submit_share` was asked to send but never wrote — no stream,
+    /// a write error, or a job from a replaced connection (stale generation,
+    /// #41). Distinct from `lost_shares` because
     /// the pool never saw these at all: issue #17 established that a
     /// never-written share must not be counted "lost" — its test
     /// `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes`
@@ -724,16 +725,22 @@ impl PoolConnection {
     // insert nothing) or wholly after (the entry was written to the old
     // stream, where no reply will ever be read, so "lost" is correct).
     //
-    // What this does NOT close: the caller (`submit_share`) reads `sid`
-    // before taking any lock, and `connect()` installs the new stream
-    // before `login()` updates the session id. A submit that takes the
-    // lock in that window goes out on the new connection with the old
-    // session id. It IS registered, so the pool's answer is paired and
-    // counted — normally as a rejection, which is the pool's real verdict
-    // on it. The miscounting is closed; the stale id is not (review round
-    // 3, R3-1) — still open in general. What IS closed (#37): a submit-reply
-    // that `login()` mistakenly reads as the login reply (no session id in
-    // it) now fails the login outright instead of silently "succeeding"
+    // The stale session id (review round 3, R3-1; #41): the caller
+    // (`submit_share`) reads `sid` before taking any lock, and `connect()`
+    // installs the new stream before `login()` updates the session id, so a
+    // submit that takes the lock in that window still *builds* a request
+    // carrying the old session id. It is no longer *written*: a share in
+    // that window was hashed on a job from the replaced connection
+    // (`reconnect()`/`relogin_as()` clear `current_job` before the stream,
+    // and `login()` sets the session id before installing the new job), so
+    // its job's generation stamp no longer matches `self.generation`. It is
+    // refused here, under the stream lock, before `write_request`, and
+    // `submit_share` counts it `unsent` — a local-lifecycle casualty, not a
+    // pool rejection. No revenue is recovered: the pool would have refused
+    // a job id this connection never issued. What is fixed is the
+    // accounting, which used to blame the pool. Also closed (#37): a
+    // submit-reply that `login()` mistakenly reads as the login reply (no
+    // session id in it) now fails the login outright instead of silently "succeeding"
     // with the old id left in place, and a failed `relogin_as` now clears
     // the stream so the receiver loop reconnects cleanly rather than being
     // left on a stale, unauthenticated connection.
@@ -761,7 +768,7 @@ impl PoolConnection {
         params: Value,
         job_id: &str,
         nonce: &str,
-        _job_generation: u64,
+        job_generation: u64,
     ) -> Result<(f64, f64), String> {
         let lock_requested = Instant::now();
         let mut stream_guard = self.stream.lock();
@@ -769,6 +776,16 @@ impl PoolConnection {
         let stream = stream_guard
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
+        // Checked under the stream guard, so it is against the stream this
+        // write would actually go to: `connect()` installs a stream and bumps
+        // `generation` in one critical section (#41).
+        let current = self.generation.load(Ordering::SeqCst);
+        if job_generation != current {
+            return Err(format!(
+                "Stale job: hashed on connection generation {job_generation}, current is \
+                 {current} — the connection was replaced; not sent"
+            ));
+        }
         write_request(stream, rpc_id, "submit", params)?;
         let write_done = Instant::now();
         if let Ok(mut pending) = self.pending_shares.lock() {
@@ -803,7 +820,9 @@ impl PoolConnection {
     }
 
     /// Submissions `submit_share` was asked to send but never wrote at all —
-    /// distinct from `lost_shares`, which the pool at least received (#32).
+    /// no stream, a write error, or a job from a replaced connection (stale
+    /// generation, #41). Distinct from `lost_shares`, which the pool at
+    /// least received (#32).
     pub fn get_unsent_shares(&self) -> u32 {
         self.unsent_shares.load(Ordering::Relaxed)
     }

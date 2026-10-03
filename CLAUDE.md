@@ -406,8 +406,10 @@
 ## Current task
 
 **NET-07 — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`).**
-Active — fix implemented and lead-verified on `fix/issue-44-stream-lock-fairness`
-(3 commits), PR not yet opened. See [`tasks/NET-07.md`](tasks/NET-07.md).
+Active — PR [#49](https://github.com/stephen84s/miner-tim/pull/49) open,
+reviewed (Opus, round 1, no blockers/majors), not yet mergeable: CI's JIT jobs
+were pending at review time and the live `lock_wait_ms` acceptance rerun is
+still outstanding. See [`tasks/NET-07.md`](tasks/NET-07.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

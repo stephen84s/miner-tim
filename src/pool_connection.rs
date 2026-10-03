@@ -316,12 +316,18 @@ pub struct PoolConnection {
     /// to its 30s read timeout.
     ///
     /// Do not "simplify" this to `parking_lot::Mutex`. That lock is only
-    /// *eventually* fair. It hands off to a parked waiter only once a timer
-    /// has run out: `parking_lot_core`'s `FairTimeout`, reset to a random
-    /// 0-1ms after each fair handoff. Otherwise it barges. With 50ms hold
-    /// times that timer has nearly always run out. During #44 it was
-    /// swapped in, and it passed every test in this file, so nothing here
-    /// can tell it apart from a real fix. Keep fairness explicit.
+    /// *eventually* fair: it hands off to a parked waiter only once a timer
+    /// has run out (`parking_lot_core`'s `FairTimeout`, reset to a random
+    /// 0-1ms after each fair handoff), and barges otherwise. At this lock's
+    /// ~50ms hold times that timer has almost certainly already expired, so
+    /// `parking_lot::Mutex` would probably behave correctly here too — which
+    /// is exactly the problem: its fairness is a probabilistic side effect of
+    /// hold duration, not a guarantee. `FairMutex` hands off unconditionally,
+    /// every time, regardless of how long the lock was held. During #44 this
+    /// was checked by swapping in plain `parking_lot::Mutex`: it passed every
+    /// test in this file, so nothing here can tell a guarantee apart from a
+    /// coincidence — keep fairness explicit rather than re-derived from a
+    /// passing suite.
     stream: StreamLock<Option<PoolStream>>,
     current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
@@ -1798,7 +1804,11 @@ mod tls_tests {
     /// the lock. It can only fail in one direction: too short and the
     /// submitter is not yet parked (still running, or still spinning in the
     /// lock's adaptive phase), there is no handoff, and the test goes red on
-    /// a correct lock. It cannot turn a barging lock green.
+    /// a correct lock. It is very unlikely to turn a barging lock green: that
+    /// would need the test thread itself to be preempted between `drop(guard)`
+    /// and the re-lock, letting the releaser's barge land first by accident.
+    /// Review's break-test still failed this at iteration 0 on 8/8 runs
+    /// against a real barging lock, so the gate holds in practice.
     #[test]
     fn a_released_stream_lock_goes_to_the_parked_submitter_not_back_to_the_releaser() {
         use std::net::TcpListener;

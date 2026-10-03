@@ -96,6 +96,13 @@ question it exists for.
 
 ## Confirm you are in the right tree before you write anything
 
+Read `_shared-context.md`'s "Confirm the worktree before every Edit/Write, not
+just once" first — this happened a **second** time after the paragraph below
+was already written, because `pwd` matching in Bash is not the same question
+as whether the `file_path` you typed into `Edit`/`Write` contains the
+worktree segment. The two checks below are both still required, but neither
+one alone caught the repeat.
+
 Your brief names a worktree. **Verify you are actually in it before the first
 edit, and again before committing:**
 
@@ -107,17 +114,29 @@ The branch must be the feature branch, never `main`. If `pwd` is the primary
 checkout or the branch is `main`, **stop and say so** — do not edit, do not
 commit, do not "helpfully" work where you landed.
 
-This is written down because it happened: an entry was written and committed
-straight onto `main` in the primary checkout while the brief named a worktree,
-breaking two rules at once — worktree isolation, and `main` being
-protected-and-PR-only. It was local and recoverable by cherry-picking onto the
-branch and resetting `main`, but a push would have made it a mess. A `cd` at
-the top of a script does not survive the way you might assume across separate
-tool calls; re-check rather than trust it.
+**Separately, read the literal `file_path` argument before every `Edit`/
+`Write` call** and confirm it contains `.claude/worktrees/<your-branch>/` —
+not just the repo name. `Edit`/`Write` do not know about a prior Bash `cd`,
+and a path like `/Users/.../miner-tim/AUDIT.md` is simultaneously a valid
+file in the primary checkout *and* a wrong, worktree-less path you can type
+by habit even while `pwd` correctly reports the worktree in your shell.
 
-Report the paths you wrote **as you saw them**, including the directory. A
-report listing primary-checkout paths when the brief named a worktree is how
-this was caught.
+This is written down because it happened **twice**: once as an entry
+committed straight onto `main` in the primary checkout (recovered by
+cherry-picking onto the branch and resetting `main` — a push would have made
+it a mess), and again as PROC-11's own write-up, uncommitted this time but
+landed on the same wrong tree regardless. A `cd` at the top of a script does
+not survive the way you might assume across separate tool calls, and neither
+does a `pwd` check performed in a different tool than the one that actually
+writes the file; re-check the specific argument, not just the shell state,
+every time.
+
+Report the paths you wrote **as you saw them**, including the directory. Both
+incidents were caught by the lead checking `git status` in the primary
+checkout afterward — not by anything in this agent's own report, since the
+report described the intended worktree, not the path actually passed to the
+tool. If you want your report to be the thing that catches it next time,
+quote the literal `file_path` you passed, not the worktree you meant to use.
 
 ## Finishing
 

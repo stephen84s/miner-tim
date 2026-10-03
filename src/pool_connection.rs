@@ -3833,4 +3833,202 @@ mod tls_tests {
 
         let _ = server.join();
     }
+
+    // --- GitHub #41: a share from a replaced connection is refused unsent ---
+
+    /// A pool for the #41 tests. Accepts up to `max_conns` connections. Every
+    /// line a connection receives is forwarded as `(connection index, line)`,
+    /// in order. A `login` line is answered with a session id and a job that
+    /// will actually parse (it carries `seed_hash`), whose job id is
+    /// `job-<connection index>`. Nothing else is ever answered.
+    fn generation_test_pool(
+        max_conns: usize,
+    ) -> (String, std::sync::mpsc::Receiver<(usize, Value)>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
+        thread::spawn(move || {
+            for (n, incoming) in listener.incoming().take(max_conns).enumerate() {
+                let Ok(sock) = incoming else { return };
+                sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let mut writer = sock.try_clone().expect("clone for write");
+                    let mut reader = BufReader::new(sock);
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {}
+                        }
+                        let v: Value =
+                            serde_json::from_str(line.trim()).expect("valid JSON-RPC");
+                        if v["method"] == "login" {
+                            let reply = serde_json::json!({
+                                "id": v["id"], "jsonrpc": "2.0", "error": null,
+                                "result": {
+                                    "id": format!("sess-{n}"), "status": "OK",
+                                    "job": {
+                                        "blob": "0f0f", "target": "ffffffff",
+                                        "job_id": format!("job-{n}"), "seed_hash": "abcd",
+                                    },
+                                },
+                            });
+                            let _ = writer.write_all(format!("{reply}\n").as_bytes());
+                            let _ = writer.flush();
+                        }
+                        if tx.send((n, v)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, rx)
+    }
+
+    /// The next non-login line any connection received, with its connection
+    /// index. Panics if none arrives within 5s.
+    fn next_submit(rx: &std::sync::mpsc::Receiver<(usize, Value)>) -> (usize, Value) {
+        loop {
+            let (n, v) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a submit line should have reached the pool");
+            if v["method"] != "login" {
+                return (n, v);
+            }
+        }
+    }
+
+    /// The other direction of #41's risk, and the more expensive one: a job
+    /// installed by a successful login must carry the generation of the
+    /// connection it arrived on, or every share hashed on it would be
+    /// refused as stale. Generation is 2 here (connect, then relogin's
+    /// connect), so a stamp hard-wired to 0 or 1 cannot match by accident.
+    #[test]
+    fn a_share_from_the_current_generation_is_still_written() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        conn.relogin_as("4test").expect("relogin (accept 1)");
+
+        assert_eq!(conn.generation.load(Ordering::SeqCst), 2, "two connects, two bumps");
+        let job = conn.get_work().expect("the login must install a job");
+        assert_eq!(job.job_id, "job-1");
+        assert_eq!(
+            job.generation,
+            conn.generation.load(Ordering::SeqCst),
+            "the job login() installed must be stamped with the live generation"
+        );
+
+        conn.submit_share(&job.job_id, "0000abcd", &"a".repeat(64), job.generation)
+            .expect("a share on the current generation must be sent");
+
+        let (n, v) = next_submit(&rx);
+        assert_eq!(n, 1, "the share must go out on the current connection");
+        assert_eq!(v["method"], "submit");
+        assert_eq!(v["params"]["job_id"], "job-1");
+        assert_eq!(v["params"]["nonce"], "0000abcd");
+        assert_eq!(conn.get_pending_shares(), 1);
+        assert_eq!(conn.get_unsent_shares(), 0);
+    }
+
+    /// A share hashed on a job from a connection that has since been
+    /// replaced is refused under the stream lock, counted unsent, and never
+    /// written. Without the check it would go out on the *new* connection
+    /// carrying a job id that connection never issued, and be counted as a
+    /// pool rejection.
+    #[test]
+    fn a_share_from_a_replaced_connection_is_refused_not_sent() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        conn.login("4user").expect("login on connection 0");
+        let old = conn.get_work().expect("login installs job-0");
+        assert_eq!(old.job_id, "job-0");
+
+        conn.relogin_as("4test").expect("relogin (accept 1)");
+        let current = conn.get_work().expect("relogin installs job-1");
+        assert_eq!(current.job_id, "job-1");
+        assert_ne!(old.generation, current.generation);
+
+        let err = conn
+            .submit_share(&old.job_id, "11111111", &"a".repeat(64), old.generation)
+            .expect_err("a share from the replaced connection must be refused");
+        assert!(err.contains("Stale job"), "must be the stale-generation refusal: {err}");
+        assert!(!err.contains("Not connected"), "must not be the no-stream refusal: {err}");
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_pending_shares(), 0);
+        assert_eq!(conn.get_lost_shares(), 0);
+        assert_eq!(conn.get_rejected_shares(), 0);
+
+        conn.submit_share(&current.job_id, "22222222", &"a".repeat(64), current.generation)
+            .expect("the current job's share must be sent");
+        let (n, v) = next_submit(&rx);
+        assert_eq!(
+            (n, v["params"]["job_id"].as_str(), v["params"]["nonce"].as_str()),
+            (1, Some("job-1"), Some("22222222")),
+            "the first line after the relogin must be the current share — the stale \
+             one must never have been written"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing else may reach the pool"
+        );
+        assert_eq!(conn.get_pending_shares(), 1);
+        assert_eq!(conn.get_unsent_shares(), 1);
+    }
+
+    /// The literal #41 window: `connect()` has installed a new stream but
+    /// `login()` has not yet replaced the session id. A share hashed before
+    /// the connect must be refused, not written on the new stream with the
+    /// old session id.
+    #[test]
+    fn a_share_in_the_connect_to_login_window_is_refused() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        let before = conn.generation.load(Ordering::SeqCst);
+        conn.connect(&addr).expect("connect again, no login (accept 1)");
+        assert_eq!(conn.generation.load(Ordering::SeqCst), before + 1);
+
+        let err = conn
+            .submit_share("stale-job", "33333333", &"a".repeat(64), before)
+            .expect_err("a share from before the connect must be refused");
+        assert!(err.contains("Stale job"), "must be the stale-generation refusal: {err}");
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_pending_shares(), 0);
+
+        submit_current(&conn, "current-job", "44444444", &"a".repeat(64))
+            .expect("a share at the current generation must be sent");
+        let (n, v) = next_submit(&rx);
+        assert_eq!(
+            (n, v["params"]["job_id"].as_str(), v["params"]["nonce"].as_str()),
+            (1, Some("current-job"), Some("44444444")),
+            "the first line on the new connection must be the current share"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing else may reach the pool"
+        );
+        assert_eq!(conn.get_pending_shares(), 1);
+    }
+
+    /// Guards the `handle_pool_message` stamp site specifically: a pushed
+    /// job must carry the live generation. A distinctive value (7) means a
+    /// stamp that is missing, zeroed, or off by one cannot pass.
+    #[test]
+    fn a_job_notification_is_stamped_with_the_current_generation() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.generation.store(7, Ordering::SeqCst);
+        conn.handle_pool_message(
+            r#"{"jsonrpc":"2.0","method":"job","params":{"blob":"0f0f","target":"ffffffff","job_id":"pushed","seed_hash":"abcd"}}"#,
+        );
+        let job = conn.get_work().expect("the pushed job must be installed");
+        assert_eq!(job.job_id, "pushed");
+        assert_eq!(job.generation, 7);
+    }
 }

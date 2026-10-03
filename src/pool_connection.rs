@@ -1641,22 +1641,20 @@ mod tls_tests {
         let _ = server.join();
     }
 
-    /// Reproducer for #40: does `receiver_loop` starve `submit_share` of the
-    /// `stream` lock when the pool is quiet? The receiver re-takes the lock
-    /// every `RECV_POLL_INTERVAL` (50ms) to attempt a read; if the OS mutex
-    /// hands the lock back to the receiver ahead of a parked `submit_share`
-    /// call under load, a share can sit for seconds before it reaches the
-    /// wire — the #40 symptom (mean 7.8s, max 34s in a live run).
+    /// Shared body of the #40/#44 reproducers: does `receiver_loop` starve
+    /// `submit_share` of the `stream` lock when the pool is quiet? The
+    /// receiver re-takes the lock every `RECV_POLL_INTERVAL` (50ms) to
+    /// attempt a read; if the mutex hands the lock back to the receiver ahead
+    /// of a parked `submit_share` call, a share can sit for seconds before it
+    /// reaches the wire — the #40 symptom (mean 7.8s, max 34s in a live run;
+    /// #44 measured mean 11.6s, max 81.4s).
     ///
-    /// `#[ignore]`d because the assertion is about real scheduling latency,
-    /// not program correctness: it is a diagnostic reproducer, not something
-    /// CI should gate on. Run manually with:
-    /// `rtk proxy cargo test --release --lib -- --ignored --nocapture \
-    ///  a_submit_is_not_held_hostage control_a_chatty`
-    #[test]
-    #[ignore = "reproduces #40: receiver_loop may starve submit_share of the stream \
-                lock; un-ignore once a fix lands"]
-    fn a_submit_is_not_held_hostage_by_a_quiet_receiver() {
+    /// `busy_threads` CPU-bound spinners run alongside, to reproduce the
+    /// full-core mining load the live runs were under. Returns how long the
+    /// `submit_share` call took. The spinners are stopped and joined before
+    /// anything here can panic, so a failing submit cannot leave them
+    /// spinning for the rest of the suite.
+    fn quiet_receiver_submit_latency(busy_threads: usize) -> Duration {
         use std::io::Write as _;
         use std::net::TcpListener;
         use std::sync::mpsc;
@@ -1667,10 +1665,15 @@ mod tls_tests {
 
         let server = thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            // Hold the socket open for the whole test — never close it.
+            // Hold the socket open, silent, for up to 3s — never close it.
             // Silence on an open connection is the condition under test, not
-            // EOF (that is #34's scenario, covered elsewhere).
-            thread::sleep(Duration::from_secs(3));
+            // EOF (that is #34's scenario, covered elsewhere). Under the bug,
+            // this keepalive at ~3s is what finally let the submit through
+            // (hence the 2.80s baseline); a teardown signal ends the wait
+            // early so a passing run does not cost 3s.
+            if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+                return;
+            }
             let _ = sock.write_all(
                 b"{\"id\":999999,\"result\":{\"status\":\"KEEPALIVED\"}}\n",
             );
@@ -1687,6 +1690,19 @@ mod tls_tests {
         *conn.address.lock().unwrap() = addr.clone();
         *conn.wallet.lock().unwrap() = "4test".to_string();
 
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinners: Vec<_> = (0..busy_threads)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                thread::spawn(move || {
+                    let mut x: u64 = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        x = std::hint::black_box(x.wrapping_add(1));
+                    }
+                })
+            })
+            .collect();
+
         let worker = conn.clone();
         thread::spawn(move || worker.receiver_loop());
         thread::sleep(Duration::from_millis(200));
@@ -1694,15 +1710,147 @@ mod tls_tests {
         let start = Instant::now();
         let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
-        eprintln!("a_submit_is_not_held_hostage_by_a_quiet_receiver: submit_share took {:?}", elapsed);
-        result.expect("submit_share must succeed against a connected stream");
 
+        stop.store(true, Ordering::Relaxed);
+        for s in spinners {
+            let _ = s.join();
+        }
+        // An empty address makes `reconnect()` return false, so the receiver
+        // loop exits on the EOF that follows teardown instead of retrying
+        // forever against a dead port for the rest of the test process.
+        conn.address.lock().unwrap().clear();
+        let _ = tx.send(());
+        let _ = server.join();
+
+        eprintln!(
+            "quiet_receiver_submit_latency(busy_threads={}): submit_share took {:?}",
+            busy_threads, elapsed
+        );
+        result.expect("submit_share must succeed against a connected stream");
+        elapsed
+    }
+
+    /// Reproducer for #40/#44 on an otherwise idle machine. See
+    /// `quiet_receiver_submit_latency` for the scenario. Run manually with:
+    /// `rtk proxy cargo test --release --lib -- --ignored --nocapture \
+    ///  a_submit_is_not_held_hostage control_a_chatty`
+    #[test]
+    #[ignore = "reproduces #44: receiver_loop starves submit_share of the stream \
+                lock; un-ignore once a fix lands"]
+    fn a_submit_is_not_held_hostage_by_a_quiet_receiver() {
+        let elapsed = quiet_receiver_submit_latency(0);
         assert!(
             elapsed < Duration::from_millis(500),
             "submit took {:?}, expected well under 500ms if the stream lock isn't starved",
             elapsed
         );
+    }
 
+    /// The same reproducer with every core busy, as it is while mining —
+    /// the condition both live runs (#40, #44) measured the starvation under.
+    #[test]
+    #[ignore = "reproduces #44 under full CPU load; un-ignore once a fix lands"]
+    fn a_submit_is_not_held_hostage_under_full_cpu_load() {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let elapsed = quiet_receiver_submit_latency(n);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "submit took {:?} with {} busy threads, expected well under 500ms if the \
+             stream lock isn't starved",
+            elapsed,
+            n
+        );
+    }
+
+    /// #44: proves the stream lock is *handed* to a parked submitter on
+    /// release, not merely that submits happen to be fast. The test thread
+    /// holds the lock, lets a `submit_share` park on it, releases, and then
+    /// immediately asks for the lock again with a **blocking** `lock()`. A
+    /// fair lock gives it to the parked submitter first, so by the time the
+    /// test thread holds it again the share is already registered in
+    /// `pending_shares`. An unfair lock lets the releasing thread barge
+    /// straight back in — exactly what `receiver_loop` does to a submit in
+    /// production — and the share is not there yet.
+    ///
+    /// Deliberately not `try_lock()` after the release: that would race the
+    /// test thread's own scheduling against the handoff and flake on a loaded
+    /// runner. The blocking re-lock has no such race.
+    ///
+    /// The only timing dependency is the settle sleep after the submitter is
+    /// seen in flight, to let it get from `submit_share`'s entry to parked on
+    /// the lock. It can only fail in one direction: too short and the
+    /// submitter is not yet parked (still running, or still spinning in the
+    /// lock's adaptive phase), there is no handoff, and the test goes red on
+    /// a correct lock. It cannot turn a barging lock green.
+    #[test]
+    #[ignore = "reproduces #44: the stream lock is not handed off to a parked \
+                submitter; un-ignore once a fix lands"]
+    fn a_released_stream_lock_goes_to_the_parked_submitter_not_back_to_the_releaser() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        const ITERATIONS: usize = 10;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            // Accept and hold the socket open, silent, for the whole test.
+            let (_sock, _) = listener.accept().expect("accept");
+            let _ = rx.recv();
+        });
+
+        let conn = Arc::new(PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL));
+        conn.connect(&addr).expect("connect to the local listener");
+
+        for i in 0..ITERATIONS {
+            let guard = conn.stream.lock().unwrap();
+
+            let submitter_conn = Arc::clone(&conn);
+            let submitter = thread::spawn(move || {
+                submitter_conn.submit_share("j", &format!("{:08x}", i), &"a".repeat(64))
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while conn.submits_in_flight.load(Ordering::SeqCst) == 0
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                conn.submits_in_flight.load(Ordering::SeqCst),
+                1,
+                "iteration {i}: the submitter never entered submit_share"
+            );
+            // Settle: from entry to parked on the stream lock is a session-id
+            // read and a JSON build — microseconds. 100ms is a wide margin.
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                conn.pending_shares.lock().unwrap().len(),
+                i,
+                "iteration {i}: the submitter registered without the stream lock"
+            );
+
+            drop(guard);
+            let guard = conn.stream.lock().unwrap();
+            assert_eq!(
+                conn.pending_shares.lock().unwrap().len(),
+                i + 1,
+                "iteration {i}: the released stream lock went back to the releasing \
+                 thread instead of the submitter parked on it — the barging that lets \
+                 receiver_loop starve a share submission (#44)"
+            );
+            drop(guard);
+
+            submitter
+                .join()
+                .expect("submitter thread")
+                .expect("submit_share must succeed against a connected stream");
+        }
+
+        assert_eq!(conn.pending_shares.lock().unwrap().len(), ITERATIONS);
         let _ = tx.send(());
         let _ = server.join();
     }

@@ -7676,7 +7676,7 @@ CI: `lint`, `audit`, `mutation testing`, `test` passed on the reviewed head; `ji
 
 ### NET-07 (2026-10-03): Make the `stream` lock fair — `parking_lot::FairMutex` (#44)
 
-**Status: Active.** The fix is implemented, reviewed (Opus, `pr-reviewer`, round 1 — see below) and locally verified; PR #49 is open, but it is not mergeable yet: `jit-macos`/`jit-linux-arm` were still pending at review time, and the live `lock_wait_ms` rerun that is the real acceptance test for this change has not happened. Recorded now rather than held back so the in-flight state and the local verification already done are both on the record.
+**Status: Mergeable.** The fix is implemented, reviewed (Opus, `pr-reviewer`, round 1 — see below), locally verified, all six PR #49 CI checks are green, and the live `lock_wait_ms` acceptance run (see below) confirms the fix on a real pool with a clean 71/71 share ledger. Pending the lead's merge.
 
 **Background.** NET-06 measured the `stream`-lock starvation #40 raised as real: `lock_wait_ms` mean 11,564ms, p90 24,459ms, max 81,367ms, with two share rejections traced directly to it. This entry is the fix.
 
@@ -7742,9 +7742,21 @@ Findings, all minor, all fixed in this same entry/commit: **F1** — the ignored
 
 Not verified by round 1, left outstanding below: live-pool behavior, the 1-hour acceptance rerun, the break-test on x86_64 Linux specifically (round 1 ran it on macOS; the implementer's own Linux evidence was arm64 Docker — neither matches CI's x86_64 `test` job exactly), and `jit-macos`/`jit-linux-arm`'s results (pending at review time, though this PR touches no JIT code).
 
+**CI (post-review-round-1 push, head `fb6c05f`):** all six checks green — `lint` 52s, `audit` 14s, `test` 3m20s, `mutation testing (advisory)` 1m27s, `jit-macos` 13m15s, `jit-linux-arm` 11m56s. This PR touches no JIT-path code; both JIT jobs passing is expected, not informative about this specific fix, but confirms nothing else broke.
+
+**Live acceptance run (2026-10-03, 10:29-11:30 UTC, ~61 minutes, `monerohash.com:2222`, 4 threads, under `caffeinate -dimsu`, built from head `fb6c05f`):**
+
+| Metric | NET-06 (before, `main`) | NET-07 (after, this fix) |
+|---|---|---|
+| `lock_wait_ms` mean | 11,564ms | **25.1ms** |
+| `lock_wait_ms` p90 | 24,459ms | **45.9ms** |
+| `lock_wait_ms` max | 81,367ms | **51.7ms** |
+| Shares found | 92 (1h) | 71 (1h) |
+| Accepted / rejected / lost / unsent / pending | 90 / 2 / 0 / 0 / 0 | **71 / 0 / 0 / 0 / 0** |
+| (rejected+unsent+lost)/found | 2.2% | **0%** |
+
+`max` landing at 51.7ms is consistent with the field doc comment's "about two reads" bound (2 × `RECV_POLL_INTERVAL`'s 50ms) — in this run every submit was served within one read-interval's worth of margin, not two. `write_ms` (the write itself, not lock wait) stayed sub-0.1ms throughout, as expected — unaffected by this change. No reconnects, no warnings, no errors, no poisoning, in the full log (`grep -iE 'error|warn|reconnect|poisoned|panic'` found nothing). The share ledger balances exactly (71 found = 71 accepted + 0 + 0 + 0 + 0), independently confirmed by both the miner's own final-stats line and a line-count grep against the raw log. Found-share count naturally differs run to run (pool difficulty/luck), so the two runs aren't a controlled A/B on share rate — the comparison that matters here is `lock_wait_ms` and the loss ratio, both measured on the same code paths via the same instrumentation. Log kept locally (`LIVE1H_NET07.log`, not committed — matching NET-06's own precedent of not tracking its raw timing log).
+
 **Not established.**
-- Whether `jit-macos`/`jit-linux-arm` pass on this head — pending at review time; this PR touches no JIT-path code, so a pass is expected but not yet observed.
-- The break-test's result on x86_64 Linux specifically — covered on macOS (twice, independently) and on arm64 Docker, not on the architecture CI's `test` job actually runs.
-- **The actual acceptance measurement**: a repeat of NET-06's 1-hour `lock_wait_ms` timing instrumentation run against this fix, under `caffeinate -dimsu`, to confirm the measured mean/p90/max actually drop from NET-06's 11,564ms/24,459ms/81,367ms. Not yet run. The acceptance metric for that run must be **(rejected + unsent + lost) / found**, not rejected alone — this fix can legitimately shift some losses from "rejected" to "unsent" in edge cases (a submit arriving while the stream is briefly `None` during a reconnect/relogin now fails fast rather than parking for the full window), which is more honest accounting but would look like a false regression if only the rejection count were compared against NET-06's 2/92.
-- Whether `FairMutex`'s behaviour holds under the live pool's actual timing and contention pattern rather than the synthetic reproducers used here.
+- Whether `FairMutex`'s behaviour holds over a much longer window (NET-06/LIVE-02/LIVE-03 ran 1-12h) or under different pool/network conditions than this one hour against `monerohash.com`.
 - #41 (the stale session-id window) remains open, deliberately out of scope for this change — see the scope decision above.

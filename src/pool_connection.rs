@@ -27,9 +27,13 @@ type StreamLock<T> = FairMutex<T>;
 /// stream lock per read). Because the stream lock is fair (see
 /// `PoolConnection::stream`), a share submit waiting on it gets the lock after
 /// the read in progress, or the one after that if it had not yet parked when
-/// the first ended. So this bounds share-submit lock latency to about two
-/// intervals. It did not
-/// before #44: with an unfair lock the receiver could re-take the lock ahead of
+/// the first ended. So against the receiver's polling, this bounds
+/// share-submit lock latency to about two intervals. That bound does not
+/// cover `login()`'s synchronous request/response (`send_request`), which
+/// holds the lock until the reply arrives, for up to its 30s read timeout, on
+/// connect, reconnect and donation relogin. The receiver's polling did not
+/// have this bound before #44
+/// either: with an unfair lock the receiver could re-take the lock ahead of
 /// a parked submit read after read, and a live run measured waits of up to
 /// 81s. Kept short so that
 /// under full-core mining, new jobs are picked up and shares submitted promptly —
@@ -306,7 +310,10 @@ pub struct PoolConnection {
     /// `FairMutex` hands the lock straight to a parked waiter on every unlock.
     /// So a submit waits for the read in progress, or for one more read if it
     /// was still in the lock's brief spin phase, not yet parked, when that
-    /// read ended. Its wait is bounded at about two reads.
+    /// read ended. Its wait behind the receiver's polling is bounded at about
+    /// two reads. Other holders are not covered by that bound. In particular,
+    /// `send_request` (login) holds the lock until the reply arrives, for up
+    /// to its 30s read timeout.
     ///
     /// Do not "simplify" this to `parking_lot::Mutex`. That lock is only
     /// *eventually* fair. It hands off to a parked waiter only once a timer

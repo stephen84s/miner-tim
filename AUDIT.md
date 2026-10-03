@@ -7760,3 +7760,34 @@ Not verified by round 1, left outstanding below: live-pool behavior, the 1-hour 
 **Not established.**
 - Whether `FairMutex`'s behaviour holds over a much longer window (NET-06/LIVE-02/LIVE-03 ran 1-12h) or under different pool/network conditions than this one hour against `monerohash.com`.
 - #41 (the stale session-id window) remains open, deliberately out of scope for this change — see the scope decision above.
+
+### NET-07-CLEANUP (2026-10-03): Mark NET-07 completed after merge (#44)
+
+**Request / Goal**
+
+NET-07 (#44) merged as `401be2c` (PR #49) after one Opus review round and a live 1-hour acceptance run (see the NET-07 entry above for both). Per this repo's own rule ("do not leave a task 'Active' once it is complete"), `tasks/NET-07.md`'s `**Status:**`, `tasks/README.md`'s `(Active)` tag, and `CLAUDE.md`'s "Current task" blurb all still said "Active"/"Mergeable" after the merge. This entry is the one-line follow-up that fixes that, on its own branch because `main` is protected and accepts no direct pushes regardless of triviality — the exact shape of PROC-09-CLEANUP above.
+
+**Files Changed**
+
+- `tasks/NET-07.md`: `**Status:** Active` → `**Status:** Completed`.
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `NET-07` line.
+- `CLAUDE.md`: "Current task" blurb — "Mergeable ... Merging next" → "Completed, merged as `401be2c` (#49)".
+- `AUDIT.md`'s own NET-07 entry is **not** edited in place — it is already on `main`, so this append is the correction rather than touching that entry's `**Status: Mergeable.**` line directly.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping, matching PROC-09-CLEANUP's precedent exactly.
+
+**Verification Performed**
+
+- Confirmed `401be2c` is `origin/main`'s tip's merge commit for PR #49 (`gh pr view 49 --json state,mergeCommit`).
+- Confirmed issue #44 auto-closed by the merge (`closedAt` 2026-10-03T11:47:00Z is 1 second after `mergedAt` 2026-10-03T11:46:59Z — within a second, not identical as an earlier draft of this line claimed, caught by review).
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched by this entry).
+
+**Review (Sonnet, round 1): not mergeable as first pushed — one minor, one nit, both fixed in this same entry.** Minor: `tasks/NET-07.md`'s own body paragraph (not just its `**Status:**` line) still ended in a stale `**Mergeable.**` — the exact shape PROC-09-CLEANUP's review had already named ("the brief's own stated purpose named two stale locations and there was a third"), repeated here because this entry's own verification grep (`grep -rn "NET-07" ...`) searched for the task ID, not for status words, so it was structurally incapable of finding a stale claim inside a paragraph that doesn't repeat the ID. Fixed: that sentence now reads "**Merged** as `401be2c` (#49)." Nit: the "closedAt matches the merge timestamp to the second" claim above was off by one second (fixed in place, since this correction lands before this entry itself has reached `main`). **False positives: 0.**
+
+The reviewer independently confirmed: the merge commit sha and PR number are correct against real git history; the branch is rebased on current `origin/main`; the `AUDIT.md` diff is a pure append with zero deletions; and `grep -rln "NET-07" .` across the whole repo returns exactly the four files this PR touches, so the three named locations were exhaustive at the *file* level — the miss was intra-file. Not fully verified by round 1: full CI on this PR's own head (only `lint`/`audit` had reported at review time) and the underlying NET-07/#44 fix itself (correctly out of scope for a docs-only follow-up).
+
+**Not Established**
+
+Nothing beyond what the NET-07 entry above already lists (#41 remains open; longer-duration/different-pool behavior unverified).

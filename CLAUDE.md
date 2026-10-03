@@ -405,8 +405,9 @@
 
 ## Current task
 
-**PROC-10 — Second AI-DLC/alternatives research pass; disable Superpowers for this repo.**
-Completed. See [`tasks/PROC-10.md`](tasks/PROC-10.md).
+**NET-07 — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`).**
+Active — fix implemented and lead-verified on `fix/issue-44-stream-lock-fairness`
+(3 commits), PR not yet opened. See [`tasks/NET-07.md`](tasks/NET-07.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

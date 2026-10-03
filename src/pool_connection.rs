@@ -196,6 +196,11 @@ pub struct Job {
     pub target: Vec<u8>,
     pub job_id: String,
     pub seed_hash: Vec<u8>,
+    /// The stream generation this job was issued on: the value of
+    /// `PoolConnection::generation` when it was installed as `current_job`.
+    /// A share hashed against it is refused unsent if the connection has
+    /// been replaced since (#41).
+    pub generation: u64,
 }
 
 #[derive(Serialize)]
@@ -332,6 +337,33 @@ pub struct PoolConnection {
     current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
     request_id: AtomicU64,
+    /// Which TCP connection `stream` currently holds: bumped by one each time
+    /// `connect()` installs a new stream, and **only there**, inside the
+    /// same `stream` critical section as the install (#41). Every `Job` is
+    /// stamped with this value when it is installed as `current_job`;
+    /// `write_and_register` compares a share's job stamp with it **under the
+    /// stream guard** and refuses a mismatch unsent, because that job was
+    /// issued on a connection that no longer exists.
+    ///
+    /// The two stamp sites (`login()` and `handle_pool_message()`) read it
+    /// *without* the stream lock. That is sound only because of a calling
+    /// convention, not anything the type system enforces: `connect()` is
+    /// only ever called (a) from the main thread at startup, before the
+    /// receiver thread exists, or (b) from the receiver thread itself, via
+    /// `reconnect()`/`relogin_as()`. `login()` is only ever called right
+    /// after `connect()` on the same thread, and `handle_pool_message()`
+    /// only runs on the receiver thread (or a test thread with no receiver
+    /// running). So the thread reading `generation` to stamp a job is the
+    /// only thread that could have just bumped it; there is no concurrent
+    /// writer to race the read. If `connect`/`reconnect`/`relogin_as` is
+    /// ever called from a second thread, this breaks: a job could be
+    /// stamped with a generation from a connection it was not issued on.
+    ///
+    /// Not bumped where `reconnect()`/`relogin_as()` clear the stream to
+    /// `None`: with no stream, `write_and_register` already refuses with
+    /// "Not connected" before the generation check runs, so a bump there
+    /// could never change a verdict.
+    generation: AtomicU64,
     address: Mutex<String>,
     /// The wallet currently logged in with — may be the user's or, during a
     /// donation slice, the author's or XMRig's address.
@@ -450,6 +482,7 @@ impl PoolConnection {
             current_job: Mutex::new(None),
             connected: AtomicBool::new(false),
             request_id: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
             address: Mutex::new(String::new()),
             wallet: Mutex::new(String::new()),
             user_wallet: Mutex::new(String::new()),
@@ -533,7 +566,15 @@ impl PoolConnection {
             *addr = address.to_string();
         }
 
-        *self.stream.lock() = Some(pool_stream);
+        // Install and bump in one critical section (#41): a submit that sees
+        // the new stream also sees the new generation, so a share hashed on
+        // a job from the previous connection is refused rather than written
+        // here.
+        {
+            let mut guard = self.stream.lock();
+            *guard = Some(pool_stream);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
 
         self.connected.store(true, Ordering::SeqCst);
         Ok(())
@@ -586,7 +627,7 @@ impl PoolConnection {
             }
             log::info!("Login successful, session id: {}", id);
             if let Some(job_data) = result.get("job")
-                && let Some(job) = parse_job(job_data)
+                && let Some(job) = parse_job(job_data, self.generation.load(Ordering::SeqCst))
             {
                 let diff = target_to_difficulty(&job.target);
                 log::info!(
@@ -614,6 +655,7 @@ impl PoolConnection {
         job_id: &str,
         nonce: &str,
         result: &str,
+        job_generation: u64,
     ) -> Result<(), String> {
         // Counted from entry so a submit parked on the stream lock (not yet
         // registered in `pending_shares`) is still visible to the rotation
@@ -636,7 +678,7 @@ impl PoolConnection {
         let rpc_id = self.next_request_id();
 
         let (lock_wait_ms, write_ms) =
-            match self.write_and_register(rpc_id, params, job_id, nonce) {
+            match self.write_and_register(rpc_id, params, job_id, nonce, job_generation) {
                 Ok(timings) => timings,
                 Err(e) => {
                     self.unsent_shares.fetch_add(1, Ordering::Relaxed);
@@ -719,6 +761,7 @@ impl PoolConnection {
         params: Value,
         job_id: &str,
         nonce: &str,
+        _job_generation: u64,
     ) -> Result<(f64, f64), String> {
         let lock_requested = Instant::now();
         let mut stream_guard = self.stream.lock();
@@ -1104,7 +1147,7 @@ impl PoolConnection {
         // diagnostic at all, and stale work is exactly what looks like a JIT
         // fault from the share-reject side. Log it once per occurrence.
         if let Some(job_data) = job_params
-            && parse_job(job_data).is_none()
+            && parse_job(job_data, self.generation.load(Ordering::SeqCst)).is_none()
         {
             log::warn!(
                 "Pool sent a job that could not be parsed; keeping the previous job. \
@@ -1116,7 +1159,7 @@ impl PoolConnection {
         }
 
         if let Some(job_data) = job_params
-            && let Some(job) = parse_job(job_data)
+            && let Some(job) = parse_job(job_data, self.generation.load(Ordering::SeqCst))
         {
             let diff = target_to_difficulty(&job.target);
             log::info!(
@@ -1485,7 +1528,9 @@ fn take_complete_lines(pending: &mut Vec<u8>) -> Result<Vec<String>, usize> {
     Ok(lines)
 }
 
-fn parse_job(data: &Value) -> Option<Job> {
+/// `generation` is mandatory, not defaulted: a forgotten stamp must be a
+/// compile error, not a value that silently refuses every share (#41).
+fn parse_job(data: &Value, generation: u64) -> Option<Job> {
     let blob_hex = data.get("blob")?.as_str()?;
     let target_hex = data.get("target")?.as_str()?;
     let job_id = data.get("job_id")?.as_str()?.to_string();
@@ -1500,6 +1545,7 @@ fn parse_job(data: &Value) -> Option<Job> {
         target,
         job_id,
         seed_hash,
+        generation,
     })
 }
 
@@ -1526,6 +1572,19 @@ pub fn target_to_difficulty(target: &[u8]) -> u64 {
 #[cfg(test)]
 mod tls_tests {
     use super::*;
+
+    /// Submit a share stamped with the connection's *current* generation —
+    /// what a worker's share carries when no connection has been replaced
+    /// since its job was installed (#41). Tests exercising the stale case
+    /// call `submit_share` directly with an explicit, older generation.
+    fn submit_current(
+        conn: &PoolConnection,
+        job_id: &str,
+        nonce: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        conn.submit_share(job_id, nonce, result, conn.generation.load(Ordering::SeqCst))
+    }
 
     /// The real monerohash.com:9999 fingerprint, read 2026-09-13. Used as a
     /// realistic shape rather than as a live expectation — the pool rotates via
@@ -1554,7 +1613,7 @@ mod tls_tests {
             "blob": "0f0f", "target": "ffffffff",
             "job_id": "j1", "seed_hash": "abcd",
         });
-        assert!(parse_job(&good).is_some(), "the control case must parse");
+        assert!(parse_job(&good, 0).is_some(), "the control case must parse");
 
         for field in ["blob", "target", "seed_hash"] {
             // Even length, so it reaches the slicer: this is the panic case.
@@ -1566,7 +1625,7 @@ mod tls_tests {
                 "fixture must be even-length or it only tests the length check"
             );
             assert!(
-                parse_job(&hostile).is_none(),
+                parse_job(&hostile, 0).is_none(),
                 "a non-ASCII {field} must be declined, not panic"
             );
 
@@ -1575,13 +1634,13 @@ mod tls_tests {
             let mut signed = good.clone();
             signed[field] = serde_json::json!("+f+f");
             assert!(
-                parse_job(&signed).is_none(),
+                parse_job(&signed, 0).is_none(),
                 "a signed {field} is not hex and must be declined"
             );
 
             let mut odd = good.clone();
             odd[field] = serde_json::json!("abc");
-            assert!(parse_job(&odd).is_none(), "an odd-length {field} must be declined");
+            assert!(parse_job(&odd, 0).is_none(), "an odd-length {field} must be declined");
         }
     }
 
@@ -1734,7 +1793,7 @@ mod tls_tests {
         thread::sleep(Duration::from_millis(200));
 
         let start = Instant::now();
-        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let result = submit_current(&conn, "j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
 
         stop.store(true, Ordering::Relaxed);
@@ -1833,7 +1892,7 @@ mod tls_tests {
 
             let submitter_conn = Arc::clone(&conn);
             let submitter = thread::spawn(move || {
-                submitter_conn.submit_share("j", &format!("{:08x}", i), &"a".repeat(64))
+                submit_current(&submitter_conn, "j", &format!("{:08x}", i), &"a".repeat(64))
             });
 
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1928,7 +1987,7 @@ mod tls_tests {
         thread::sleep(Duration::from_millis(200));
 
         let start = Instant::now();
-        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let result = submit_current(&conn, "j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
         eprintln!("control_a_chatty_receiver_lets_a_submit_through: submit_share took {:?}", elapsed);
         result.expect("submit_share must succeed against a connected stream");
@@ -2647,7 +2706,7 @@ mod tls_tests {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
         conn.connect(&addr).expect("connect to the local listener");
 
-        conn.submit_share("job-wire", "deadbeef", &"a".repeat(64))
+        submit_current(&conn, "job-wire", "deadbeef", &"a".repeat(64))
             .expect("submit_share must succeed against a connected stream");
 
         let line = server.join().expect("server thread panicked");
@@ -2712,8 +2771,7 @@ mod tls_tests {
         // to.
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
 
-        let err = conn
-            .submit_share("job-fail", "cafebabe", &"b".repeat(64))
+        let err = submit_current(&conn, "job-fail", "cafebabe", &"b".repeat(64))
             .expect_err("submit_share must fail when there is no stream to write to");
         assert!(
             err.contains("Not connected"),
@@ -2760,7 +2818,7 @@ mod tls_tests {
         let pending_guard = conn.pending_shares.lock().unwrap();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
 
         read_rx
             .recv_timeout(Duration::from_secs(5))
@@ -2814,7 +2872,7 @@ mod tls_tests {
         let mut guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
         thread::sleep(Duration::from_millis(200));
 
         assert!(
@@ -2876,8 +2934,7 @@ mod tls_tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("shutdown write half");
 
-        let err = conn
-            .submit_share("j1", "00000000", &"c".repeat(64))
+        let err = submit_current(&conn, "j1", "00000000", &"c".repeat(64))
             .expect_err("a write to a write-shutdown socket must fail");
         assert!(
             err.contains("Write failed") || err.contains("Flush failed"),
@@ -3140,7 +3197,7 @@ mod tls_tests {
         });
 
         let conn = new_rotation_conn(&addr);
-        conn.submit_share("j1", "00000000", &"a".repeat(64))
+        submit_current(&conn, "j1", "00000000", &"a".repeat(64))
             .expect("queue the share before the receiver loop even starts");
 
         let worker = conn.clone();
@@ -3218,7 +3275,7 @@ mod tls_tests {
 
         let conn = new_rotation_conn(&addr);
         conn.rotation_settle_ms.store(300, Ordering::SeqCst);
-        conn.submit_share("j1", "00000000", &"a".repeat(64))
+        submit_current(&conn, "j1", "00000000", &"a".repeat(64))
             .expect("queue the share before the receiver loop even starts");
 
         let worker = conn.clone();
@@ -3257,7 +3314,7 @@ mod tls_tests {
         let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while conn.submits_in_flight.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
@@ -3283,7 +3340,7 @@ mod tls_tests {
     #[test]
     fn in_flight_is_released_on_every_error_path() {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
-        let err = conn.submit_share("j1", "00000000", "ff");
+        let err = submit_current(&conn, "j1", "00000000", "ff");
         assert!(err.is_err());
         assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 0);
     }
@@ -3356,7 +3413,7 @@ mod tls_tests {
         let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter = thread::spawn(move || {
-            submitter_conn.submit_share("j1", "00000000", &"a".repeat(64))
+            submit_current(&submitter_conn, "j1", "00000000", &"a".repeat(64))
         });
 
         let deadline = Instant::now() + Duration::from_secs(5);

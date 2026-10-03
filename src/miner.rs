@@ -376,7 +376,8 @@ impl Miner {
     }
 
     /// Shares `submit_share` was asked to send but never wrote at all — no
-    /// stream, a poisoned lock, or a write error. Distinct from
+    /// stream, a write error, or a job from a replaced connection (stale
+    /// generation, #41). Distinct from
     /// `get_lost_shares`, which the pool at least received (#32).
     pub fn get_unsent_shares(&self) -> u32 {
         self.pool_connection
@@ -825,7 +826,7 @@ fn worker_loop(
 
             if verified {
                 let submit_start = Instant::now();
-                let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex);
+                let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex, job.generation);
                 let submit_call_elapsed = submit_start.elapsed();
                 if let Err(e) = submit_result {
                     log::error!("Failed to submit share: {}", e);

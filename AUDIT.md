@@ -8215,3 +8215,48 @@ FCMP++ itself, separately from the RandomX v2 timing question: multiple sources 
 - Exact cause of the May-2026 misreporting (whether it's confusion with the audit window, a testnet/stressnet milestone, or pure fabrication) — flagged as a pattern, not root-caused.
 - Whether the `fcmp++ hf` milestone's "70% complete" figure is a reliable leading indicator of timing; GitHub milestone completion percentages are not a committed schedule.
 - No action taken on RX2-01's "fork-day remainder" list (version dispatch, Stratum `result`/`commitment` changes) — correctly still out of scope, since the fork it's gated on has not happened.
+
+### RELEASE-02 (2026-10-04): Cut and publish v0.1.3 — the first-ever GitHub Release for this project
+
+**Request / Goal**
+
+User asked whether it was time for a new version, given two months of unreleased fixes on `main` since `v0.1.2` (tagged 2026-08-09, never published). Agreed, then asked for signing guidance (recommended against it — see below) and said to publish the whole thing. This entry records that execution, following `RELEASE-01`'s tooling and `RELEASING.md`'s documented flow end to end, for the first time ever.
+
+**Signing decision, researched before building anything**
+
+Checked what comparable solo/small-team open-source CLI projects do for macOS release binaries: xmrig itself ships plain unsigned `tar.gz` archives; web search turned up multiple small projects with long-standing open issues titled things like "macOS binaries are unsigned, Gatekeeper rejects them" — an accepted, common gap, not unique to this project. Real Developer ID signing + notarization needs an active $99/year Apple Developer Program membership and an ongoing process; this project has neither. **Decision: do not sign.** This matches what `RELEASING.md` already documented as optional (ad-hoc `codesign -s -`, left to whoever downloads it) — no change to that document was needed, just a confirmation that the existing stance is the right one, not a gap to close before releasing.
+
+**Version chosen: 0.1.3 (patch).** Nothing since `v0.1.2` is a breaking change — three bug fixes (#44/NET-07, #41/NET-08, #53/NET-10), one test-coverage addition (#27/NET-09), and process-only work (PROC-11, RESEARCH-02). Patch bump is correct by this project's own (informal, binary-not-library) versioning.
+
+**Files Changed** (the version-bump PR, #60, merged as `990a9b1`):
+- `Cargo.toml`: `version = "0.1.2"` → `"0.1.3"`.
+- `Cargo.lock`: regenerated via `cargo build --release` (its own `minertim` entry only; no dependency changed).
+- `CLAUDE.md`: the Versions table's MinerTim row updated to match.
+
+**Pre-release verification, run locally on this Mac before tagging** (per `RELEASING.md` step 2 and `RELEASE-01`'s own convention — the JIT gate is what actually matters for a release, since a JIT defect is silent, not a crash):
+- `make verify-jit`: **92 tests, debug AND release profiles, GATE PASSED** on Darwin arm64.
+- `cargo test --release --locked`: 203 lib / 0 failed / 3 ignored, 20 bin / 0 failed, 0 doc-tests.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `cargo audit`: clean, 1290 advisories loaded, 99 crates scanned, exit 0.
+- All four re-confirmed again after rebasing PR #60 onto `main` post-merge of PR #59 (RESEARCH-02), which landed in between.
+
+**The actual release, step by step** (`RELEASING.md`'s documented flow, followed exactly, this being the first time any step past "tag exists" has ever actually executed):
+1. `make dist` → `dist/minertim-0.1.3-macos-arm64.tar.gz`, built with `target-cpu=apple-m1` (not `native`, for portability to any Apple Silicon Mac). SHA256: `f1dfa2665615225220945239df93f9177f2670e4ee262143cd67a4b406b1b2fd`.
+2. `make release` → `git tag -a v0.1.3 -m "MinerTim v0.1.3"` at `990a9b1`, pushed. **This is the first `v*` tag pushed since `release.yml` was added** (the three pre-existing tags, `v0.1.0`-`v0.1.2`, were carried over from the GitLab migration with no workflow to react to them).
+3. `release.yml` fired on the tag push and created the draft Release successfully (`gh run list --workflow=release.yml` showed `success`; confirmed with `gh release view v0.1.3` → `draft: true`) — the first time this workflow has ever actually run, not just been read.
+4. `gh release upload v0.1.3 --clobber` attached both `minertim-0.1.3-macos-arm64.tar.gz` and `dist/SHA256SUMS`.
+5. `gh release edit v0.1.3 --draft=false` published it, with release notes summarizing the three real fixes, explicitly naming the binary as unsigned and pointing at the ad-hoc-signing/`xattr` workaround, and pointing at `AUDIT.md` as the full record rather than duplicating it in the notes.
+
+**One housekeeping step taken immediately before `make dist`, worth recording:** the primary checkout had four untracked scratch files (`LIVE1H_NET07.log`, `LIVE2H_NET08.log`, `LIVE7H_RUN.log`, `run7h.sh` — live-run logs and a helper script from earlier sessions' work, never meant to be tracked). `make release`'s own guard requires a clean `git status --porcelain`, which untracked files fail even though they were never going to be committed. Moved them to `/tmp/minertim-live-logs/` (preserved, not deleted) rather than deleting them or forcing them into a commit.
+
+**Verification Performed**
+
+- `gh release view v0.1.3` after publishing: `draft: false`, `published: 2026-10-04T11:28:55Z`, both assets listed (`minertim-0.1.3-macos-arm64.tar.gz`, `SHA256SUMS`).
+- Release URL: `https://github.com/stephen84s/miner-tim/releases/tag/v0.1.3`.
+- `git status --short` on the primary checkout confirmed clean (apart from the four files relocated above) before tagging, so the tagged tree matches what CI had already verified on PR #60's merged commit.
+
+**Not Established**
+
+- Whether anyone downloading the artifact actually needs to self-sign — no reports yet, since this is the first release.
+- Real-world Gatekeeper behavior on a fresh, never-run-before Mac for this specific binary — not tested on a clean machine, only on the one it was built on (which already trusts locally-built binaries more loosely).
+- Whether future releases should automate any part of this now that the manual flow has been proven end to end once — `RELEASING.md`'s own open question about CI building the binary (reproducibility, signing an unsigned CI-built binary under the project's name) is unchanged by this entry; this was a manual run of the existing manual process, not a decision to change it.

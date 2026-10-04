@@ -7947,3 +7947,73 @@ Not independently reviewed — same precedent as PROC-09-CLEANUP and NET-07-CLEA
 **Not Established**
 
 Nothing beyond what the NET-08 entry above already lists (#53 remains open; the calling-convention/critical-section invariants' long-window behavior remains unverified).
+
+### NET-10 (2026-10-04): Compare `current_job` by `Arc` identity, not `job_id` string (#53)
+
+**Request / Goal**
+
+Issue #53, filed as a non-blocking follow-up during NET-08/PR #52's review (F6): `worker_loop` in `miner.rs` only reset its cached blob (`job_blob_current`) when a fetched job's `job_id` **string** differed from the previous one. If a pool ever reuses a `job_id` — across connections, or within one — the worker keeps hashing a stale blob while the freshly-fetched `Job` already carries a different identity. Predates and is unrelated to #41/NET-08's generation tagging, though found during that PR's review.
+
+**Note on the id taken for this entry.** This task's own `tasks/`/`AUDIT.md` would be the next sequential number after NET-08, i.e. NET-09 — but issue #27 is in flight concurrently on its own unmerged branch (`test/issue-27-read-line-limit`) and has already claimed `NET-09` there (confirmed by reading that branch's `AUDIT.md`/`tasks/README.md` directly, not by memory). Using `NET-10` here avoids a collision once both branches merge; whichever of the two lands second should check the other's claimed id before writing its entry, same caution as `CLAUDE.md`'s "Current task" pointer below.
+
+**Design: `Arc::ptr_eq` identity, not `job_id` + `generation`.** Confirmed directly against `pool_connection.rs`: `PoolConnection` installs a job as `current_job` at exactly two sites, `login()` (line ~640) and `handle_pool_message()` (line ~1190), and both always do so as a fresh `Arc::new(parse_job(..))` — never a mutation or re-wrap of an existing `Arc`. The two other `current_job.lock()` sites (`reconnect()` line ~1053, `relogin_as()` line ~1121) only ever clear it to `None`. So "a new `Arc`" is a strict superset of "`job_id` changed" and of "`generation` changed" (#41) — it also catches the case neither of those would: the same connection re-sending a job with a reused `job_id` but different content. The only cost: a byte-identical re-send (rare) costs one extra `prepare_scratchpad` call, confirmed harmless by reading the existing AUDIT.md note on xmrig #3785 (this file, 2026-08-15 entry: "Our worker nonce is monotonic across job changes; we never reset it") and confirming in `worker_loop` itself that `nonce` is declared once, outside the per-job block, and never reset on a job change.
+
+Holds `Option<Arc<Job>>` directly rather than a raw pointer/address (`Arc::as_ptr as usize`), which would reintroduce an ABA bug — a freed `Job`'s address can be reused by the next allocation.
+
+**Files Changed** (from `git diff main...HEAD --numstat`, taken after the third commit below, plus this entry and the `tasks/` files added in a fourth commit):
+- `src/miner.rs`: +88 / -4
+- `src/pool_connection.rs`: +4 / -0
+
+**Implementation details:**
+
+- `use crate::pool_connection::{target_to_difficulty, PoolConnection};` → `..., Job, PoolConnection};`.
+- New private helper `fn is_new_job(cached: Option<&Arc<Job>>, fetched: &Arc<Job>) -> bool`, placed between `classify_share`'s closing brace and `worker_loop`'s `#[allow(clippy::too_many_arguments)]` attribute (confirmed this placement does not orphan that attribute onto the wrong item — a failure mode this repo has hit before). Final body: `!cached.is_some_and(|c| Arc::ptr_eq(c, fetched))`.
+- `worker_loop`'s `let mut current_job_id = String::new();` → `let mut current_job: Option<Arc<Job>> = None;`; the job-change `if job.job_id != current_job_id { current_job_id = job.job_id.clone(); ... }` block → `if is_new_job(current_job.as_ref(), &job) { current_job = Some(Arc::clone(&job)); ... }`. Nothing else in the block, and nothing else in `worker_loop`'s ~300-line body, changed — confirmed by reading the whole function (lines 573-879 before this change): every other `job.job_id`/`job.generation`/`job.target` read in it (share logging, `submit_share`'s call, the short-blob warning, `target_to_difficulty`) reads from the freshly-fetched `job` variable each iteration, never from a cached copy, so none of them needed to move.
+- `pool_connection.rs`'s `current_job: Mutex<Option<Arc<Job>>>` field gained a new one-line doc comment: **the plan's text assumed one already existed to extend ("add one clause to the existing doc comment") — there wasn't one.** The large `///` block immediately above the field in the source belongs to the *previous* field, `stream`, and ends two lines before `current_job`'s declaration. Added a fresh three-line comment instead, stating the install-sites invariant and naming `miner::is_new_job` as the thing that relies on it.
+- **Side effect of the plumbing commit, disclosed rather than silently inherited.** The old `current_job_id = String::new()` sentinel meant a first job whose pool-supplied `job_id` happens to be the literal empty string `""` (not rejected by `parse_job`, which only checks `Value::as_str()` succeeds, not that the result is non-empty) would never copy its blob on the very first job. With `current_job: None` as the initial state, any first job is now unconditionally treated as new regardless of `job_id` content. No existing test exercises this either way; not pursued further since it doesn't affect the behavior change this task was asked for, but noted here rather than left unmentioned.
+
+**Tests: 5 new, `mod job_change_tests` in `miner.rs`, after the existing `verify_tests` module.** A builder `fn job(id: &str, generation: u64) -> Arc<Job>` fixes blob/target/seed_hash content (76/4/32 zero bytes respectively — irrelevant to `is_new_job`, which never reads them) and varies only `job_id`/`generation`. Tests, covering both directions per this repo's standing rule that a guard tested one-directionally proves nothing:
+
+1. `the_same_job_object_is_not_a_new_job` — the normal mid-job case, must NOT reset.
+2. `a_reused_job_id_from_a_new_connection_is_a_new_job` — same `job_id`, generations 1 and 2; must reset. This is #53 itself.
+3. `a_different_job_id_is_a_new_job` — different `job_id`s, both same- and different-generation variants; must reset. The pre-existing, already-correct case.
+4. `an_identical_reinstall_is_a_new_job` — `Arc::new((*a).clone())`, byte-identical content, same `job_id`, same `generation`, new `Arc`; must reset. The one test that distinguishes identity-based comparison from the generation-based alternative considered and rejected during design.
+5. `no_cached_job_means_a_new_job` — `is_new_job(None, &a)`; must reset.
+
+**Commits** (4, on `fix/issue-53-job-blob-staleness`, branched from `main` at `e7f17c7`; no PR opened yet):
+
+- `b3fc589` — plumbing: `current_job` becomes `Option<Arc<Job>>`, `is_new_job` introduced with the *old* `job_id`-only semantics (behavior-preserving; full suite unchanged at 195 lib / 0 failed / 3 ignored + 20 bin).
+- `8744043` — the five `job_change_tests` added on top, still against the old semantics. This is this task's recorded "red": 2 of the 5 fail (`a_reused_job_id_from_a_new_connection_is_a_new_job`, `an_identical_reinstall_is_a_new_job`), 3 pass — the check's *absence*, not a reverted mutation. (The hand break-tests below are the actual mutation evidence.)
+- `5446e27` — the fix: `is_new_job`'s body switched to `Arc::ptr_eq`; `pool_connection.rs`'s doc-comment addition. All tests green: 200 lib / 0 failed / 3 ignored + 20 bin.
+- (this commit) — this `AUDIT.md` entry, `tasks/NET-10.md`, `tasks/README.md`'s line. `CLAUDE.md`'s "Current task" pointer deliberately left untouched, per this task's own brief, since issue #27 is running concurrently on a separate branch and whichever of the two lands second would otherwise stomp the other's pointer update.
+
+**Break-tests: three mutations against the final (post-`5446e27`) `is_new_job`, each `cp`'d to `/tmp/miner_prefix.rs.bak` first and restored from that copy, confirmed clean by both `cmp` and `git diff --quiet` after each:**
+
+1. Revert the body to the *old* `job_id`-only semantics, `cached.is_none_or(|c| c.job_id != fetched.job_id)`: tests 2 and 4 went red exactly as predicted — `test result: FAILED. 3 passed; 2 failed` (`a_reused_job_id_from_a_new_connection_is_a_new_job`, `an_identical_reinstall_is_a_new_job`). This is the bug #53 reports, reintroduced and caught.
+2. The *generation-based alternative* considered and rejected during design, `cached.is_none_or(|c| c.job_id != fetched.job_id || c.generation != fetched.generation)`: only test 4 went red — `test result: FAILED. 4 passed; 1 failed` (`an_identical_reinstall_is_a_new_job`). This is the mutation whose purpose is proving the *design choice itself* (identity over generation) is actually tested, not just the bug fix — confirmed.
+3. The body forced to `true` unconditionally: only test 1 went red — `test result: FAILED. 4 passed; 1 failed` (`the_same_job_object_is_not_a_new_job`).
+
+All three reverts confirmed identical to the pre-mutation file via `cmp src/miner.rs /tmp/miner_prefix.rs.bak` (silent/no output = identical) and `git diff --quiet` (clean) after each.
+
+**Mutation testing: `./scripts/mutants.sh 'is_new_job' 'miner::'` — this is the first `miner::`-scoped `scripts/mutants.sh` invocation ever recorded in this file** (confirmed by grepping `AUDIT.md` for prior `mutants.sh.*miner::` invocations before this task — none found; every prior use of the script in this history scoped `pool_connection::`, `hex::` or `donate::`). Result: **3 mutants matching, 3 caught, 0 missed, 0 timeout, 0 unviable, exit 0.** The three: `replace is_new_job -> bool with true`, `replace is_new_job -> bool with false`, `delete ! in is_new_job` — exactly the three predicted (return `true`, return `false`, delete the `!`). Wall time ~15s total (9s baseline build + test, then ~12-14s to test all three mutants) — fast because the scope is a single two-line function and the filtered test set (`miner::`) is small; this is not comparable to NET-08's `pool_connection::`-scoped run (36 mutants, tens of seconds per mutant against a much larger suite). `worker_loop`'s call site itself is not mutation-testable the same way cargo-mutants can reach — a bare call to a two-argument predicate, same shape as NET-08's `fetch_add` call sites — so the three hand break-tests above are the integration evidence for it, per this repo's existing precedent for that gap.
+
+**Verification Performed**
+
+- `rtk proxy cargo build`: clean.
+- `rtk proxy cargo clippy --all-targets -- -D warnings`: clean. `rtk proxy cargo clippy --all-targets --release -- -D warnings`: also clean (checked separately per this task's brief, since a prior task found debug/release clippy can disagree; no disagreement found here — in particular, clippy raised no `nonminimal_bool` complaint against `!cached.is_some_and(..)`, which was flagged as a possible risk going in).
+- `rtk proxy cargo test --release --locked`, full suite, post-fix: **200 passed; 0 failed; 3 ignored** (lib, 203 total including ignored) + **20 passed; 0 failed** (bin) + 0 doc-tests. Baseline on `main` before this task (confirmed, not assumed): 195 lib / 0 failed / 3 ignored, 20 bin — exactly matching this task's brief. The +5 lib tests are `job_change_tests`.
+- `rtk proxy cargo audit`: clean, no advisories, no `Cargo.toml`/`Cargo.lock` change (no new dependency).
+- `git status`: clean after each commit; no `.bak` files left inside the repo (the break-test copy lived at `/tmp/miner_prefix.rs.bak`, outside the tree); `mutants.out/` is gitignored and was not force-added.
+
+**No live-pool evidence for the fix itself, stated plainly rather than implied.** Unlike NET-08, which had a 2-hour live acceptance run available because the bug it fixed (a stale session id) is reachable through ordinary reconnects/relogins, #53's trigger — a pool reusing a `job_id`, across or within a connection — has never been observed against any pool this miner has run against. Nothing here demonstrates the bug occurring in the wild; what's demonstrated is that nothing regressed (full suite, clippy, audit all clean) and that the fix is correct by construction against the invariant `PoolConnection` actually maintains (verified directly in its source, not assumed).
+
+**Review**
+
+Not yet reviewed — no PR has been opened for this branch as of this entry. Per `CLAUDE.md`'s own rule, CI runs only where a PR exists, so none of the five gating checks have run against this branch either; `rtk proxy cargo test --release --locked`, clippy (both profiles) and `cargo audit` above are the local substitute for what CI would otherwise confirm.
+
+**Not Established**
+
+- No PR opened, no independent review, no CI run (see above) — this entry reflects local implementation-and-verification only.
+- No live-pool evidence that a pool actually reuses `job_id` values (see above) — the fix is unexercised by any observed real-world trigger.
+- The pre-existing, unrelated empty-`job_id`-on-first-job edge case noted above under "Implementation details" was observed as a side effect, not pursued to a test either way.
+- Whether issue #27's branch (`NET-09`) lands before or after this one, and which entry ends up needing to renumber if both claim adjacent ids before either merges — flagged above, not resolved, since resolving it is a merge-order decision for whoever merges second.

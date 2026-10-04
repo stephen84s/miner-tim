@@ -2303,6 +2303,61 @@ mod tls_tests {
         );
     }
 
+    /// Serve `bytes` to one client, then close. Closing matters: if the guard is
+    /// mutated away, `read_line` hits EOF and returns instead of blocking. The read
+    /// timeout is a backstop so a broken build fails rather than hangs.
+    fn plain_stream_serving(bytes: Vec<u8>) -> (PoolStream, thread::JoinHandle<()>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            // The reader may stop early (the over-limit case), so a failed write is
+            // expected, not a test failure.
+            let _ = sock.write_all(&bytes);
+        });
+        let tcp = TcpStream::connect(addr).expect("connect");
+        tcp.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        (PoolStream::Plain(tcp), server)
+    }
+
+    /// Pins the number itself. The ONLY test that kills `1 << 20` -> `1 >> 20`:
+    /// the boundary tests below size their fixtures from `MAX_LINE_BYTES`, which
+    /// lives in this same file, so under that mutation they compile against 0 and
+    /// still pass. A literal in test code is not mutated. Do not "simplify" this
+    /// away or rewrite it in terms of the constant.
+    #[test]
+    fn read_line_limit_is_exactly_one_mebibyte() {
+        assert_eq!(MAX_LINE_BYTES, 1_048_576);
+    }
+
+    #[test]
+    fn read_line_accepts_a_line_of_exactly_the_limit() {
+        let mut payload = vec![b'x'; MAX_LINE_BYTES];
+        payload.push(b'\n');
+        let (mut stream, server) = plain_stream_serving(payload);
+        let line = read_line(&mut stream).expect("a line of exactly MAX_LINE_BYTES must be accepted");
+        assert_eq!(line.len(), MAX_LINE_BYTES);
+        assert!(line.bytes().all(|b| b == b'x'));
+        server.join().unwrap();
+    }
+
+    /// The trailing newline is deliberate: without the guard the line would be
+    /// returned as `Ok`, so this does not depend on EOF to fail.
+    #[test]
+    fn read_line_refuses_one_byte_over_the_limit_and_names_it() {
+        let mut payload = vec![b'x'; MAX_LINE_BYTES + 1];
+        payload.push(b'\n');
+        let (mut stream, server) = plain_stream_serving(payload);
+        let err = read_line(&mut stream).expect_err("one byte over MAX_LINE_BYTES must be refused");
+        assert_eq!(
+            err,
+            format!("pool response line exceeded {MAX_LINE_BYTES} bytes without a newline")
+        );
+        drop(stream);
+        server.join().unwrap();
+    }
+
     #[test]
     fn parses_a_plain_hex_fingerprint() {
         let fp = parse_cert_fingerprint(SAMPLE).expect("should parse");

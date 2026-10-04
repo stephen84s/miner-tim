@@ -66,3 +66,10 @@ Implementation item 3 says the refuses-over-limit test "Kills the `>`->`<` mutat
 
 ## Verdict
 Mergeable after doc fixes. No blocker, no major. The tests are correct and do kill what matters (`>=`, `==`, guard deletion, MAX+1, and the literal). The fixes needed are all record accuracy: F1 (in-source "ONLY" comment + AUDIT + PR body), F2 (survivor list not re-derived on main), F3 (internal contradiction), F4 (stale status/commit/file lists). F5/F6 optional.
+
+## Corrections to this ledger (after advisor pass)
+- F2's "issue predates #23" was a guess; #27 says the survivors were confirmed on #23's branch. Traced instead (`git log -S'fn <test>'`): the `<<`-killing receiver tests (a_large_but_terminated..., splitting_a_message..., the_first_job_after_a_flood...) landed in #23's squash 88c5d40; the login tests that kill both `<` and `<<` landed in #42 (b4501f0) and #52 (68acb27). So the survivor list was accurate when filed and went stale as #23 (final), #42 and #52 merged. The PR never re-ran it on current main.
+- F2 also appears in tasks/NET-09.md ("three uncovered mutants") and the PR body ("three survivors"); AUDIT's "critical mutants ... 1, 6, 7" should be 5 and 7 (`==`, `>=`), the ones this PR actually rescues.
+- F1 suggested rewording of the src comment: keep "do not rewrite in terms of the constant"; replace "The ONLY test that kills" with "the only test that pins the value independently — receiver/login tests also kill `1 >> 20` today, but only incidentally, and the boundary tests below cannot".
+- Verdict restated: NOT mergeable as-is; F1-F4 required (doc/comment only), F5/F6 optional. jit-macos was still pending at review time.
+- Not verified: TLS path; mutants.sh exit codes (output piped through tail); broad filter on the branch (implied by narrow 7/7); jit-macos result.

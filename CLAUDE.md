@@ -540,7 +540,7 @@ Linux"; no Linux throughput has ever been measured.
 
 | Component | Version |
 |---|---|
-| MinerTim | 0.1.2 (`Cargo.toml`; drives the Stratum agent string) |
+| MinerTim | 0.1.3 (`Cargo.toml`; drives the Stratum agent string) |
 | Rust toolchain | 1.97.1 (pinned in CI) |
 | Rust edition | 2024 |
 | serde_json | 1.0 |

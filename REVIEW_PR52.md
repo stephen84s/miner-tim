@@ -42,7 +42,10 @@ that test FAILS promptly — its `submit_current(..).expect(..)` panics on "Not 
 (e.g. the first: relogin_as fails, asserts pass, then `server.join()` on a listener that never accepts).
 Same mutant applied to a `git archive origin/main` snapshot: the identical four hang, the named test fails.
 So "pre-existing harness property, not a new defect" is CORRECT; the named test and therefore the
-stated evidence are wrong. None of the 4 new tests hangs. Fix the entry's attribution.
+stated evidence are wrong. None of the 4 new tests hangs. Fix the attribution in BOTH AUDIT.md
+NET-08 and the PR #52 test-plan line (which also says "accept()s with no timeout").
+Mutants tally (36/20/5/10/1) not re-run by me; `git diff -U0` of pool_connection.rs has no `1000`,
+so the 5 claimed `* 1000.0` miss sites are untouched by this PR.
 
 **F2 (minor, audit accuracy) — "Not touched: ... the 'What this does NOT close' block (still accurate)" is false.**
 The diff rewrites that block in write_and_register's leading comment (header removed, replaced
@@ -54,7 +57,8 @@ rotation/relogin group": reproduced 13, but they are 3 new + 10 pre-existing, an
 10 are among the 12 named rotation tests (a_rotation_waits_at_most_the_settle_limit,
 a_share_outstanding_at_a_rotation_is_answered_before_the_relogin,
 a_blocked_submitter_at_rotation_is_sent_and_answered_on_the_old_session). The rest are
-submit/stream-lock tests. The coverage conclusion stands; the attribution does not.
+submit/stream-lock tests. The coverage conclusion stands; the attribution does not. The PR body's
+"turns 13 existing tests red" has the same error (10 existing + 3 new).
 
 **F4 (minor, stale status) — "Commits (3 ... not yet pushed)" and "CI ... not yet run (branch not
 yet pushed)"; CLAUDE.md "3 commits".** PR #52 is open at a61d4ad, 4 commits; x86 lint/audit/test
@@ -96,8 +100,10 @@ ERROR is loud. Harmless; the live-run grep for 'Stale job' still works.
 - Sealed prediction present before review: yes. It held (doc issues; no logic defect).
 
 ## Verdict
-Mergeable on code: no blocker or major finding. The generation logic is correct, both
-invariants hold in the current diff, and the calling-convention argument holds against the real
-threading model. Before merge: fix the audit inaccuracies F1-F4, record F5 as an untested
-invariant, and open a follow-up for F6. Still outstanding per the PR itself: the jit-* CI jobs
-(pending) and the 2 h live run. Not verified by me: the live run, and the ARM CI jobs.
+NOT YET MERGEABLE, blocked only on the PR's own outstanding items: the 2 h live run and the
+pending jit-macos/jit-linux-arm jobs. No review finding blocks: no blocker, no major. The generation
+logic is correct, both invariants hold in the current diff, and the calling-convention argument
+holds. F1-F4 are AUDIT/PR-text corrections, editable in place (NET-08 is not on origin/main).
+Record F5 as an untested invariant and open a follow-up for F6.
+Not verified: the live run, the ARM CI jobs, a full mutants.sh rerun, the hang repro in a
+debug build (I ran it in release; the mechanism is the same).

@@ -29,3 +29,40 @@ Source comment on read_line_limit_is_exactly_one_mebibyte says it is "The ONLY t
 
 ### F2 (minor->major for audit record): "three mutants survive on main" not re-derived — `<` and `<<` are already killed on main by the suite the issue itself names
 The issue's survivor list predates #23 (filed against pre-#23 main). On current main, the full pool_connection:: suite kills `>`->`<` (5 login tests + flood test) and `<<`->`>>` (9 tests). See main-only mutants run below.
+
+Main-only mutants run (detached worktree of origin/main e7f17c7, then removed): `./scripts/mutants.sh '<PR's corrected filter>' 'pool_connection::'` -> 7 tested, **5 caught, 2 MISSED: `>`->`==` and `>`->`>=`**. So on current main `<` and `<<` were already killed by the very test filter the issue names; the genuine survivors were `>=` and `==`. The PR does kill both (branch: 7/7 narrow, re-run here in 19 s). The entry never mentions `==` as a main survivor and lists `<`/`<<` as survivors without having re-run on main. Severity minor (record accuracy; the tests themselves are right), but it is the PR's central framing.
+
+### Filter verification (item 2/3 of brief)
+`cargo mutants -F '<corrected>' --list` on branch: exactly the 7 listed in AUDIT (291:33 `<<`, 1482 x2, 1488 `==`, 1492 x3). `$` and `^src/pool_connection\.rs:` anchors exclude every other `<<` in the tree (hex.rs, vm.rs, compiler.rs, superscalar ... checked via full --list grep). Issue's bare `read_line` filter: 6, missing 291:33 — confirmed. Cause confirmed via `git log -S'const MAX_LINE_BYTES'` -> 88c5d40 (#23).
+
+### F3 (minor): AUDIT NET-09 contradicts itself on which test kills `>`->`<`
+Implementation item 3 says the refuses-over-limit test "Kills the `>`->`<` mutation". Break-test 2 in the same entry says that test stays GREEN under `<` (correct — reproduced; identical error text). It's the accepts test (and 6 pre-existing tests) that kill it.
+
+### F4 (minor): entry/task file stale relative to the correction commit
+- "no PR has been opened yet, so no review and no CI have run" (AUDIT) / "no PR opened, no review run yet" (tasks/NET-09.md): PR #55 is open and CI has run (5 pass, jit-macos pending at review time).
+- "**Commits** (2 ...)" — branch has 3; c27be82 (the correction itself) is missing, in the very paragraph that announces fixing an undercount.
+- "Files Changed (from git diff main...HEAD --numstat)" lists only src/pool_connection.rs; numstat also shows AUDIT.md, tasks/NET-09.md, tasks/README.md.
+- No prediction of expected review findings recorded before this review (task file or entry). Note, not blocker. Review paragraph expectedly absent until this round is folded in.
+
+### F5 (nit): issue's 4th suggested bullet not acknowledged
+#27 asks for "a line split across reads still assembles". read_line reads one byte per syscall, so the 1 MiB accepts test exercises this inherently, but neither PR body nor entry says so or says it was dropped.
+
+### F6 (nit): wording
+- PR body (inherited from #27): "shifted by twelve orders of magnitude" — `1 >> 20` is 0, not 2^-20 of the limit.
+- AUDIT: "1 << 20 = 1048576 bits/bytes" (bytes); "One-byte allocations scale linearly" heading describes one-byte read syscalls, not allocations.
+
+## Items 2, 3, 5, 7
+- Silent failure: N/A (test-only). Tests themselves: refuses test has trailing newline, so guard-deleted mutant returns Ok rather than relying on EOF — verified (guard->false fails it). 30 s read timeout prevents hangs; server `let _ = write_all` is fine since the assertions on the client side are what fail. Fixtures self-check byte counts: accepts asserts len == MAX_LINE_BYTES; MAX+1 off-by-one variant of the guard is caught by the refuses test (reproduced).
+- Safety switches: N/A.
+- Resource: ~2 MiB Vec per test + ~1M 1-byte reads; whole suite still ~49-53 s release. Fine.
+- Concurrency: test-local listener thread per test, ephemeral port; no shared state. Fine.
+- Doc-comment placement: helper + tests inserted after a closing brace; next item (`parses_a_plain_hex_fingerprint`) had no doc comment displaced. OK.
+
+## Other checks
+- Base: merge-base == origin/main tip e7f17c7 after fetch.
+- clippy --all-targets -D warnings: clean. (cargo fmt not gated, by recorded decision in ci.yml.)
+- Full suite release: 198/0/3 lib, 20 bin — matches claim.
+- NET-09 not on origin/main, so in-place edits are legitimate.
+
+## Verdict
+Mergeable after doc fixes. No blocker, no major. The tests are correct and do kill what matters (`>=`, `==`, guard deletion, MAX+1, and the literal). The fixes needed are all record accuracy: F1 (in-source "ONLY" comment + AUDIT + PR body), F2 (survivor list not re-derived on main), F3 (internal contradiction), F4 (stale status/commit/file lists). F5/F6 optional.

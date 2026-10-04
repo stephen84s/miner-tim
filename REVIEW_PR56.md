@@ -9,13 +9,59 @@ workflows, Makefile, scripts/ touched -> nothing handed off to jit-reviewer / ci
 ## Coverage ledger
 | # | Item | Status |
 |---|------|--------|
-| 1 | Correctness | in progress |
-| 2 | Silent failure | pending |
+| 1 | Correctness | done, no defect |
+| 2 | Silent failure | done, no finding |
 | 3 | Safety switches | pending |
-| 4 | Tests / break-tests | pending |
+| 4 | Tests / break-tests | break-tests 1,2 redone; call-site mutations done; suite/clippy/mutants pending |
 | 5 | Resource use | pending |
 | 6 | Docs / audit | pending |
 | 7 | Concurrency | pending |
 
 ## Findings
-(none yet)
+### Verified (no finding)
+- **Install invariant.** `current_job` is touched at exactly 4 sites in pool_connection.rs:
+  `login()` (~644, `*current = Some(Arc::new(job))`), `handle_pool_message()` (~1194, same),
+  `reconnect()` (~1057, `= None`), `relogin_as()` (~1125, `= None`). Plus `get_work()` (~655) which
+  only `.clone()`s the Arc out. No `get_mut`/`make_mut`/re-wrap anywhere; no code outside
+  pool_connection.rs touches the field (only `miner.rs` calls `get_work`). `Job: Clone` is used
+  only by the new test. Claim holds.
+- **is_new_job truth table.** `!cached.is_some_and(|c| ptr_eq(c,f))`: None -> !false = true;
+  same Arc -> !true = false; distinct Arc (any content) -> !false = true. All four cases correct.
+  ABA: worker holds `Option<Arc<Job>>`, keeping the cached allocation alive (also across a
+  reconnect's clear), so a freed address can't be reused under it. Correct.
+- **worker_loop read in full (589-895).** Only other comparison is `job.seed_hash != current_key`,
+  a content comparison of the dataset key -- correct as content (the dataset is a function of the
+  seed bytes), not a job-identity check. All `job.job_id`/`job.target`/`job.generation`/`job.blob`
+  reads use the per-iteration fetched Arc. After the fix the cached blob always derives from that
+  same Arc, so blob/target/job_id/generation are now mutually consistent within an iteration --
+  which pre-fix they were not under id reuse. `nonce` never reset on job change (confirmed);
+  `pipeline_ready=false` on a new job discards the old job's in-flight prepare. No missed site.
+- **Empty job_id edge case.** Old: first job with id "" never copied its blob, so the loop sat in the
+  short-blob branch forever, logging a *false* "blob too short (N bytes)" with N = real blob length
+  (it prints `job.blob.len()` while testing the empty cache). New: mines it and submits with
+  job_id "" -- worst case a pool reject. Neither path can produce a wrong hash. Strictly not worse;
+  NET-10 understates how broken the old behaviour was (nit).
+- **Break-test 1 (revert to job_id-only), redone:** 3 passed / 2 failed (`a_reused_job_id...`,
+  `an_identical_reinstall...`). Matches NET-10. Restored, `cmp` + `git diff --quiet` clean.
+- **Break-test 2 (job_id||generation alternative), redone:** 4 passed / 1 failed
+  (`an_identical_reinstall...`). Matches NET-10; design choice is genuinely exercised. Restored clean.
+
+### F1 (minor) -- the call site in worker_loop is guarded by no test; NET-10 overstates its evidence
+All of NET-10's hand break-tests mutate the body of `is_new_job`; none touches `worker_loop`, which
+no test calls (sole caller miner.rs:249). Yet NET-10 calls those three "the integration evidence"
+for the call site. My call-site mutations:
+- A: `current_job = Some(Arc::clone(&job));` -> `current_job = Some(Arc::new((*job).clone()));`
+  (re-wrap; every iteration then looks like a new job -> re-prepare scratchpad every hash, roughly
+  doubling per-hash work; hashes stay correct). **Full suite 200/0/3 + 20 green, clippy -D warnings
+  clean.** Not caught by anything.
+- A-variant: deleting the assignment outright is caught, but only incidentally by `unused_mut`
+  under clippy -D warnings.
+- B: call site reverted to `current_job.as_ref().is_none_or(|c| c.job_id != job.job_id)` (#53
+  restored at the call site, helper intact). Caught only incidentally: clippy's `dead_code` on
+  `is_new_job` in the non-test lib build. A variant that keeps the helper referenced would pass.
+Severity minor: no wrong-hash path (the realistic surviving mutation is a perf regression), and the
+change is small enough to review by eye. But the AUDIT sentence "the three hand break-tests above are
+the integration evidence for it" is inaccurate and should be corrected; also "not mutation-testable
+the same way cargo-mutants can reach" -- cargo-mutants can reach `worker_loop`, its mutants would
+just all be MISSED. Fix options: correct the wording, or extract the job-change block (cache update
++ blob copy) into a testable function.

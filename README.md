@@ -158,8 +158,8 @@ plugged in, with Low Power Mode off:
 
 | | |
 |---|---|
-| Peak hashrate | ~5,010 H/s |
-| Sustained over an hour | ~4,925 H/s |
+| Peak hashrate | ~5,470 H/s |
+| Sustained over 8 hours | ~5,280 H/s |
 | Startup delay | ~45 seconds to build the 2 GB table |
 | On battery, Low Power Mode on | ~3,800 H/s (about 20% slower) |
 

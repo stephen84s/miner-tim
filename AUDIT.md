@@ -8260,3 +8260,41 @@ Checked what comparable solo/small-team open-source CLI projects do for macOS re
 - Whether anyone downloading the artifact actually needs to self-sign — no reports yet, since this is the first release.
 - Real-world Gatekeeper behavior on a fresh, never-run-before Mac for this specific binary — not tested on a clean machine, only on the one it was built on (which already trusts locally-built binaries more loosely).
 - Whether future releases should automate any part of this now that the manual flow has been proven end to end once — `RELEASING.md`'s own open question about CI building the binary (reproducibility, signing an unsigned CI-built binary under the project's name) is unchanged by this entry; this was a manual run of the existing manual process, not a decision to change it.
+
+### DOC-05 (2026-10-05): Refresh README's "How fast is it" headline figures; delete stale committed log
+
+**Request / Goal**
+
+User ran an 8-hour mining session overnight (11 threads, same machine/conditions as `README.md`'s existing "How fast is it" section — plugged in, Low Power Mode off — confirmed explicitly by the user, not assumed) and asked whether the README's hashrate figures needed updating, and whether the previously-committed `LIVE8H_RUN.log` still had value. Agreed to both: update the headline figures with the new, longer-duration measurement, and delete that log.
+
+**Files Changed**
+
+- `LIVE8H_RUN.log`: deleted. Its sole purpose was backing the "found-to-submit latency pre-dates #35/#36" finding that opened issue #40 — that finding is fully written up in this file's NET-06/NET-07 entries and #40 is closed, explained by #44. Precedent: `LIVE8H_RUN_2.log` was deleted the same way on 2026-10-01 once its own finding was settled (see this file's NET-02 entry's note on that). The two other committed live logs, `LIVE6H_TLS_RUN.log` and `LIVE6H_TLS_NEGATIVE.log`, were **not** touched — they back TLS-pinning/certificate-verification claims, a security area this repo treats with more caution about reproducible evidence, and deleting them was never asked for.
+- `README.md`, "How fast is it" table only:
+  - `Peak hashrate`: `~5,010 H/s` → `~5,470 H/s`.
+  - `Sustained over an hour`: `~4,925 H/s` → `Sustained over 8 hours`: `~5,280 H/s`.
+  - The `Startup delay` and `On battery` rows: unchanged, not re-measured.
+  - **The "Leave one core free" paragraph's 11-vs-12-thread comparison numbers (4,925 / 4,960 H/s, and the 15%-rejected / 18%-more-paid-shares figures) were deliberately left untouched.** That paragraph reports a specific, self-consistent, same-session controlled A/B from an earlier measurement, making a point about share-rejection behavior, not raw throughput. This entry's new data is an 11-thread-only, single-session, longer-duration run with no matching fresh 12-thread figure — updating only the 11-thread half of that comparison would mix measurement vintages and misrepresent a controlled experiment as still being controlled. The new figures went into the headline summary table only, which is explicitly about "how fast is it today," not into the comparison paragraph making a different, narrower claim.
+
+**New figures, derived directly from the raw run log** (`LIVE8H_20261005.log`, kept local per this repo's established precedent of not committing live-run logs going forward — not committed as part of this change):
+- Peak: the highest single 1-minute sample observed across the full run, `5,468.1` H/s → rounded to `~5,470`.
+- Sustained: the mean of all 2,886 one-minute samples recorded over the full 8h01m42s run, `5,278.7` H/s → rounded to `~5,280`.
+- Both derived with `grep "H/s" ... | grep -oE '1m:[0-9.]+' | ...` — `awk` for the mean, `sort -n | tail` for the peak — commands and raw output shown to the user before this entry was written, not recomputed differently here.
+- Run conditions: 11 threads (one core deliberately left free, per the user's own confirmed choice for this run — see the "max capacity" thread-count question asked and answered before the run started), native-optimized local build (`make build`, `target-cpu=native`, not the portable `apple-m1` dist build), v0.1.3.
+- Run outcome (not part of the README update, recorded for completeness): 678 found = 678 accepted + 0 rejected + 0 lost + 0 unsent + 0 pending; 12 donation rotations completed without incident; zero errors/warnings/reconnects in the full log.
+
+**Verification Performed**
+
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched; the change is two prose lines in `README.md` and one file deletion).
+- Confirmed `LIVE8H_RUN.log`'s only citations in this file are the ones named above (`grep -n "LIVE8H_RUN.log" AUDIT.md`), all already fully captured in prose, before deleting it — not a blind deletion.
+- Confirmed the two TLS logs were not touched (`git status` after `git rm` shows only `LIVE8H_RUN.log` removed).
+- Re-read the full "How fast is it" section after editing to confirm no other sentence still cited the old `4,925`/`5,010` figures standalone (only the comparison paragraph's own, deliberately-untouched numbers remain, and those are internally consistent with each other, just not with the newly-updated headline table — which is the intended, disclosed state, not an oversight).
+
+**Review**
+
+Not independently reviewed, by explicit instruction ("Don't need opus for this one") and by this repo's own tiering rule — docs-only, no code, no concurrency or silent-failure surface. Matches the precedent already set this session for `NET-07-CLEANUP`, `NET-08-CLEANUP`, `NET-09-CLEANUP`, `NET-10-CLEANUP`, `RESEARCH-02` and `RELEASE-02`, none of which were independently reviewed either.
+
+**Not Established**
+
+- Whether the ~7% gap between this run's 11-thread figure and the previous README figure reflects a real improvement (e.g. from accumulated work since the README was last measured) or ordinary thermal/day-to-day variance — not investigated, since the user confirmed matching conditions and asked for the figures to be updated on that basis, not for a root-cause analysis of the delta.
+- A fresh, same-session 12-thread comparison to go with the new 11-thread figure — not run; the "Leave one core free" paragraph's existing comparison stands as the only current evidence on that specific question.

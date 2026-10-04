@@ -8147,3 +8147,37 @@ Ledger: `REVIEW_PR56.md`, final commit **`1f9a355`** (removed from the branch be
 - **The `worker_loop` call site's identity-sharing behavior has no direct test** (F1 above) — disclosed as a known, accepted gap, with a non-blocking follow-up (extracting the job-change block into its own testable function) named but not pursued in this PR.
 - `jit-macos`/`jit-linux-arm` — pending at review-round-1 time; the other required checks had passed.
 - Whether issue #27's branch (`NET-09`) or this one (`NET-10`) merges first. The ids themselves don't collide either way — the problem if both stay open for a while is an ordering one: `NET-10`'s entry would sit *before* `NET-09`'s in `AUDIT.md` if this merges first, and whichever branch merges second will hit an append conflict in `AUDIT.md` and `tasks/README.md` against the other's already-merged addition. Flagged here, not resolved, since resolving it is a merge-order decision for whoever merges second.
+
+### NET-10-CLEANUP (2026-10-04): Mark NET-10 completed after merge (#53)
+
+**Request / Goal**
+
+NET-10 (#53) merged as `fe5a20f` (PR #56) after one Opus review round. Per this repo's own rule, `tasks/NET-10.md`'s `**Status:**`, its trailing status sentence, `tasks/README.md`'s `(Active)` tag, and `CLAUDE.md`'s "Current task" blurb all still said "Active"/pending after the merge. This entry is the one-line follow-up that fixes that — the fourth `*-CLEANUP` entry in this series (PROC-09, NET-07, NET-08, NET-09, now NET-10).
+
+NET-10's own entry above already named the merge-order conflict this task would hit if #27/NET-09 merged first: it did (`09312a0`, before `fe5a20f`), so landing this branch required rebasing twice — once against `main` with NET-09's entry already appended, and again after `NET-09-CLEANUP` landed in between. Both rebases hit the exact append-ordering conflict NET-10 predicted (`AUDIT.md` and `tasks/README.md`, both resolved by keeping both branches' additions in chronological order, nothing dropped). Confirmed by reading the actual conflict markers at rebase time, not inferred after the fact. GitHub issue #53 auto-closed on this merge (unlike #27, this PR's title used "Fix #53," a recognized closing keyword).
+
+**Files Changed**
+
+- `tasks/NET-10.md`: `**Status:** Active` → `**Status:** Completed`; its trailing sentence → `**Merged** as \`fe5a20f\` (#56). Closes GitHub #53.`
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `NET-10` line.
+- `CLAUDE.md`: "Current task" blurb now points at NET-10.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping.
+
+**Verification Performed**
+
+- Confirmed `fe5a20f` is `origin/main`'s tip's merge commit for PR #56 (`gh pr view 56 --json state,mergeCommit`).
+- Confirmed issue #53 auto-closed (`gh issue view 53 --json state` → `CLOSED`) — no manual close needed, unlike #27.
+- Status-word sweep: `grep -nE 'Active|not yet merged|pending at review time|no PR opened|jit-macos.*pending' tasks/NET-10.md tasks/README.md CLAUDE.md` — two hits, both confirmed false positives (the general house rule sentence, and the JIT compiler's unrelated "Active on aarch64" line).
+- File-level sweep: `grep -rln "NET-10" . --include="*.md"` (excluding `AUDIT.md`) returns exactly the three files this entry touches.
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched).
+
+**Review**
+
+Not independently reviewed — same precedent as the prior four `*-CLEANUP` entries ("No review ledger. Scope too small.").
+
+**Not Established**
+
+Nothing beyond what the NET-10 entry above already lists (#53's own "Not Established" items: the calling-convention risk, the untested call-site identity-sharing behavior, and no live-pool evidence that a pool actually reuses `job_id` values).

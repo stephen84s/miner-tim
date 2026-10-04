@@ -55,4 +55,4 @@ Newest last.
 - **[PROC-11](PROC-11.md)** — Refine the implementation-tier rule: a fully-specified plan can stay at Sonnet even on a concurrency/shared-state diff. *(Completed)*
 - **[NET-08](NET-08.md)** — Close the stale-session-id window via generation tagging (#41). *(Completed)*
 - **[NET-09](NET-09.md)** — Add `read_line`'s missing 1 MiB limit coverage (#27). *(Completed)*
-- **[NET-10](NET-10.md)** — Compare `current_job` by `Arc` identity, not `job_id` string (#53). *(Active)*
+- **[NET-10](NET-10.md)** — Compare `current_job` by `Arc` identity, not `job_id` string (#53). *(Completed)*

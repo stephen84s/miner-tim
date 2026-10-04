@@ -334,6 +334,10 @@ pub struct PoolConnection {
     /// coincidence — keep fairness explicit rather than re-derived from a
     /// passing suite.
     stream: StreamLock<Option<PoolStream>>,
+    /// Installed only as a fresh `Arc::new(parse_job(..))`, in `login()` and
+    /// `handle_pool_message()` -- never mutated or re-wrapped in place.
+    /// `miner::is_new_job` relies on that invariant to detect a new job by
+    /// `Arc` identity rather than by `job_id` or `generation` (#53).
     current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
     request_id: AtomicU64,

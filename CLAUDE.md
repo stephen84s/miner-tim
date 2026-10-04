@@ -427,10 +427,10 @@
 
 ## Current task
 
-**NET-09 — Add `read_line`'s missing 1 MiB limit coverage (#27).**
-Completed, merged as `09312a0` (#55). Reviewed Opus round 1 (no
-blockers/majors, 4 minors + 2 nits fixed — including a stale mutant list the
-review caught and the lead independently reproduced). See [`tasks/NET-09.md`](tasks/NET-09.md).
+**NET-10 — Compare `current_job` by `Arc` identity, not `job_id` string (#53).**
+Completed, merged as `fe5a20f` (#56). Reviewed Opus round 1 (no
+blockers/majors, 2 minors + 2 nits fixed — including one false positive the
+reviewer caught and retracted itself). See [`tasks/NET-10.md`](tasks/NET-10.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

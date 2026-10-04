@@ -7829,3 +7829,76 @@ Whether a future task will actually test this refinement in practice — i.e., w
 **Review**
 
 No review spawned for this entry as of the time this was written. Scope and nature (process refinement, not a code change or a factual claim requiring verification) make review optional rather than mandatory — see NET-07-CLEANUP's precedent. If a review is spawned later, findings will be added below rather than editing this entry in place (per this repo's rule: entries already on `main` are appended to, not edited).
+
+### NET-08 (2026-10-04): Close the stale-session-id window via generation tagging (#41)
+
+**Request / Goal**
+
+Issue #41: `submit_share` reads `session_id` before taking any lock; `login()` writes the new `session_id` only after releasing the stream lock it held across the login round-trip. A share can theoretically be hashed with a stale session id from the old connection.
+
+**Severity correction (established by investigation, breaking the original brief's severity claim).** Investigation determined that `login()` always writes `session_id` *before* installing `current_job`, and `reconnect()`/`relogin_as()` always clear `current_job` *before* clearing the stream — so any share that could carry a stale session id was *also* hashed against a job that's already stale (the old `job_id` was never issued on the brand-new TCP connection a reconnect/relogin opens). This means **no revenue is recovered by this fix** — those shares were always going to be rejected by the pool. Confirmed via xmrig's own source (`Client::submit`, direct precedent: `if (result.clientId != m_rpcId || ...) return -1;` — xmrig refuses stale-session results client-side before sending them). What the fix buys is *accounting accuracy*: today such a share is written to the wire and counted `rejected` (blaming the pool); after this fix it is refused locally and counted `unsent` (a local-lifecycle casualty, the bucket already used for other startup/generation races).
+
+**Design chosen: generation tagging** (issue's "option 2"), not "option 1" (private stream + atomic publish). Two Opus planning passes plus two advisor consultations refined this from the original brief: (1) the generation counter is bumped **only inside `connect()`'s stream-install critical section**, not at the four stream-*clear* sites in `reconnect()`/`relogin_as()` — `write_and_register` already refuses with "Not connected" whenever the stream is `None`, before any generation check, so a bump at a clear site could never change a verdict; (2) `parse_job`'s new `generation` parameter is **mandatory**, not optional/defaulted, so a forgotten stamp at a future job-install site is a **compile error** rather than a silently-refusing value.
+
+**Implementation tier: Opus, not Sonnet — correcting this entry's own first draft.** The `rust-implementer` call for these three commits was dispatched at `model: opus` *before* the user questioned that choice and *before* `PROC-11` existed to refine it (confirmed directly: all three commits carry `Co-Authored-By: Claude Opus 5.5`). The lead let that already-running call finish rather than restart it, then wrote PROC-11 (merged as `121ef4c`) as a forward-looking policy change for *future* calls. This entry's first draft, written by `audit-writer` from a lead brief, incorrectly claimed "NET-08 is the first task to apply PROC-11's refinement" and "Sonnet tier" — `audit-writer` correctly flagged the mismatch against the actual commit trailers rather than silently trusting the brief (see `.claude/agents/_shared-context.md`'s "verify by reading and running" rule), and the lead corrected it here rather than in the agent's output. **NET-08 is the motivating case for PROC-11, not an example of it being applied** — the first real application will be whichever task after this one actually gets implemented at Sonnet under the refined rule.
+
+**Files Changed** (from `git diff main...HEAD --numstat`):
+- `src/miner.rs`: +3 / -2
+- `src/pool_connection.rs`: +312 / -38
+
+**Implementation details** (confirmed independently by the lead reading the actual diff):
+
+- `Job` struct gained `pub generation: u64`.
+- `PoolConnection` gained `generation: AtomicU64`, initialized to `0`.
+- `connect()`'s stream install became a single critical section: `{ let mut guard = self.stream.lock(); *guard = Some(pool_stream); self.generation.fetch_add(1, Ordering::SeqCst); }` — nothing else in `connect()` changed.
+- `parse_job(data, generation)` — generation now mandatory, threaded into the `Job` literal. All callers updated: `login()`'s install site, `handle_pool_message()`'s install site and its separate `is_none()` malformed-job probe (both read `self.generation.load(Ordering::SeqCst)` without the stream lock — safe only by calling convention, documented explicitly in the field's doc comment, not enforced by type system: see "Not Established" below).
+- `submit_share`/`write_and_register` both gained a `job_generation: u64` parameter. The check sits in `write_and_register`, under the stream guard, after the "Not connected" check and before `write_request`: on mismatch, returns `Err("Stale job: hashed on connection generation {job_generation}, current is {current} — the connection was replaced; not sent")` — distinguishable from "Not connected", already counted `unsent` and logged by `submit_share`'s existing error branch, zero new counters.
+- `miner.rs:829` (new line number, `miner.rs:828` pre-change per the hunk header): `submit_share` call gained `job.generation` as a fourth argument.
+- Doc comments updated: `miner.rs`'s `get_unsent_shares` now names stale-generation as a cause of unsent shares (also corrected a stale claim about poisoned locks, from #44); `unsent_shares` field and `write_and_register`'s doc comments updated accordingly.
+- Not touched: `send_request()`, `reconnect()`/`relogin_as()`, the "What this does NOT close" block (still accurate).
+
+**Tests: 13 existing rewritten + 4 new deterministic tests** (no timing races — generation bump is synchronous/lock-protected):
+
+The brief states 13 existing `submit_share` test calls rewritten through a `submit_current(conn, job_id, nonce, result)` helper — verified by the lead that none of the 13 call sites has a reconnect/relogin between setup and submit. Four new tests: `a_share_from_the_current_generation_is_still_written`, `a_share_from_a_replaced_connection_is_refused_not_sent`, `a_share_in_the_connect_to_login_window_is_refused`, `a_job_notification_is_stamped_with_the_current_generation`. All deterministic, requiring no timing assertions.
+
+**Break-tests: five mutations, all reverted cleanly** (confirmed via `git diff` yourself — the lead did this before this entry was written):
+
+- Remove the `!=` check entirely → two stale-generation tests fail on `expect_err` receiving `Ok(())`. **The actual fix line is caught.**
+- Force the check to always refuse (`if true`) → 13 tests fail (not just the new current-generation test) — the pre-existing rotation/relogin group, confirming existing coverage would catch a wildly-wrong generation check.
+- Remove the `fetch_add` in `connect()` → tests asserting "connect bumps generation" fail on those preconditions.
+- Zero out the `handle_pool_message` stamp → the push-notification test fails.
+- Zero out the `login()` stamp → the current-generation test fails on its generation-equality assertion.
+
+**Pre-existing rotation/relogin group re-run** (all 12 named tests passed unchanged, confirmed by actually running them):
+
+`rotation_may_proceed_truth_table`, `rotation_settled_defers_while_a_submission_is_in_flight`, `a_stale_wait_timestamp_for_a_different_beneficiary_is_discarded`, `a_reconnect_discards_a_same_beneficiary_stale_wait_timestamp`, `a_stale_entry_does_not_survive_a_two_value_ring_round_trip`, `a_share_outstanding_at_a_rotation_is_answered_before_the_relogin`, `a_rotation_waits_at_most_the_settle_limit`, `a_blocked_submitter_at_rotation_is_sent_and_answered_on_the_old_session`, `a_failed_relogin_login_leaves_no_stream_behind`, `a_submit_reply_read_as_the_login_reply_fails_the_relogin`, `a_successful_relogin_restores_the_poll_interval`, `a_failed_donation_relogin_reconnects_through_the_real_receiver_loop`.
+
+**Mutation testing** (exit 3, not clean): `./scripts/mutants.sh 'write_and_register|submit_share|PoolConnection::connect( |$)|PoolConnection::login( |$)|handle_pool_message' 'pool_connection::'` — **36 tested, 20 caught, 5 missed, 10 unviable, 1 timeout.** State this plainly. The fix line (`!=`→`==` in `write_and_register`) **is caught**. The timeout is `connect -> Ok(())` in pre-existing test `submit_share_registers_the_same_id_it_writes_to_the_wire` (mutated `connect()` to no-op, listener never receives a connection, `server.join()` hangs) — a scope artifact of widening the mutants regex to actually cover `connect()`, a known pre-existing test-harness gap, not a new defect in this PR (new tests use detached servers with bounded timeouts and cannot hang this way). The 5 misses are pre-existing NET-06 gaps in millisecond-conversion math (`* 1000.0` mutations), confirmed not touched by `git diff main...HEAD -U0`. `fetch_add` and stamp assignments generate no mutants themselves — covered *only* by the five hand break-tests above, not counted here.
+
+**Verification** (re-run by the lead independently after a rebase onto post-PROC-11 `main`):
+
+- `rtk proxy cargo build` clean.
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings` clean.
+- `rtk proxy cargo test --release --locked`: **195 lib passed / 0 failed / 3 ignored, 20 bin passed** (191 baseline + 4 new tests).
+- `rtk proxy cargo audit` clean, 99 crates, no new dependency.
+- `git status` clean on the worktree.
+
+**Commits** (3, on `fix/issue-41-stale-generation`, rebased onto `main` at `121ef4c`, **not yet pushed**):
+
+- `e8e7ca6` — #41 plumbing: stamp jobs with the stream generation (no check yet).
+- `4520841` — #41 tests: a share from a replaced connection must be refused unsent.
+- `8c3574b` — Fix #41: refuse a share from a replaced connection, count it unsent.
+
+**Review**
+
+Not yet performed — state plainly. Planned tier: **Opus** (`pr-reviewer` with `model: opus`) — per PROC-11, review stays Opus for concurrency/shared-state diffs unconditionally, regardless of how detailed the implementation plan was.
+
+**Sealed prediction** (written before any review is spawned): the lead expects review to find at most minor documentation/wording issues and possibly question the calling-convention argument for the unlocked stamp reads (asking for robustness or accepting it as documented) — and does **not** expect any defect in the generation-comparison logic itself, since it was independently verified against the real diff and re-run by the lead before this entry was written. A live run is expected to show zero `Stale job` refusals in practice, which should be stated in the PR as expected and not misread as "the fix did nothing" (see severity correction above).
+
+**Not Established**
+
+- Independent review findings — not yet run.
+- **Named, accepted risk: calling-convention soundness of unlocked generation reads.** The `generation` field is written only inside `connect()`, which only runs on the main thread at startup or on the receiver thread via `reconnect()`/`relogin_as()`; `login()` only runs immediately after `connect()` on the same thread; `handle_pool_message()` only runs on the receiver thread or a test thread with no receiver. So whichever thread reads `generation` to stamp a job is the only thread that could have just bumped it — no concurrent writer exists to race the read. **This breaks if `connect`/`reconnect`/`relogin_as` is ever called from a second thread** — the field's doc comment documents this calling convention explicitly, making it a named, accepted risk rather than a hidden assumption. Type system does not enforce it.
+- **Live acceptance run not yet run.** Unlike NET-07 (which aimed to show revenue recovery), this fix recovers no revenue, so a live run's job here is to catch **false refusals** — a wrongly-stamped job refusing legitimate shares, which would be worse than the bug being fixed. Acceptance criteria: run at least 2 hours so donation rotations occur (confirm with `grep -c 'Donation: mining to'`, expect ~3 per 100-minute cycle); `Share accepted` should keep appearing after every `Login successful`; `grep -c 'Stale job'` expected ~0, any line must fall within seconds of a `Login successful`/`Reconnected` — a line minutes away indicates a stamping bug and blocks merge; the share ledger must balance exactly (found = accepted + rejected + lost + unsent + pending + withheld).
+- CI on the pushed branch — not yet run/observed (branch not yet pushed).
+

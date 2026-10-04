@@ -427,9 +427,9 @@
 
 ## Current task
 
-**PROC-11 — Refine the implementation-tier rule: a fully-specified plan can
-stay at Sonnet even on a concurrency/shared-state diff; review stays Opus
-regardless.** Completed. See [`tasks/PROC-11.md`](tasks/PROC-11.md).
+**NET-08 — Close the stale-session-id window via generation tagging (#41).**
+Active — plumbing complete, 3 commits, 195/0/3 tests, review (Opus) and live
+run (2+ hours) outstanding. See [`tasks/NET-08.md`](tasks/NET-08.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

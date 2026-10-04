@@ -8038,3 +8038,38 @@ Ledger: `REVIEW_PR55.md`, final commit **990ac4d** (removed from the branch befo
 - **Only `PoolStream::Plain` (TCP) tested**: the helper function connects via plain TCP. TLS path is not exercised by these tests. TLS uses the same `read_line` function, so TLS connections are covered by logic (not by explicit test), and the tests' TCP-only nature is a known limitation, not a defect — in this repo's own testing precedent (see `NET-06` and `NET-07` entries for similar Socket-driven test comments).
 - **CI**: `jit-macos` was still pending at review-round-1 time; the other five checks had passed. This PR touches no JIT-path code, so a pass is expected but wasn't yet observed at review time.
 - **Read syscall cost**: each of the two 1 MiB tests does roughly 1,048,577 one-byte `read()` syscalls (the function reads one byte at a time, not in allocated chunks — an earlier draft of this line's heading, "one-byte allocations scale linearly," mischaracterized this as an allocation cost rather than a syscall-count cost; corrected here). This costs a few real seconds each (~1-2 sec observed), which is expected and acceptable per the brief — not a bug, not a regression, the cost of boundary testing at this scale.
+
+### NET-09-CLEANUP (2026-10-04): Mark NET-09 completed after merge (#27)
+
+**Request / Goal**
+
+NET-09 (#27) merged as `09312a0` (PR #55) after one Opus review round — notable because that round found the issue's own "three mutants survive" framing had gone stale (two of the three were already caught incidentally by later, unrelated PRs), independently reproduced by the lead against unmodified `main` before accepting the correction. Per this repo's own rule, `tasks/NET-09.md`'s `**Status:**`, its body's trailing status sentence, `tasks/README.md`'s `(Active)` tag, and `CLAUDE.md`'s "Current task" blurb all still said "Active"/pending after the merge. This entry is the one-line follow-up that fixes that, same shape as PROC-09-CLEANUP/NET-07-CLEANUP/NET-08-CLEANUP.
+
+Also closed GitHub issue #27 manually in this same pass — the merge commit's title referenced `(#27)` in parentheses, which GitHub does not treat as a closing keyword (only `fixes`/`closes`/`resolves` do), so it did not auto-close the way #44, #41 and #53's issues did.
+
+**Files Changed**
+
+- `tasks/NET-09.md`: `**Status:** Active` → `**Status:** Completed`; its trailing sentence → `**Merged** as \`09312a0\` (#55). Closes GitHub #27.`
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `NET-09` line.
+- `CLAUDE.md`: "Current task" blurb now points at NET-09 (it was still NET-08, since both implementers were deliberately told not to touch it while #27/NET-09 and #53/NET-10 ran concurrently).
+- GitHub issue #27: closed manually with a comment summarizing the actual fix and the stale-mutant-list correction.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping and issue hygiene.
+
+**Verification Performed**
+
+- Confirmed `09312a0` is `origin/main`'s tip's merge commit for PR #55 (`gh pr view 55 --json state,mergeCommit`).
+- Confirmed issue #27 was still `OPEN` after the merge (`gh issue view 27 --json state`), explaining why it needed a manual close rather than being found already closed.
+- Status-word sweep (not a task-ID sweep, per the lesson NET-07-CLEANUP paid for twice): `grep -nE 'Active|not yet merged|pending at review time|no PR opened' tasks/NET-09.md tasks/README.md CLAUDE.md` — two hits, both confirmed false positives (the general house rule sentence naming "Active" generically, and the JIT compiler's unrelated "Active on aarch64" line).
+- File-level sweep: `grep -rln "NET-09" . --include="*.md"` (excluding `AUDIT.md`) returns exactly the three files this entry touches — no fourth location missed.
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched).
+
+**Review**
+
+Not independently reviewed — same precedent as the prior three `*-CLEANUP` entries ("No review ledger. Scope too small.").
+
+**Not Established**
+
+Nothing beyond what the NET-09 entry above already lists.

@@ -1,6 +1,6 @@
 # NET-09: Add `read_line`'s missing 1 MiB limit coverage (#27)
 
-**Status:** Active
+**Status:** Completed
 
 **Summary**
 
@@ -14,4 +14,4 @@ Issue #27: `read_line` function in `src/pool_connection.rs` enforces a 1 MiB len
 - **Mutation testing**: 7 mutants tested, 7 caught, exit 0 on both narrow and broad filters.
 - **Test count**: 195 (main) → 198 (+3 new tests).
 
-PR #55 reviewed (Opus, round 1): no blockers/majors, 4 minors + 2 nits, all fixed. Not yet merged — `jit-macos` was still pending at review time.
+PR #55 reviewed (Opus, round 1): no blockers/majors, 4 minors + 2 nits, all fixed. **Merged** as `09312a0` (#55). Closes GitHub #27.

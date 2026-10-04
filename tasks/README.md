@@ -57,3 +57,4 @@ Newest last.
 - **[NET-09](NET-09.md)** — Add `read_line`'s missing 1 MiB limit coverage (#27). *(Completed)*
 - **[NET-10](NET-10.md)** — Compare `current_job` by `Arc` identity, not `job_id` string (#53). *(Completed)*
 - **[RESEARCH-02](RESEARCH-02.md)** — Recheck: RandomX v2 / FCMP++ still blocked on Monero mainnet. *(Completed)*
+- **[RELEASE-02](RELEASE-02.md)** — Cut and publish v0.1.3, the first-ever GitHub Release. *(Completed)*

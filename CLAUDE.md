@@ -427,12 +427,12 @@
 
 ## Current task
 
-**RESEARCH-02 — Recheck: RandomX v2 / FCMP++ still blocked on Monero mainnet.**
-Completed. Confirmed against primary sources (live chain API, the actual
-hardfork table, today's GitHub milestone at 70%) that nothing has changed
-since 2026-08-15 — RX2-01's gated port correctly stays dormant. News claims of
-a May 2026 activation are not corroborated and are flagged as the second
-instance of this specific misreporting pattern. See [`tasks/RESEARCH-02.md`](tasks/RESEARCH-02.md).
+**RELEASE-02 — Cut and publish v0.1.3, the first-ever GitHub Release.**
+Completed. Tagged `v0.1.3` at `990a9b1`, `make dist` built the apple-m1
+tarball, `release.yml` fired and created the draft (first time this workflow
+has ever actually run), assets uploaded, published with notes. Decided not
+to sign the binary, matching standard practice among comparable open-source
+CLI projects. See [`tasks/RELEASE-02.md`](tasks/RELEASE-02.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

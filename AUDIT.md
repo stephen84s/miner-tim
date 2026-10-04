@@ -7914,3 +7914,36 @@ Ledger: `REVIEW_PR52.md`, final commit **`6a73f5b`** (earlier: `46e3508`, `9a8bb
 - GitHub #53 (job-change detection by `job_id` only, not generation/blob identity) — filed, not fixed; pre-existing, unrelated, non-blocking.
 - Whether the calling-convention and critical-section invariants hold over a much longer window, or under a pool with different donation/rotation timing than this one 2-hour run against `monerohash.com`.
 
+
+### NET-08-CLEANUP (2026-10-04): Mark NET-08 completed after merge (#41)
+
+**Request / Goal**
+
+NET-08 (#41) merged as `68acb27` (PR #52) after one Opus review round and a live 2-hour acceptance run (see the NET-08 entry above for both). Per this repo's own rule ("do not leave a task 'Active' once it is complete"), `tasks/NET-08.md`'s `**Status:**`, `tasks/README.md`'s `(Active)` tag, and `CLAUDE.md`'s "Current task" blurb all still said "Active"/"Mergeable" after the merge. This entry is the one-line follow-up that fixes that — the same shape as PROC-09-CLEANUP and NET-07-CLEANUP above.
+
+**Files Changed**
+
+- `tasks/NET-08.md`: `**Status:** Active` → `**Status:** Completed`; its body paragraph's trailing `**Mergeable.**` → `**Merged** as \`68acb27\` (#52).` — the second edit matters as much as the first: NET-07-CLEANUP's review found the identical miss (a stale status word buried in body prose, not just the `**Status:**` line), and this entry's own verification deliberately used a status-word grep rather than a task-ID grep to catch it this time (see below).
+- `tasks/README.md`: `*(Active)*` → `*(Completed)*` on the `NET-08` line.
+- `CLAUDE.md`: "Current task" blurb — "Mergeable ... Merging next" → "Completed, merged as `68acb27` (#52)".
+- `AUDIT.md`'s own NET-08 entry is **not** edited in place — it is already on `main`, so this append is the correction rather than touching that entry directly.
+
+**Behaviour / Content Changes**
+
+None functional. Pure status bookkeeping.
+
+**Verification Performed**
+
+- Confirmed `68acb27` is `origin/main`'s tip's merge commit for PR #52 (`gh pr view 52 --json state,mergeCommit`).
+- Confirmed issue #41 auto-closed by the merge (`gh issue view 41 --json state` → `CLOSED`).
+- **Applied NET-07-CLEANUP's own lesson rather than repeating its mistake**: ran `grep -nE 'Active|Mergeable\.|Merging next|not yet opened|not yet pushed' tasks/NET-08.md tasks/README.md CLAUDE.md` (a status-word sweep, not a task-ID sweep) before claiming done. Four hits, all confirmed false positives on inspection (two unrelated review-table rows for PRs #28/#30, the general house rule sentence that itself says "do not leave a task Active", and the JIT compiler's unrelated "Active on aarch64" line) — none a stale NET-08 claim.
+- `grep -rln "NET-08" . --include="*.md"` (file-level sweep, excluding `AUDIT.md` itself) returns exactly `CLAUDE.md`, `tasks/README.md`, `tasks/NET-08.md` and `tasks/PROC-11.md` — the fourth is PROC-11's own historical narrative ("During #41/NET-08 planning, the lead invoked...") describing the motivating case, not a status claim about NET-08, so it needs no edit.
+- `rtk proxy cargo clippy --release --all-targets -- -D warnings`: clean (no Rust source touched).
+
+**Review**
+
+Not independently reviewed — same precedent as PROC-09-CLEANUP and NET-07-CLEANUP ("No review ledger. Scope too small"), applied identically here.
+
+**Not Established**
+
+Nothing beyond what the NET-08 entry above already lists (#53 remains open; the calling-convention/critical-section invariants' long-window behavior remains unverified).

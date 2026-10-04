@@ -376,7 +376,8 @@ impl Miner {
     }
 
     /// Shares `submit_share` was asked to send but never wrote at all — no
-    /// stream, a poisoned lock, or a write error. Distinct from
+    /// stream, a write error, or a job from a replaced connection (stale
+    /// generation, #41). Distinct from
     /// `get_lost_shares`, which the pool at least received (#32).
     pub fn get_unsent_shares(&self) -> u32 {
         self.pool_connection
@@ -825,10 +826,18 @@ fn worker_loop(
 
             if verified {
                 let submit_start = Instant::now();
-                let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex);
+                let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex, job.generation);
                 let submit_call_elapsed = submit_start.elapsed();
                 if let Err(e) = submit_result {
-                    log::error!("Failed to submit share: {}", e);
+                    // A stale-generation refusal (#41) is an expected local-lifecycle
+                    // event, already logged by `submit_share` itself — error-level here
+                    // would misrepresent it as a surprise. Every other failure (no
+                    // stream, a write error) still warrants it.
+                    if e.starts_with("Stale job") {
+                        log::warn!("Share not submitted (stale generation): {}", e);
+                    } else {
+                        log::error!("Failed to submit share: {}", e);
+                    }
                 }
                 log::info!(
                     "Worker {} share timing: job_id={} nonce={} verdict={:?} \

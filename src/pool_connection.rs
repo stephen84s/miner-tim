@@ -196,6 +196,11 @@ pub struct Job {
     pub target: Vec<u8>,
     pub job_id: String,
     pub seed_hash: Vec<u8>,
+    /// The stream generation this job was issued on: the value of
+    /// `PoolConnection::generation` when it was installed as `current_job`.
+    /// A share hashed against it is refused unsent if the connection has
+    /// been replaced since (#41).
+    pub generation: u64,
 }
 
 #[derive(Serialize)]
@@ -332,6 +337,33 @@ pub struct PoolConnection {
     current_job: Mutex<Option<Arc<Job>>>,
     connected: AtomicBool,
     request_id: AtomicU64,
+    /// Which TCP connection `stream` currently holds: bumped by one each time
+    /// `connect()` installs a new stream, and **only there**, inside the
+    /// same `stream` critical section as the install (#41). Every `Job` is
+    /// stamped with this value when it is installed as `current_job`;
+    /// `write_and_register` compares a share's job stamp with it **under the
+    /// stream guard** and refuses a mismatch unsent, because that job was
+    /// issued on a connection that no longer exists.
+    ///
+    /// The two stamp sites (`login()` and `handle_pool_message()`) read it
+    /// *without* the stream lock. That is sound only because of a calling
+    /// convention, not anything the type system enforces: `connect()` is
+    /// only ever called (a) from the main thread at startup, before the
+    /// receiver thread exists, or (b) from the receiver thread itself, via
+    /// `reconnect()`/`relogin_as()`. `login()` is only ever called right
+    /// after `connect()` on the same thread, and `handle_pool_message()`
+    /// only runs on the receiver thread (or a test thread with no receiver
+    /// running). So the thread reading `generation` to stamp a job is the
+    /// only thread that could have just bumped it; there is no concurrent
+    /// writer to race the read. If `connect`/`reconnect`/`relogin_as` is
+    /// ever called from a second thread, this breaks: a job could be
+    /// stamped with a generation from a connection it was not issued on.
+    ///
+    /// Not bumped where `reconnect()`/`relogin_as()` clear the stream to
+    /// `None`: with no stream, `write_and_register` already refuses with
+    /// "Not connected" before the generation check runs, so a bump there
+    /// could never change a verdict.
+    generation: AtomicU64,
     address: Mutex<String>,
     /// The wallet currently logged in with — may be the user's or, during a
     /// donation slice, the author's or XMRig's address.
@@ -360,8 +392,9 @@ pub struct PoolConnection {
     /// said no, so counting it as a rejection would blame the pool for a
     /// local reconnect.
     lost_shares: AtomicU32,
-    /// Shares `submit_share` was asked to send but never wrote — no stream
-    /// or a write error. Distinct from `lost_shares` because
+    /// Shares `submit_share` was asked to send but never wrote — no stream,
+    /// a write error, or a job from a replaced connection (stale generation,
+    /// #41). Distinct from `lost_shares` because
     /// the pool never saw these at all: issue #17 established that a
     /// never-written share must not be counted "lost" — its test
     /// `a_submission_blocked_on_the_stream_registers_nothing_until_it_writes`
@@ -450,6 +483,7 @@ impl PoolConnection {
             current_job: Mutex::new(None),
             connected: AtomicBool::new(false),
             request_id: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
             address: Mutex::new(String::new()),
             wallet: Mutex::new(String::new()),
             user_wallet: Mutex::new(String::new()),
@@ -533,7 +567,15 @@ impl PoolConnection {
             *addr = address.to_string();
         }
 
-        *self.stream.lock() = Some(pool_stream);
+        // Install and bump in one critical section (#41): a submit that sees
+        // the new stream also sees the new generation, so a share hashed on
+        // a job from the previous connection is refused rather than written
+        // here.
+        {
+            let mut guard = self.stream.lock();
+            *guard = Some(pool_stream);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
 
         self.connected.store(true, Ordering::SeqCst);
         Ok(())
@@ -586,7 +628,7 @@ impl PoolConnection {
             }
             log::info!("Login successful, session id: {}", id);
             if let Some(job_data) = result.get("job")
-                && let Some(job) = parse_job(job_data)
+                && let Some(job) = parse_job(job_data, self.generation.load(Ordering::SeqCst))
             {
                 let diff = target_to_difficulty(&job.target);
                 log::info!(
@@ -614,6 +656,7 @@ impl PoolConnection {
         job_id: &str,
         nonce: &str,
         result: &str,
+        job_generation: u64,
     ) -> Result<(), String> {
         // Counted from entry so a submit parked on the stream lock (not yet
         // registered in `pending_shares`) is still visible to the rotation
@@ -636,7 +679,7 @@ impl PoolConnection {
         let rpc_id = self.next_request_id();
 
         let (lock_wait_ms, write_ms) =
-            match self.write_and_register(rpc_id, params, job_id, nonce) {
+            match self.write_and_register(rpc_id, params, job_id, nonce, job_generation) {
                 Ok(timings) => timings,
                 Err(e) => {
                     self.unsent_shares.fetch_add(1, Ordering::Relaxed);
@@ -682,16 +725,22 @@ impl PoolConnection {
     // insert nothing) or wholly after (the entry was written to the old
     // stream, where no reply will ever be read, so "lost" is correct).
     //
-    // What this does NOT close: the caller (`submit_share`) reads `sid`
-    // before taking any lock, and `connect()` installs the new stream
-    // before `login()` updates the session id. A submit that takes the
-    // lock in that window goes out on the new connection with the old
-    // session id. It IS registered, so the pool's answer is paired and
-    // counted — normally as a rejection, which is the pool's real verdict
-    // on it. The miscounting is closed; the stale id is not (review round
-    // 3, R3-1) — still open in general. What IS closed (#37): a submit-reply
-    // that `login()` mistakenly reads as the login reply (no session id in
-    // it) now fails the login outright instead of silently "succeeding"
+    // The stale session id (review round 3, R3-1; #41): the caller
+    // (`submit_share`) reads `sid` before taking any lock, and `connect()`
+    // installs the new stream before `login()` updates the session id, so a
+    // submit that takes the lock in that window still *builds* a request
+    // carrying the old session id. It is no longer *written*: a share in
+    // that window was hashed on a job from the replaced connection
+    // (`reconnect()`/`relogin_as()` clear `current_job` before the stream,
+    // and `login()` sets the session id before installing the new job), so
+    // its job's generation stamp no longer matches `self.generation`. It is
+    // refused here, under the stream lock, before `write_request`, and
+    // `submit_share` counts it `unsent` — a local-lifecycle casualty, not a
+    // pool rejection. No revenue is recovered: the pool would have refused
+    // a job id this connection never issued. What is fixed is the
+    // accounting, which used to blame the pool. Also closed (#37): a
+    // submit-reply that `login()` mistakenly reads as the login reply (no
+    // session id in it) now fails the login outright instead of silently "succeeding"
     // with the old id left in place, and a failed `relogin_as` now clears
     // the stream so the receiver loop reconnects cleanly rather than being
     // left on a stale, unauthenticated connection.
@@ -719,6 +768,7 @@ impl PoolConnection {
         params: Value,
         job_id: &str,
         nonce: &str,
+        job_generation: u64,
     ) -> Result<(f64, f64), String> {
         let lock_requested = Instant::now();
         let mut stream_guard = self.stream.lock();
@@ -726,6 +776,16 @@ impl PoolConnection {
         let stream = stream_guard
             .as_mut()
             .ok_or_else(|| "Not connected".to_string())?;
+        // Checked under the stream guard, so it is against the stream this
+        // write would actually go to: `connect()` installs a stream and bumps
+        // `generation` in one critical section (#41).
+        let current = self.generation.load(Ordering::SeqCst);
+        if job_generation != current {
+            return Err(format!(
+                "Stale job: hashed on connection generation {job_generation}, current is \
+                 {current} — the connection was replaced; not sent"
+            ));
+        }
         write_request(stream, rpc_id, "submit", params)?;
         let write_done = Instant::now();
         if let Ok(mut pending) = self.pending_shares.lock() {
@@ -760,7 +820,9 @@ impl PoolConnection {
     }
 
     /// Submissions `submit_share` was asked to send but never wrote at all —
-    /// distinct from `lost_shares`, which the pool at least received (#32).
+    /// no stream, a write error, or a job from a replaced connection (stale
+    /// generation, #41). Distinct from `lost_shares`, which the pool at
+    /// least received (#32).
     pub fn get_unsent_shares(&self) -> u32 {
         self.unsent_shares.load(Ordering::Relaxed)
     }
@@ -1104,7 +1166,7 @@ impl PoolConnection {
         // diagnostic at all, and stale work is exactly what looks like a JIT
         // fault from the share-reject side. Log it once per occurrence.
         if let Some(job_data) = job_params
-            && parse_job(job_data).is_none()
+            && parse_job(job_data, self.generation.load(Ordering::SeqCst)).is_none()
         {
             log::warn!(
                 "Pool sent a job that could not be parsed; keeping the previous job. \
@@ -1116,7 +1178,7 @@ impl PoolConnection {
         }
 
         if let Some(job_data) = job_params
-            && let Some(job) = parse_job(job_data)
+            && let Some(job) = parse_job(job_data, self.generation.load(Ordering::SeqCst))
         {
             let diff = target_to_difficulty(&job.target);
             log::info!(
@@ -1485,7 +1547,9 @@ fn take_complete_lines(pending: &mut Vec<u8>) -> Result<Vec<String>, usize> {
     Ok(lines)
 }
 
-fn parse_job(data: &Value) -> Option<Job> {
+/// `generation` is mandatory, not defaulted: a forgotten stamp must be a
+/// compile error, not a value that silently refuses every share (#41).
+fn parse_job(data: &Value, generation: u64) -> Option<Job> {
     let blob_hex = data.get("blob")?.as_str()?;
     let target_hex = data.get("target")?.as_str()?;
     let job_id = data.get("job_id")?.as_str()?.to_string();
@@ -1500,6 +1564,7 @@ fn parse_job(data: &Value) -> Option<Job> {
         target,
         job_id,
         seed_hash,
+        generation,
     })
 }
 
@@ -1526,6 +1591,19 @@ pub fn target_to_difficulty(target: &[u8]) -> u64 {
 #[cfg(test)]
 mod tls_tests {
     use super::*;
+
+    /// Submit a share stamped with the connection's *current* generation —
+    /// what a worker's share carries when no connection has been replaced
+    /// since its job was installed (#41). Tests exercising the stale case
+    /// call `submit_share` directly with an explicit, older generation.
+    fn submit_current(
+        conn: &PoolConnection,
+        job_id: &str,
+        nonce: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        conn.submit_share(job_id, nonce, result, conn.generation.load(Ordering::SeqCst))
+    }
 
     /// The real monerohash.com:9999 fingerprint, read 2026-09-13. Used as a
     /// realistic shape rather than as a live expectation — the pool rotates via
@@ -1554,7 +1632,7 @@ mod tls_tests {
             "blob": "0f0f", "target": "ffffffff",
             "job_id": "j1", "seed_hash": "abcd",
         });
-        assert!(parse_job(&good).is_some(), "the control case must parse");
+        assert!(parse_job(&good, 0).is_some(), "the control case must parse");
 
         for field in ["blob", "target", "seed_hash"] {
             // Even length, so it reaches the slicer: this is the panic case.
@@ -1566,7 +1644,7 @@ mod tls_tests {
                 "fixture must be even-length or it only tests the length check"
             );
             assert!(
-                parse_job(&hostile).is_none(),
+                parse_job(&hostile, 0).is_none(),
                 "a non-ASCII {field} must be declined, not panic"
             );
 
@@ -1575,13 +1653,13 @@ mod tls_tests {
             let mut signed = good.clone();
             signed[field] = serde_json::json!("+f+f");
             assert!(
-                parse_job(&signed).is_none(),
+                parse_job(&signed, 0).is_none(),
                 "a signed {field} is not hex and must be declined"
             );
 
             let mut odd = good.clone();
             odd[field] = serde_json::json!("abc");
-            assert!(parse_job(&odd).is_none(), "an odd-length {field} must be declined");
+            assert!(parse_job(&odd, 0).is_none(), "an odd-length {field} must be declined");
         }
     }
 
@@ -1734,7 +1812,7 @@ mod tls_tests {
         thread::sleep(Duration::from_millis(200));
 
         let start = Instant::now();
-        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let result = submit_current(&conn, "j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
 
         stop.store(true, Ordering::Relaxed);
@@ -1833,7 +1911,7 @@ mod tls_tests {
 
             let submitter_conn = Arc::clone(&conn);
             let submitter = thread::spawn(move || {
-                submitter_conn.submit_share("j", &format!("{:08x}", i), &"a".repeat(64))
+                submit_current(&submitter_conn, "j", &format!("{:08x}", i), &"a".repeat(64))
             });
 
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1928,7 +2006,7 @@ mod tls_tests {
         thread::sleep(Duration::from_millis(200));
 
         let start = Instant::now();
-        let result = conn.submit_share("j", "deadbeef", &"a".repeat(64));
+        let result = submit_current(&conn, "j", "deadbeef", &"a".repeat(64));
         let elapsed = start.elapsed();
         eprintln!("control_a_chatty_receiver_lets_a_submit_through: submit_share took {:?}", elapsed);
         result.expect("submit_share must succeed against a connected stream");
@@ -2647,7 +2725,7 @@ mod tls_tests {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
         conn.connect(&addr).expect("connect to the local listener");
 
-        conn.submit_share("job-wire", "deadbeef", &"a".repeat(64))
+        submit_current(&conn, "job-wire", "deadbeef", &"a".repeat(64))
             .expect("submit_share must succeed against a connected stream");
 
         let line = server.join().expect("server thread panicked");
@@ -2712,8 +2790,7 @@ mod tls_tests {
         // to.
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
 
-        let err = conn
-            .submit_share("job-fail", "cafebabe", &"b".repeat(64))
+        let err = submit_current(&conn, "job-fail", "cafebabe", &"b".repeat(64))
             .expect_err("submit_share must fail when there is no stream to write to");
         assert!(
             err.contains("Not connected"),
@@ -2760,7 +2837,7 @@ mod tls_tests {
         let pending_guard = conn.pending_shares.lock().unwrap();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
 
         read_rx
             .recv_timeout(Duration::from_secs(5))
@@ -2814,7 +2891,7 @@ mod tls_tests {
         let mut guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
         thread::sleep(Duration::from_millis(200));
 
         assert!(
@@ -2876,8 +2953,7 @@ mod tls_tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("shutdown write half");
 
-        let err = conn
-            .submit_share("j1", "00000000", &"c".repeat(64))
+        let err = submit_current(&conn, "j1", "00000000", &"c".repeat(64))
             .expect_err("a write to a write-shutdown socket must fail");
         assert!(
             err.contains("Write failed") || err.contains("Flush failed"),
@@ -3140,7 +3216,7 @@ mod tls_tests {
         });
 
         let conn = new_rotation_conn(&addr);
-        conn.submit_share("j1", "00000000", &"a".repeat(64))
+        submit_current(&conn, "j1", "00000000", &"a".repeat(64))
             .expect("queue the share before the receiver loop even starts");
 
         let worker = conn.clone();
@@ -3218,7 +3294,7 @@ mod tls_tests {
 
         let conn = new_rotation_conn(&addr);
         conn.rotation_settle_ms.store(300, Ordering::SeqCst);
-        conn.submit_share("j1", "00000000", &"a".repeat(64))
+        submit_current(&conn, "j1", "00000000", &"a".repeat(64))
             .expect("queue the share before the receiver loop even starts");
 
         let worker = conn.clone();
@@ -3257,7 +3333,7 @@ mod tls_tests {
         let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter =
-            thread::spawn(move || submitter_conn.submit_share("j1", "00000000", "ff"));
+            thread::spawn(move || submit_current(&submitter_conn, "j1", "00000000", "ff"));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while conn.submits_in_flight.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
@@ -3283,7 +3359,7 @@ mod tls_tests {
     #[test]
     fn in_flight_is_released_on_every_error_path() {
         let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
-        let err = conn.submit_share("j1", "00000000", "ff");
+        let err = submit_current(&conn, "j1", "00000000", "ff");
         assert!(err.is_err());
         assert_eq!(conn.submits_in_flight.load(Ordering::SeqCst), 0);
     }
@@ -3356,7 +3432,7 @@ mod tls_tests {
         let guard = conn.stream.lock();
         let submitter_conn = Arc::clone(&conn);
         let submitter = thread::spawn(move || {
-            submitter_conn.submit_share("j1", "00000000", &"a".repeat(64))
+            submit_current(&submitter_conn, "j1", "00000000", &"a".repeat(64))
         });
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3775,5 +3851,203 @@ mod tls_tests {
         );
 
         let _ = server.join();
+    }
+
+    // --- GitHub #41: a share from a replaced connection is refused unsent ---
+
+    /// A pool for the #41 tests. Accepts up to `max_conns` connections. Every
+    /// line a connection receives is forwarded as `(connection index, line)`,
+    /// in order. A `login` line is answered with a session id and a job that
+    /// will actually parse (it carries `seed_hash`), whose job id is
+    /// `job-<connection index>`. Nothing else is ever answered.
+    fn generation_test_pool(
+        max_conns: usize,
+    ) -> (String, std::sync::mpsc::Receiver<(usize, Value)>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
+        thread::spawn(move || {
+            for (n, incoming) in listener.incoming().take(max_conns).enumerate() {
+                let Ok(sock) = incoming else { return };
+                sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let mut writer = sock.try_clone().expect("clone for write");
+                    let mut reader = BufReader::new(sock);
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {}
+                        }
+                        let v: Value =
+                            serde_json::from_str(line.trim()).expect("valid JSON-RPC");
+                        if v["method"] == "login" {
+                            let reply = serde_json::json!({
+                                "id": v["id"], "jsonrpc": "2.0", "error": null,
+                                "result": {
+                                    "id": format!("sess-{n}"), "status": "OK",
+                                    "job": {
+                                        "blob": "0f0f", "target": "ffffffff",
+                                        "job_id": format!("job-{n}"), "seed_hash": "abcd",
+                                    },
+                                },
+                            });
+                            let _ = writer.write_all(format!("{reply}\n").as_bytes());
+                            let _ = writer.flush();
+                        }
+                        if tx.send((n, v)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, rx)
+    }
+
+    /// The next non-login line any connection received, with its connection
+    /// index. Panics if none arrives within 5s.
+    fn next_submit(rx: &std::sync::mpsc::Receiver<(usize, Value)>) -> (usize, Value) {
+        loop {
+            let (n, v) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a submit line should have reached the pool");
+            if v["method"] != "login" {
+                return (n, v);
+            }
+        }
+    }
+
+    /// The other direction of #41's risk, and the more expensive one: a job
+    /// installed by a successful login must carry the generation of the
+    /// connection it arrived on, or every share hashed on it would be
+    /// refused as stale. Generation is 2 here (connect, then relogin's
+    /// connect), so a stamp hard-wired to 0 or 1 cannot match by accident.
+    #[test]
+    fn a_share_from_the_current_generation_is_still_written() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        conn.relogin_as("4test").expect("relogin (accept 1)");
+
+        assert_eq!(conn.generation.load(Ordering::SeqCst), 2, "two connects, two bumps");
+        let job = conn.get_work().expect("the login must install a job");
+        assert_eq!(job.job_id, "job-1");
+        assert_eq!(
+            job.generation,
+            conn.generation.load(Ordering::SeqCst),
+            "the job login() installed must be stamped with the live generation"
+        );
+
+        conn.submit_share(&job.job_id, "0000abcd", &"a".repeat(64), job.generation)
+            .expect("a share on the current generation must be sent");
+
+        let (n, v) = next_submit(&rx);
+        assert_eq!(n, 1, "the share must go out on the current connection");
+        assert_eq!(v["method"], "submit");
+        assert_eq!(v["params"]["job_id"], "job-1");
+        assert_eq!(v["params"]["nonce"], "0000abcd");
+        assert_eq!(conn.get_pending_shares(), 1);
+        assert_eq!(conn.get_unsent_shares(), 0);
+    }
+
+    /// A share hashed on a job from a connection that has since been
+    /// replaced is refused under the stream lock, counted unsent, and never
+    /// written. Without the check it would go out on the *new* connection
+    /// carrying a job id that connection never issued, and be counted as a
+    /// pool rejection.
+    #[test]
+    fn a_share_from_a_replaced_connection_is_refused_not_sent() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        conn.login("4user").expect("login on connection 0");
+        let old = conn.get_work().expect("login installs job-0");
+        assert_eq!(old.job_id, "job-0");
+
+        conn.relogin_as("4test").expect("relogin (accept 1)");
+        let current = conn.get_work().expect("relogin installs job-1");
+        assert_eq!(current.job_id, "job-1");
+        assert_ne!(old.generation, current.generation);
+
+        let err = conn
+            .submit_share(&old.job_id, "11111111", &"a".repeat(64), old.generation)
+            .expect_err("a share from the replaced connection must be refused");
+        assert!(err.contains("Stale job"), "must be the stale-generation refusal: {err}");
+        assert!(!err.contains("Not connected"), "must not be the no-stream refusal: {err}");
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_pending_shares(), 0);
+        assert_eq!(conn.get_lost_shares(), 0);
+        assert_eq!(conn.get_rejected_shares(), 0);
+
+        conn.submit_share(&current.job_id, "22222222", &"a".repeat(64), current.generation)
+            .expect("the current job's share must be sent");
+        let (n, v) = next_submit(&rx);
+        assert_eq!(
+            (n, v["params"]["job_id"].as_str(), v["params"]["nonce"].as_str()),
+            (1, Some("job-1"), Some("22222222")),
+            "the first line after the relogin must be the current share — the stale \
+             one must never have been written"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing else may reach the pool"
+        );
+        assert_eq!(conn.get_pending_shares(), 1);
+        assert_eq!(conn.get_unsent_shares(), 1);
+    }
+
+    /// The literal #41 window: `connect()` has installed a new stream but
+    /// `login()` has not yet replaced the session id. A share hashed before
+    /// the connect must be refused, not written on the new stream with the
+    /// old session id.
+    #[test]
+    fn a_share_in_the_connect_to_login_window_is_refused() {
+        let (addr, rx) = generation_test_pool(2);
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.connect(&addr).expect("connect (accept 0)");
+        let before = conn.generation.load(Ordering::SeqCst);
+        conn.connect(&addr).expect("connect again, no login (accept 1)");
+        assert_eq!(conn.generation.load(Ordering::SeqCst), before + 1);
+
+        let err = conn
+            .submit_share("stale-job", "33333333", &"a".repeat(64), before)
+            .expect_err("a share from before the connect must be refused");
+        assert!(err.contains("Stale job"), "must be the stale-generation refusal: {err}");
+        assert_eq!(conn.get_unsent_shares(), 1);
+        assert_eq!(conn.get_pending_shares(), 0);
+
+        submit_current(&conn, "current-job", "44444444", &"a".repeat(64))
+            .expect("a share at the current generation must be sent");
+        let (n, v) = next_submit(&rx);
+        assert_eq!(
+            (n, v["params"]["job_id"].as_str(), v["params"]["nonce"].as_str()),
+            (1, Some("current-job"), Some("44444444")),
+            "the first line on the new connection must be the current share"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing else may reach the pool"
+        );
+        assert_eq!(conn.get_pending_shares(), 1);
+    }
+
+    /// Guards the `handle_pool_message` stamp site specifically: a pushed
+    /// job must carry the live generation. A distinctive value (7) means a
+    /// stamp that is missing, zeroed, or off by one cannot pass.
+    #[test]
+    fn a_job_notification_is_stamped_with_the_current_generation() {
+        let conn = PoolConnection::new(crate::donate::DEFAULT_DONATE_LEVEL);
+        conn.generation.store(7, Ordering::SeqCst);
+        conn.handle_pool_message(
+            r#"{"jsonrpc":"2.0","method":"job","params":{"blob":"0f0f","target":"ffffffff","job_id":"pushed","seed_hash":"abcd"}}"#,
+        );
+        let job = conn.get_work().expect("the pushed job must be installed");
+        assert_eq!(job.job_id, "pushed");
+        assert_eq!(job.generation, 7);
     }
 }

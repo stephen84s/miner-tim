@@ -1,6 +1,6 @@
 # NET-09: Add `read_line`'s missing 1 MiB limit coverage (#27)
 
-**Status:** Completed
+**Status:** Active
 
 **Summary**
 
@@ -14,4 +14,4 @@ Issue #27: `read_line` function in `src/pool_connection.rs` enforces a 1 MiB len
 - **Mutation testing**: 7 mutants tested, 7 caught, exit 0 on both narrow and broad filters.
 - **Test count**: 195 (main) → 198 (+3 new tests).
 
-**Merged** as `db8e344` (on `test/issue-27-read-line-limit`).
+Implemented on `test/issue-27-read-line-limit` (`db8e344`); not yet merged — no PR opened, no review run yet.

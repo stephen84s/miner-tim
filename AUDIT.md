@@ -7951,6 +7951,8 @@ Nothing beyond what the NET-08 entry above already lists (#53 remains open; the 
 
 ### NET-09 (2026-10-04): Add `read_line`'s missing 1 MiB limit coverage (#27)
 
+**Status: Active.** Implemented and locally verified (break-tests and mutation testing both clean); no PR has been opened yet, so no review and no CI have run. **The implementer's own first draft of this entry, and of `tasks/NET-09.md`, incorrectly said "Merged"/"Completed" — corrected here and in that file.** Nothing has merged.
+
 **Request / Goal**
 
 Issue #27: `read_line` function in `src/pool_connection.rs` (line 1481) enforces a 1 MiB length guard (`MAX_LINE_BYTES`, constant at line 291) with zero test coverage. Mutation testing found three mutants survive on `main`: `>`→`>=`, `>`→`<`, and `<<`→`>>` in the guard/constant. Add test coverage to kill all three.
@@ -8016,9 +8018,10 @@ All 7 caught. The critical mutants — the three from the issue (mutants 1, 6, 7
   - `test pool_connection::tls_tests::read_line_refuses_one_byte_over_the_limit_and_names_it ... ok`
 - `git status`: clean on worktree.
 
-**Commits** (1, on `test/issue-27-read-line-limit`):
+**Commits** (2, on `test/issue-27-read-line-limit`, **correcting an undercount in this entry's own first draft** — it listed only the test commit, omitting the very commit that added this entry):
 
 - `db8e344` — `test(#27): add read_line's missing 1 MiB limit coverage` — the three tests and the helper function.
+- `5ef0b02` — this `AUDIT.md`/`tasks/` write-up.
 
 **Not Established**
 

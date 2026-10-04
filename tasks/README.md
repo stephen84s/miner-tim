@@ -56,3 +56,4 @@ Newest last.
 - **[NET-08](NET-08.md)** — Close the stale-session-id window via generation tagging (#41). *(Completed)*
 - **[NET-09](NET-09.md)** — Add `read_line`'s missing 1 MiB limit coverage (#27). *(Completed)*
 - **[NET-10](NET-10.md)** — Compare `current_job` by `Arc` identity, not `job_id` string (#53). *(Completed)*
+- **[RESEARCH-02](RESEARCH-02.md)** — Recheck: RandomX v2 / FCMP++ still blocked on Monero mainnet. *(Completed)*

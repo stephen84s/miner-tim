@@ -31,3 +31,15 @@ Scope: no jit/, benches/, workflows, Makefile, scripts/, .cargo touched -> all m
   ever chained after connect() on the same thread. Holds.
 
 ### Findings
+
+**F1 (minor, audit accuracy) — mutants timeout attributed to the wrong test; conclusion holds.**
+NET-08 says the `connect -> Ok(())` timeout is `submit_share_registers_the_same_id_it_writes_to_the_wire`
+hanging in `server.join()`. Reproduced the mutant by hand (release, `pool_connection::` filter):
+that test FAILS promptly — its `submit_current(..).expect(..)` panics on "Not connected" before
+`server.join()` is reached. The tests that actually hang (>60 s, killed) are
+`a_failed_relogin_login_leaves_no_stream_behind`, `a_submit_is_not_held_hostage_by_a_quiet_receiver`,
+`a_submit_is_not_held_hostage_under_full_cpu_load`, `a_submit_reply_read_as_the_login_reply_fails_the_relogin`
+(e.g. the first: relogin_as fails, asserts pass, then `server.join()` on a listener that never accepts).
+Same mutant applied to a `git archive origin/main` snapshot: the identical four hang, the named test fails.
+So "pre-existing harness property, not a new defect" is CORRECT; the named test and therefore the
+stated evidence are wrong. None of the 4 new tests hangs. Fix the entry's attribution.

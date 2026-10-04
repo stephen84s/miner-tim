@@ -4,7 +4,7 @@
 
 **Summary**
 
-Issue #27: `read_line` function in `src/pool_connection.rs` enforces a 1 MiB length guard with zero test coverage. Mutation testing identified three uncovered mutants: `>`→`>=`, `>`→`<`, and `<<`→`>>` at the guard and constant. Added three test functions to the `tls_tests` module, covering the exact boundary, a line at the limit, and rejection of over-limit lines. The constant-pinning test ensures the `<<`→`>>` mutation is caught (the two boundary tests would otherwise shrink with the mutation and pass). All three mutants are now killed.
+Issue #27: `read_line` function in `src/pool_connection.rs` enforces a 1 MiB length guard with zero dedicated test coverage. The issue named three mutants as surviving on `main` (`>`→`>=`, `>`→`<`, `<<`→`>>`), but that framing had gone stale by the time this PR was written — later, unrelated PRs (#23, #37/#41) already closed the `<` and `<<` gaps incidentally through their own tests. Review round 1 caught this and the lead independently reproduced it against unmodified `main`: the real survivors were only `>`→`==` and `>`→`>=`. Added three test functions to the `tls_tests` module — a line at the limit, rejection of over-limit lines, and a literal pin on `MAX_LINE_BYTES`'s value — which between them close both real gaps and pin the constant independently of any incidental coverage.
 
 **Key Points**
 
@@ -14,4 +14,4 @@ Issue #27: `read_line` function in `src/pool_connection.rs` enforces a 1 MiB len
 - **Mutation testing**: 7 mutants tested, 7 caught, exit 0 on both narrow and broad filters.
 - **Test count**: 195 (main) → 198 (+3 new tests).
 
-Implemented on `test/issue-27-read-line-limit` (`db8e344`); not yet merged — no PR opened, no review run yet.
+PR #55 reviewed (Opus, round 1): no blockers/majors, 4 minors + 2 nits, all fixed. Not yet merged — `jit-macos` was still pending at review time.

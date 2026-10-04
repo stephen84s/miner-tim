@@ -2321,11 +2321,20 @@ mod tls_tests {
         (PoolStream::Plain(tcp), server)
     }
 
-    /// Pins the number itself. The ONLY test that kills `1 << 20` -> `1 >> 20`:
-    /// the boundary tests below size their fixtures from `MAX_LINE_BYTES`, which
-    /// lives in this same file, so under that mutation they compile against 0 and
-    /// still pass. A literal in test code is not mutated. Do not "simplify" this
-    /// away or rewrite it in terms of the constant.
+    /// Pins the number itself, independently of the constant it's checking.
+    /// The two boundary tests below size their fixtures from `MAX_LINE_BYTES`,
+    /// which lives in this same file, so under a `1 << 20` -> `1 >> 20`
+    /// mutation they'd compile against 0 and still pass -- they cannot catch
+    /// that mutation themselves. (The login and receiver-loop tests elsewhere
+    /// in this file also happen to kill it today, by calling `read_line`
+    /// incidentally through `send_request` -- but that's a side effect of
+    /// their own purpose, not something to rely on; this is the one test
+    /// whose actual job is pinning this value.) A literal in test code is not
+    /// mutated. Do not "simplify" this away or rewrite it in terms of the
+    /// constant. Also implicitly covers a line split across multiple reads
+    /// assembling correctly: `read_line` reads one byte per syscall, so every
+    /// multi-byte line here, including this 1 MiB one, is already split
+    /// across many reads by construction.
     #[test]
     fn read_line_limit_is_exactly_one_mebibyte() {
         assert_eq!(MAX_LINE_BYTES, 1_048_576);

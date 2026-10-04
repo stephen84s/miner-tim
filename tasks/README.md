@@ -54,3 +54,4 @@ Newest last.
 - **[NET-07](NET-07.md)** — Fix #44: make the `stream` lock fair (`parking_lot::FairMutex`). *(Completed)*
 - **[PROC-11](PROC-11.md)** — Refine the implementation-tier rule: a fully-specified plan can stay at Sonnet even on a concurrency/shared-state diff. *(Completed)*
 - **[NET-08](NET-08.md)** — Close the stale-session-id window via generation tagging (#41). *(Completed)*
+- **[NET-09](NET-09.md)** — Add `read_line`'s missing 1 MiB limit coverage (#27). *(Active)*

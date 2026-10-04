@@ -7947,3 +7947,94 @@ Not independently reviewed — same precedent as PROC-09-CLEANUP and NET-07-CLEA
 **Not Established**
 
 Nothing beyond what the NET-08 entry above already lists (#53 remains open; the calling-convention/critical-section invariants' long-window behavior remains unverified).
+
+
+### NET-09 (2026-10-04): Add `read_line`'s missing 1 MiB limit coverage (#27)
+
+**Status: Active.** Implemented, reviewed (Opus, `pr-reviewer`, round 1 — see below), and locally verified. Not mergeable yet: round 1 found 4 minors (all fixed in this pass) and 2 nits, and `jit-macos` was still pending at review time. **The implementer's own first draft of this entry, and of `tasks/NET-09.md`, incorrectly said "Merged"/"Completed" — corrected in a prior pass. Nothing has merged.**
+
+**Request / Goal**
+
+Issue #27: `read_line` function in `src/pool_connection.rs` (line 1481) enforces a 1 MiB length guard (`MAX_LINE_BYTES`, constant at line 291) with zero test coverage. The issue, filed earlier, named three mutants as surviving on `main`: `>`→`>=`, `>`→`<`, and `<<`→`>>` in the guard/constant. **That framing had gone stale by the time this PR was written, and review round 1 caught it (F2): re-running the issue's own corrected filter (`read_line|^src/pool_connection\.rs:[0-9]+:[0-9]+: replace << with >>$`, test filter `pool_connection::`) against unmodified `main` at `e7f17c7` — independently reproduced by the lead, not just the reviewer — shows only `>`→`==` and `>`→`>=` actually survive.** `<` and `<<` are already caught incidentally by existing tests: the receiver/flood tests from #23 (merged as `88c5d40`) and the login tests from #37/#41 (merged as `b4501f0`/`68acb27`), all of which call `read_line` through `send_request` without meaning to test it specifically. The issue was accurate when filed; later, unrelated PRs happened to close two of its three gaps as a side effect. This PR's actual job is closing the two gaps still open (`==`, `>=`) and pinning the numeric value independently of any incidental coverage — not "the three named in the issue," which this entry's first draft repeated without rechecking.
+
+**Files Changed** (from `git diff main...HEAD --numstat`, taken across all commits on this branch — review round 1's F4 found the first draft omitted the doc files entirely):
+- `AUDIT.md`: +82 / -0
+- `src/pool_connection.rs`: +55 / -0
+- `tasks/NET-09.md`: +17 / -0
+- `tasks/README.md`: +1 / -0
+
+**Implementation details**
+
+Three test functions added to the `tls_tests` module in `src/pool_connection.rs`:
+
+1. **`read_line_limit_is_exactly_one_mebibyte`**: Asserts the constant itself equals `1_048_576` (bytes — an earlier draft of this line said "bits/bytes", review round 1 F6). This test pins the numeric value itself with a literal, which cannot be mutated by `cargo mutants`. The two boundary-test fixtures size themselves from the same constant, so under a `<<`→`>>` mutation they'd compile and pass against an effectively-zeroed limit, making them insensitive to the guard's actual value — this is the one test whose job is pinning the value independently. (Several existing tests elsewhere in the file also happen to kill this mutation today, incidentally, through `send_request` — see the "Request/Goal" correction above; that is not a reason to drop this test, since it is the only one that pins the value on purpose rather than by accident.) **Load-bearing: do not rewrite in terms of the constant.**
+
+2. **`read_line_accepts_a_line_of_exactly_the_limit`**: Constructs a payload of exactly `MAX_LINE_BYTES` bytes plus a newline, serves it via TCP to the reader, and asserts the line is returned successfully with the correct length. Kills the `>`→`>=` and `>`→`==` mutations (both of which would refuse a line exactly at the boundary) — these are the two mutants review round 1 confirmed actually survive on unmodified `main`.
+
+3. **`read_line_refuses_one_byte_over_the_limit_and_names_it`**: Constructs a payload of `MAX_LINE_BYTES + 1` bytes plus a newline, and asserts that `read_line` returns an `Err` with the exact expected error text. **Correction (review round 1, F3): this test does NOT kill `>`→`<`** — an earlier draft of this line claimed it did, directly contradicting break-test 2 below in the same entry, which correctly shows the error text is identical under that mutation and the test stays green. What it actually kills: the guard-block-deleted mutants (`read_line` replaced wholesale with `Ok(String::new())`/`Ok("xyzzy".into())`), since those return `Ok` instead of the expected `Err`.
+
+All three use a helper function **`plain_stream_serving`**: spawns a TCP listener on 127.0.0.1:0, launches a server thread that accepts one connection and writes the payload, then connects a client with a 30-second read timeout (backstop for a broken build that hangs). Returns both the connected `PoolStream` and the server `JoinHandle` so the test can clean up.
+
+**Tests**
+
+Three new tests added:
+- `read_line_limit_is_exactly_one_mebibyte`: Asserts `assert_eq!(MAX_LINE_BYTES, 1_048_576)`.
+- `read_line_accepts_a_line_of_exactly_the_limit`: Passes (PASS).
+- `read_line_refuses_one_byte_over_the_limit_and_names_it`: Passes (PASS).
+
+Full suite baseline on `main`: 195 lib, 0 failed, 3 ignored; 20 bin. This PR adds 3 tests: **198 lib, 0 failed, 3 ignored; 20 bin** (verified by `rtk proxy cargo test --release --locked`).
+
+**Break-tests: four mutations, all reverted cleanly** (confirmed via `cmp` and `git diff --quiet` after each). **Review round 1 redid these against the FULL release suite, not just the three `read_line_` tests, and the results below are corrected to match that broader run (F1):**
+
+1. **Line 1492, `>`→`>=`**: `read_line_accepts_a_line_of_exactly_the_limit` FAILED as expected. `read_line_limit_is_exactly_one_mebibyte` stays GREEN. `read_line_refuses_one_byte_over_the_limit_and_names_it` stays GREEN. (Under the full suite, only this one test fails — confirmed by review round 1.)
+
+2. **Line 1492, `>`→`<`**: `read_line_accepts_a_line_of_exactly_the_limit` FAILED as expected (refused at byte 1 instead). `read_line_limit_is_exactly_one_mebibyte` stays GREEN. `read_line_refuses_one_byte_over_the_limit_and_names_it` stays GREEN (the error text is identical; the mutation changes *which* lines get refused, not the error message, so the error-text equality assertion never sees a difference). **Under the full suite, 6 more existing tests also fail** (5 login/generation tests and the flood test, which all exercise `read_line` via `send_request` and happen to be sensitive to this mutation too) — confirmed by review round 1; not part of this PR's own coverage claim, noted for completeness.
+
+3. **Line 291, `1 << 20`→`1 >> 20`**: under the `read_line_`-prefixed test filter, ONLY `read_line_limit_is_exactly_one_mebibyte` FAILED (assertion failed: left 0, right 1048576); both boundary tests stay GREEN, which is the literal pin test's whole point — without it, this mutation would pass silently against *this PR's own tests* (their fixtures shrink with the constant). **Under the full suite, review round 1 found 9 more existing tests also fail** against this same mutation (the login and receiver tests mentioned in the "Request/Goal" correction above) — so the claim "ONLY" in an earlier draft of this line was true only under the narrow filter and should have said so; corrected here.
+
+4. **Lines 1492-1496, delete the guard block entirely**: `read_line_refuses_one_byte_over_the_limit_and_names_it` FAILED as expected (now returns `Ok` instead of `Err`). `read_line_limit_is_exactly_one_mebibyte` stays GREEN. `read_line_accepts_a_line_of_exactly_the_limit` stays GREEN.
+
+**Mutation testing**
+
+`./scripts/mutants.sh 'read_line|^src/pool_connection\.rs:[0-9]+:[0-9]+: replace << with >>$' 'pool_connection::tls_tests::read_line_'`: **7 mutants tested, 7 caught, exit 0.**
+
+`./scripts/mutants.sh 'read_line|^src/pool_connection\.rs:[0-9]+:[0-9]+: replace << with >>$' 'pool_connection::'`: **7 mutants tested, 7 caught, exit 0.** (Broader filter; 2 min 0 sec runtime.)
+
+Mutation list (from `cargo mutants -F ... --list`):
+1. src/pool_connection.rs:291:33: replace << with >>
+2. src/pool_connection.rs:1482:5: replace read_line -> Result<String, String> with Ok(String::new())
+3. src/pool_connection.rs:1482:5: replace read_line -> Result<String, String> with Ok("xyzzy".into())
+4. src/pool_connection.rs:1488:28: replace == with != in read_line
+5. src/pool_connection.rs:1492:31: replace > with == in read_line
+6. src/pool_connection.rs:1492:31: replace > with < in read_line
+7. src/pool_connection.rs:1492:31: replace > with >= in read_line
+
+All 7 caught. **Correction (review round 1, F2): the mutants this PR actually needed to rescue are 5 and 7 (`>`→`==` and `>`→`>=`)**, confirmed by both the reviewer and independently by the lead re-running the issue's corrected filter against unmodified `main` — not "mutants 1, 6, 7" (`<<`, `<`, `>=`) as an earlier draft of this line claimed, repeating the issue's now-stale framing. Mutants 1 (`<<`) and 6 (`<`) were already caught on `main` before this PR, incidentally, by the login and receiver tests named above.
+
+**Verification** (re-run by implementer):
+
+- `rtk proxy cargo build`: clean.
+- `rtk proxy cargo clippy --all-targets -- -D warnings`: clean.
+- `rtk proxy cargo test --release --locked`: **198 lib passed / 0 failed / 3 ignored, 20 bin passed** (195 baseline + 3 new tests). Full output shows all three new tests pass:
+  - `test pool_connection::tls_tests::read_line_limit_is_exactly_one_mebibyte ... ok`
+  - `test pool_connection::tls_tests::read_line_accepts_a_line_of_exactly_the_limit ... ok`
+  - `test pool_connection::tls_tests::read_line_refuses_one_byte_over_the_limit_and_names_it ... ok`
+- `git status`: clean on worktree.
+
+**Commits** (4, on `test/issue-27-read-line-limit`; PR **#55** open — **correcting a second undercount** (review round 1, F4): the first draft's "correction" still only listed 2, having fixed the omission once but not re-checked after further commits landed):
+
+- `db8e344` — `test(#27): add read_line's missing 1 MiB limit coverage` — the three tests and the helper function.
+- `5ef0b02` — the first draft of this `AUDIT.md`/`tasks/` write-up.
+- `c27be82` — corrected that first draft's premature "Completed"/"Merged" claims and its own commit undercount.
+- (this commit) — review round 1's F1-F6 fixes, folded into this entry in place since it is not yet on `main`.
+
+**Review (Opus, `pr-reviewer`, round 1): not mergeable as pushed — 0 blockers, 0 majors, 4 minors, 2 nits, all fixed in this same pass.** The tests themselves are correct and do kill the mutants that actually survive on `main`; every finding was about the written record overclaiming or self-contradicting, not about the code. **F2 was the significant one**: the "three mutants survive on main" framing had gone stale (see the "Request/Goal" correction above) — independently re-verified by the lead, not just accepted from the reviewer. F1: the pin test's "ONLY" claim was true only under the narrow `read_line_` filter; corrected to say so (fixed in both this entry and the test's own doc comment in `src/`). F3: a self-contradiction already present in this same entry (item 3 claimed killing `>`→`<`; break-test 2 two paragraphs later correctly showed it doesn't) — fixed. F4: stale "no PR"/"not yet opened" language, an undercounted commit list, and an incomplete Files Changed list — all fixed. F5 (nit): the split-across-reads case is inherently covered by `read_line`'s one-byte-at-a-time reads; now stated explicitly in the test's doc comment. F6 (nit): "bits/bytes" → "bytes", and the PR body's "twelve orders of magnitude" (inherited from the issue) is wrong for a `1 << 20` → `1 >> 20` mutation specifically, since that shift lands on exactly 0, not a merely-smaller number — fixed in the PR body. **False positives: 0.**
+
+Ledger: `REVIEW_PR55.md`, final commit **990ac4d** (removed from the branch before merge, per this repo's rule; retrievable via `git show 990ac4d:REVIEW_PR55.md` as long as the branch ref survives).
+
+**Not Established**
+
+- **No production-code behavior change**: confirmed by reading the diff and the issue brief — only test additions, no changes to `read_line` implementation or visibility.
+- **Only `PoolStream::Plain` (TCP) tested**: the helper function connects via plain TCP. TLS path is not exercised by these tests. TLS uses the same `read_line` function, so TLS connections are covered by logic (not by explicit test), and the tests' TCP-only nature is a known limitation, not a defect — in this repo's own testing precedent (see `NET-06` and `NET-07` entries for similar Socket-driven test comments).
+- **CI**: `jit-macos` was still pending at review-round-1 time; the other five checks had passed. This PR touches no JIT-path code, so a pass is expected but wasn't yet observed at review time.
+- **Read syscall cost**: each of the two 1 MiB tests does roughly 1,048,577 one-byte `read()` syscalls (the function reads one byte at a time, not in allocated chunks — an earlier draft of this line's heading, "one-byte allocations scale linearly," mischaracterized this as an allocation cost rather than a syscall-count cost; corrected here). This costs a few real seconds each (~1-2 sec observed), which is expected and acceptable per the brief — not a bug, not a regression, the cost of boundary testing at this scale.

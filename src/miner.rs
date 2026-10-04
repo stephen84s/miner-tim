@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::hex::hex_encode;
-use crate::pool_connection::{target_to_difficulty, PoolConnection};
+use crate::pool_connection::{target_to_difficulty, Job, PoolConnection};
 use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
 
@@ -569,6 +569,23 @@ pub(crate) fn classify_share(
     }
 }
 
+/// Whether `fetched` is a different job object from the one the worker's
+/// cached blob was copied from (#53).
+///
+/// Identity, not content: `PoolConnection` installs every job as a fresh
+/// `Arc::new(..)` (`login`, `handle_pool_message`) and never mutates or
+/// re-wraps one, so a new `Arc` is exactly "the pool sent a job". Comparing
+/// `job_id` alone missed a pool reusing an id, either across connections
+/// (the fresh `Job` then carries the new `generation`, so #41's stale check
+/// cannot see the stale blob) or within one. A byte-identical re-send costs
+/// one scratchpad prepare and nothing else; the nonce is not reset.
+///
+/// Takes `&Arc<Job>`, not a pointer value: the caller must keep the cached
+/// `Arc` alive, or a freed job's address could be reused (ABA).
+fn is_new_job(cached: Option<&Arc<Job>>, fetched: &Arc<Job>) -> bool {
+    !cached.is_some_and(|c| Arc::ptr_eq(c, fetched))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn worker_loop(
     thread_id: u32,
@@ -586,7 +603,7 @@ fn worker_loop(
 
     let mut vm: Option<RandomXVm> = None;
     let mut current_key: Vec<u8> = Vec::new();
-    let mut current_job_id = String::new();
+    let mut current_job: Option<Arc<Job>> = None;
     let mut job_blob_current: Vec<u8> = Vec::new();
     let mut job_blob_next: Vec<u8> = Vec::new();
     let mut warned_short_blob_for_job = false;
@@ -618,8 +635,8 @@ fn worker_loop(
             }
         };
 
-        if job.job_id != current_job_id {
-            current_job_id = job.job_id.clone();
+        if is_new_job(current_job.as_ref(), &job) {
+            current_job = Some(Arc::clone(&job));
             pipeline_ready = false;
             warned_short_blob_for_job = false;
 
@@ -1144,5 +1161,72 @@ mod verify_tests {
         m.set_verify_shares(false);
         assert!(!m.native_loop);
         assert!(!m.verify_shares);
+    }
+}
+
+#[cfg(test)]
+mod job_change_tests {
+    use super::*;
+
+    /// A fixed small job, distinguishable by `job_id` and `generation` only
+    /// -- content (blob/target/seed_hash) is irrelevant to `is_new_job`,
+    /// which never reads them.
+    fn job(id: &str, generation: u64) -> Arc<Job> {
+        Arc::new(Job {
+            blob: vec![0u8; 76],
+            target: vec![0u8; 4],
+            job_id: id.to_string(),
+            seed_hash: vec![0u8; 32],
+            generation,
+        })
+    }
+
+    /// The normal mid-job case: the same `Arc` the worker already cached its
+    /// blob from must not be treated as a new job.
+    #[test]
+    fn the_same_job_object_is_not_a_new_job() {
+        let a = job("1", 1);
+        assert!(!is_new_job(Some(&a), &a.clone()));
+    }
+
+    /// #53 itself: a pool reusing a job_id across connections. The fresh
+    /// `Job` then carries a new generation, but comparing by job_id alone
+    /// would miss it.
+    #[test]
+    fn a_reused_job_id_from_a_new_connection_is_a_new_job() {
+        let a = job("1", 1);
+        let b = job("1", 2);
+        assert!(is_new_job(Some(&a), &b));
+    }
+
+    /// The pre-existing, already-correct case: a different job_id is always
+    /// a new job, regardless of generation.
+    #[test]
+    fn a_different_job_id_is_a_new_job() {
+        let a = job("1", 1);
+        let b = job("2", 1);
+        assert!(is_new_job(Some(&a), &b));
+
+        let c = job("1", 1);
+        let d = job("2", 2);
+        assert!(is_new_job(Some(&c), &d));
+    }
+
+    /// The case that tells identity-based comparison apart from a
+    /// job_id+generation-based one: byte-identical content reinstalled as a
+    /// new `Arc` (same job_id, same generation) must still count as a new
+    /// job. A generation-only alternative would miss this.
+    #[test]
+    fn an_identical_reinstall_is_a_new_job() {
+        let a = job("1", 1);
+        let b = Arc::new((*a).clone());
+        assert!(is_new_job(Some(&a), &b));
+    }
+
+    /// No cached job (worker just started) must always count as new.
+    #[test]
+    fn no_cached_job_means_a_new_job() {
+        let a = job("1", 1);
+        assert!(is_new_job(None, &a));
     }
 }

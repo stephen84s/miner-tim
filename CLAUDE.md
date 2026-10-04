@@ -427,10 +427,10 @@
 
 ## Current task
 
-**NET-08 — Close the stale-session-id window via generation tagging (#41).**
-Completed, merged as `68acb27` (#52). Reviewed Opus round 1 (no
-blockers/majors); live 2h run confirmed zero false refusals across 3 donation
-rotations, ledger balanced 170/170. See [`tasks/NET-08.md`](tasks/NET-08.md).
+**NET-09 — Add `read_line`'s missing 1 MiB limit coverage (#27).**
+Completed, merged as `09312a0` (#55). Reviewed Opus round 1 (no
+blockers/majors, 4 minors + 2 nits fixed — including a stale mutant list the
+review caught and the lead independently reproduced). See [`tasks/NET-09.md`](tasks/NET-09.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::hex::hex_encode;
-use crate::pool_connection::{target_to_difficulty, PoolConnection};
+use crate::pool_connection::{target_to_difficulty, Job, PoolConnection};
 use crate::randomx::dataset::RandomXDataset;
 use crate::randomx::vm::RandomXVm;
 
@@ -569,6 +569,18 @@ pub(crate) fn classify_share(
     }
 }
 
+/// Whether `fetched` is a different job from the one the worker's cached
+/// blob was copied from (#53).
+///
+/// Intermediate step: this still compares by `job_id` string, the same
+/// semantics `worker_loop` used before this refactor — only the storage
+/// (`Option<Arc<Job>>` instead of a bare `String`) has changed so far. The
+/// identity-based comparison (`Arc::ptr_eq`) that actually fixes #53 lands in
+/// a later commit, once this plumbing is proven behavior-preserving.
+fn is_new_job(cached: Option<&Arc<Job>>, fetched: &Arc<Job>) -> bool {
+    cached.is_none_or(|c| c.job_id != fetched.job_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn worker_loop(
     thread_id: u32,
@@ -586,7 +598,7 @@ fn worker_loop(
 
     let mut vm: Option<RandomXVm> = None;
     let mut current_key: Vec<u8> = Vec::new();
-    let mut current_job_id = String::new();
+    let mut current_job: Option<Arc<Job>> = None;
     let mut job_blob_current: Vec<u8> = Vec::new();
     let mut job_blob_next: Vec<u8> = Vec::new();
     let mut warned_short_blob_for_job = false;
@@ -618,8 +630,8 @@ fn worker_loop(
             }
         };
 
-        if job.job_id != current_job_id {
-            current_job_id = job.job_id.clone();
+        if is_new_job(current_job.as_ref(), &job) {
+            current_job = Some(Arc::clone(&job));
             pipeline_ready = false;
             warned_short_blob_for_job = false;
 

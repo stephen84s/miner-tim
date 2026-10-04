@@ -569,16 +569,21 @@ pub(crate) fn classify_share(
     }
 }
 
-/// Whether `fetched` is a different job from the one the worker's cached
-/// blob was copied from (#53).
+/// Whether `fetched` is a different job object from the one the worker's
+/// cached blob was copied from (#53).
 ///
-/// Intermediate step: this still compares by `job_id` string, the same
-/// semantics `worker_loop` used before this refactor — only the storage
-/// (`Option<Arc<Job>>` instead of a bare `String`) has changed so far. The
-/// identity-based comparison (`Arc::ptr_eq`) that actually fixes #53 lands in
-/// a later commit, once this plumbing is proven behavior-preserving.
+/// Identity, not content: `PoolConnection` installs every job as a fresh
+/// `Arc::new(..)` (`login`, `handle_pool_message`) and never mutates or
+/// re-wraps one, so a new `Arc` is exactly "the pool sent a job". Comparing
+/// `job_id` alone missed a pool reusing an id, either across connections
+/// (the fresh `Job` then carries the new `generation`, so #41's stale check
+/// cannot see the stale blob) or within one. A byte-identical re-send costs
+/// one scratchpad prepare and nothing else; the nonce is not reset.
+///
+/// Takes `&Arc<Job>`, not a pointer value: the caller must keep the cached
+/// `Arc` alive, or a freed job's address could be reused (ABA).
 fn is_new_job(cached: Option<&Arc<Job>>, fetched: &Arc<Job>) -> bool {
-    cached.is_none_or(|c| c.job_id != fetched.job_id)
+    !cached.is_some_and(|c| Arc::ptr_eq(c, fetched))
 }
 
 #[allow(clippy::too_many_arguments)]

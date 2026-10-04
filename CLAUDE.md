@@ -427,10 +427,12 @@
 
 ## Current task
 
-**NET-10 — Compare `current_job` by `Arc` identity, not `job_id` string (#53).**
-Completed, merged as `fe5a20f` (#56). Reviewed Opus round 1 (no
-blockers/majors, 2 minors + 2 nits fixed — including one false positive the
-reviewer caught and retracted itself). See [`tasks/NET-10.md`](tasks/NET-10.md).
+**RESEARCH-02 — Recheck: RandomX v2 / FCMP++ still blocked on Monero mainnet.**
+Completed. Confirmed against primary sources (live chain API, the actual
+hardfork table, today's GitHub milestone at 70%) that nothing has changed
+since 2026-08-15 — RX2-01's gated port correctly stays dormant. News claims of
+a May 2026 activation are not corroborated and are flagged as the second
+instance of this specific misreporting pattern. See [`tasks/RESEARCH-02.md`](tasks/RESEARCH-02.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

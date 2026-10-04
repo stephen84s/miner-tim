@@ -8181,3 +8181,37 @@ Not independently reviewed — same precedent as the prior four `*-CLEANUP` entr
 **Not Established**
 
 Nothing beyond what the NET-10 entry above already lists (#53's own "Not Established" items: the calling-convention risk, the untested call-site identity-sharing behavior, and no live-pool evidence that a pool actually reuses `job_id` values).
+
+### RESEARCH-02 (2026-10-04): Recheck — RandomX v2 / FCMP++ still blocked on Monero mainnet
+
+**Request / Goal**
+
+User asked to check for anything new with Monero and xmrig. This re-verifies the blocker this repo has carried since the 2026-08-15 entry ("RandomX v2 — still blocked") and the RX2-01 gated port it left deliberately dormant pending "fork-day remainder" work (version dispatch, Stratum `result`/`commitment` changes — see that entry's own list). Answer: **nothing has changed. Still blocked, same as August.**
+
+**What was checked, against primary sources, not news coverage**
+
+- **Live chain state** (`xmrchain.net/api/networkinfo`): `current_hf_version: 16`, height 3,776,631 — up from height 3,739,507 at the 2026-08-15 check, consistent with ~7 weeks of ordinary block production (no fork occurred in between).
+- **`monero-project/monero` master, `src/hardforks/hardforks.cpp`**: `mainnet_hard_forks` table fetched directly — still exactly 16 rows, ending at `{ 16, 2689608, 0, 1656629118 }`. No version-17 row exists. This is the same file/method the 2026-08-15 entry used (there described via `mainnet_hard_forks` in general terms; this entry fetched and listed all 16 rows directly).
+- **`monero-project/monero`'s `fcmp++ hf` GitHub milestone** (the project's own tracker for this work, last updated *today*, 2026-10-04): still **open**, **70% complete**, no due date set. "RandomX V2" is explicitly listed as one of its unfinished work streams, alongside Carrot-protocol and wallet-scanning items.
+
+**The news-coverage discrepancy, worth recording because it repeats a pattern this file already flagged once**
+
+Several crypto-news sites (Decrypt, Startup Fortune, CoinReporter, quasa.io, xgram.io, and a web-search engine's own synthesized summary built from them) confidently assert "FCMP++ mainnet activated May 6, 2026." This is not corroborated by any primary source checked above, and is directly contradicted by the still-open, 70%-complete milestone. The same search also surfaced a more specific, more plausible data point from the same body of results: a security **audit window scheduled 11-22 May 2026** (via a TradingView calendar listing) — which is the likelier real event behind the May-2026 date these articles latched onto, since scheduling an audit for a fork that supposedly already shipped on May 6 makes no sense. This is the same failure mode the 2026-08-15 entry already recorded once, with a different fabricated date (that entry: "Several web articles claim FCMP++/RandomX v2 already activated in Q1 2026; the consensus code contradicts them"). **Treat any news claim of FCMP++/RandomX v2 mainnet activation as unverified until checked against `mainnet_hard_forks` or the live chain's `current_hf_version` directly — this is now the second time secondary sources have gotten this specific claim wrong, with different invented dates each time.**
+
+FCMP++ itself, separately from the RandomX v2 timing question: multiple sources (of varying reliability) agree it is a ring-signature/membership-proof privacy upgrade and does **not** change the RandomX hashing algorithm on its own — "for miners, RandomX remains unchanged" per one summary. RandomX v2 (HF17) is bundled with FCMP++ in the same fork per the milestone's own work-stream list, but is a logically separate change from FCMP++'s privacy mechanics. Neither has shipped.
+
+**xmrig**: latest stable remains v6.26.0 (28 March 2026) — unchanged since the 2026-08-15 survey, no new release found. Its RandomX v2 support is the same gated/preparatory situation as this repo's own RX2-01: implemented ahead of the fork, not yet switched on live, for the same reason (nothing to switch on yet).
+
+**Verification Performed**
+
+- `WebFetch` against `xmrchain.net/api/networkinfo` directly (not a cached/secondary summary).
+- `WebFetch` against the raw `monero-project/monero` master source for the hardfork table (initially tried `cryptonote_config.h`, which doesn't contain it; corrected to `src/hardforks/hardforks.cpp`, the actual file, and got all 16 rows).
+- `WebFetch` against the `fcmp++ hf` GitHub milestone page directly, not a secondary description of it.
+- `WebSearch` for xmrig's own GitHub releases page to confirm v6.26.0 is still current (no newer tag found).
+- No code touched; no claim here feeds into a build/test cycle — purely an external-status log entry, in the shape of the 2026-08-15 research entries that precede it in this file.
+
+**Not Established**
+
+- Exact cause of the May-2026 misreporting (whether it's confusion with the audit window, a testnet/stressnet milestone, or pure fabrication) — flagged as a pattern, not root-caused.
+- Whether the `fcmp++ hf` milestone's "70% complete" figure is a reliable leading indicator of timing; GitHub milestone completion percentages are not a committed schedule.
+- No action taken on RX2-01's "fork-day remainder" list (version dispatch, Stratum `result`/`commitment` changes) — correctly still out of scope, since the fork it's gated on has not happened.

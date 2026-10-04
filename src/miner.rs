@@ -1158,3 +1158,70 @@ mod verify_tests {
         assert!(!m.verify_shares);
     }
 }
+
+#[cfg(test)]
+mod job_change_tests {
+    use super::*;
+
+    /// A fixed small job, distinguishable by `job_id` and `generation` only
+    /// -- content (blob/target/seed_hash) is irrelevant to `is_new_job`,
+    /// which never reads them.
+    fn job(id: &str, generation: u64) -> Arc<Job> {
+        Arc::new(Job {
+            blob: vec![0u8; 76],
+            target: vec![0u8; 4],
+            job_id: id.to_string(),
+            seed_hash: vec![0u8; 32],
+            generation,
+        })
+    }
+
+    /// The normal mid-job case: the same `Arc` the worker already cached its
+    /// blob from must not be treated as a new job.
+    #[test]
+    fn the_same_job_object_is_not_a_new_job() {
+        let a = job("1", 1);
+        assert!(!is_new_job(Some(&a), &a.clone()));
+    }
+
+    /// #53 itself: a pool reusing a job_id across connections. The fresh
+    /// `Job` then carries a new generation, but comparing by job_id alone
+    /// would miss it.
+    #[test]
+    fn a_reused_job_id_from_a_new_connection_is_a_new_job() {
+        let a = job("1", 1);
+        let b = job("1", 2);
+        assert!(is_new_job(Some(&a), &b));
+    }
+
+    /// The pre-existing, already-correct case: a different job_id is always
+    /// a new job, regardless of generation.
+    #[test]
+    fn a_different_job_id_is_a_new_job() {
+        let a = job("1", 1);
+        let b = job("2", 1);
+        assert!(is_new_job(Some(&a), &b));
+
+        let c = job("1", 1);
+        let d = job("2", 2);
+        assert!(is_new_job(Some(&c), &d));
+    }
+
+    /// The case that tells identity-based comparison apart from a
+    /// job_id+generation-based one: byte-identical content reinstalled as a
+    /// new `Arc` (same job_id, same generation) must still count as a new
+    /// job. A generation-only alternative would miss this.
+    #[test]
+    fn an_identical_reinstall_is_a_new_job() {
+        let a = job("1", 1);
+        let b = Arc::new((*a).clone());
+        assert!(is_new_job(Some(&a), &b));
+    }
+
+    /// No cached job (worker just started) must always count as new.
+    #[test]
+    fn no_cached_job_means_a_new_job() {
+        let a = job("1", 1);
+        assert!(is_new_job(None, &a));
+    }
+}

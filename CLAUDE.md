@@ -428,9 +428,9 @@
 ## Current task
 
 **NET-08 — Close the stale-session-id window via generation tagging (#41).**
-Mergeable — PR #52 reviewed (Opus round 1, no blockers/majors), all CI green,
-live 2h run clean (3 donation rotations, zero false refusals, ledger balanced
-170/170). Merging next. See [`tasks/NET-08.md`](tasks/NET-08.md).
+Completed, merged as `68acb27` (#52). Reviewed Opus round 1 (no
+blockers/majors); live 2h run confirmed zero false refusals across 3 donation
+rotations, ledger balanced 170/170. See [`tasks/NET-08.md`](tasks/NET-08.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the

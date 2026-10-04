@@ -11,11 +11,11 @@ workflows, Makefile, scripts/ touched -> nothing handed off to jit-reviewer / ci
 |---|------|--------|
 | 1 | Correctness | done, no defect |
 | 2 | Silent failure | done, no finding |
-| 3 | Safety switches | pending |
-| 4 | Tests / break-tests | break-tests 1,2 redone; call-site mutations done; suite/clippy/mutants pending |
-| 5 | Resource use | pending |
-| 6 | Docs / audit | pending |
-| 7 | Concurrency | pending |
+| 3 | Safety switches | done, untouched by diff |
+| 4 | Tests / break-tests | done (F1) |
+| 5 | Resource use | done, no finding |
+| 6 | Docs / audit | done (F2, F3, N1, N2) |
+| 7 | Concurrency | done, no finding |
 
 ## Findings
 ### Verified (no finding)
@@ -65,3 +65,43 @@ the integration evidence for it" is inaccurate and should be corrected; also "no
 the same way cargo-mutants can reach" -- cargo-mutants can reach `worker_loop`, its mutants would
 just all be MISSED. Fix options: correct the wording, or extract the job-change block (cache update
 + blob copy) into a testable function.
+
+### Reproduced
+- `rtk proxy cargo test --release --locked`: 200 passed / 0 failed / 3 ignored (lib) + 20 (bin). Matches.
+- `cargo clippy --all-targets -- -D warnings` and `--release`: both exit 0. Matches.
+- `./scripts/mutants.sh 'is_new_job' 'miner::'`: exit 0, 3 mutants, 3 caught (7s baseline, 12s). Matches.
+- Item 3: diff touches no `--native-loop`/`--verify-shares` code. Item 5: each worker now keeps one
+  `Arc<Job>` (tens of bytes of blob) alive past a reconnect clear -- negligible, and it is what makes
+  the identity check ABA-safe. Item 7: no new lock; `get_work()` lock per hash is pre-existing.
+
+### F2 (minor) -- NET-10 / tasks/NET-10.md are stale now that PR #56 exists
+NET-10 is not on origin/main (`grep -cF NET-10` = 0), so in-place correction is fine. Stale text:
+"Review: Not yet reviewed -- no PR has been opened"; "Commits (4, ...; no PR opened yet)" while the
+list has 5 entries (4 hashes + "this commit", 1058a1d); "Not Established: No PR opened ... no CI
+run"; tasks/NET-10.md "No PR opened yet, no review". Needs a `**Review (Opus, round 1): ...**`
+paragraph recording this review's findings and false positives.
+
+### F3 (note) -- no expected review findings recorded before this review
+Neither NET-10 nor tasks/NET-10.md wrote down predicted findings before the review ran. Not a blocker.
+
+### N1 (nit) -- empty-job_id disclosure understates the old behaviour
+See verified section: old code never mined such a job and logged a false "blob too short" warning.
+NET-10 says only that it "would never copy its blob". The change is an improvement, not a neutral one.
+
+### N2 (nit) -- the #3785 quotation is not verbatim
+NET-10 quotes "Our worker nonce is monotonic across job changes; we never reset it". The source
+(AUDIT.md:833) reads "...across job changes (`miner.rs:341`); we never reset it". The meaning is
+unchanged, but the text inside the quotation marks has been edited without saying so.
+
+### CI
+At review time: lint, audit, test, mutation(advisory) pass; jit-macos and jit-linux-arm pending.
+The diff touches no JIT code, so those jobs cannot be affected by its substance, but they are
+required checks.
+
+## Verdict
+Mergeable after F2 is fixed (audit text) and the required jit checks go green. The code change is
+correct: the install invariant holds at all 4 sites, the predicate is right for every case, it is
+ABA-safe, and no other identity comparison in worker_loop was missed. F1 should be addressed at
+least in wording: NET-10 should stop calling the helper-body break-tests evidence for the call site.
+Not verified: behaviour against a live pool that actually reuses job_id (none known, as NET-10
+states); the JIT CI jobs, which were still pending.

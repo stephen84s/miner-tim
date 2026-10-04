@@ -829,7 +829,15 @@ fn worker_loop(
                 let submit_result = pool.submit_share(&job.job_id, &nonce_hex, &result_hex, job.generation);
                 let submit_call_elapsed = submit_start.elapsed();
                 if let Err(e) = submit_result {
-                    log::error!("Failed to submit share: {}", e);
+                    // A stale-generation refusal (#41) is an expected local-lifecycle
+                    // event, already logged by `submit_share` itself — error-level here
+                    // would misrepresent it as a surprise. Every other failure (no
+                    // stream, a write error) still warrants it.
+                    if e.starts_with("Stale job") {
+                        log::warn!("Share not submitted (stale generation): {}", e);
+                    } else {
+                        log::error!("Failed to submit share: {}", e);
+                    }
                 }
                 log::info!(
                     "Worker {} share timing: job_id={} nonce={} verdict={:?} \

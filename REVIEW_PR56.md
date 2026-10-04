@@ -51,22 +51,33 @@ All of NET-10's hand break-tests mutate the body of `is_new_job`; none touches `
 no test calls (sole caller miner.rs:249). Yet NET-10 calls those three "the integration evidence"
 for the call site. My call-site mutations:
 - A: `current_job = Some(Arc::clone(&job));` -> `current_job = Some(Arc::new((*job).clone()));`
-  (re-wrap; every iteration then looks like a new job -> re-prepare scratchpad every hash, roughly
-  doubling per-hash work; hashes stay correct). **Full suite 200/0/3 + 20 green, clippy -D warnings
+  (re-wrap; every iteration then looks like a new job -> one extra `prepare_scratchpad` per hash
+  (not measured); hashes stay correct). **Full suite 200/0/3 + 20 green, clippy -D warnings
   clean.** Not caught by anything.
 - A-variant: deleting the assignment outright is caught, but only incidentally by `unused_mut`
   under clippy -D warnings.
 - B: call site reverted to `current_job.as_ref().is_none_or(|c| c.job_id != job.job_id)` (#53
   restored at the call site, helper intact). Caught only incidentally: clippy's `dead_code` on
-  `is_new_job` in the non-test lib build. A variant that keeps the helper referenced would pass.
+  `is_new_job` in the non-test lib build. (Inferred, not run: a variant that keeps the helper
+  referenced would pass. Mutation A already shows the gap empirically.)
 Severity minor: no wrong-hash path (the realistic surviving mutation is a perf regression), and the
 change is small enough to review by eye. But the AUDIT sentence "the three hand break-tests above are
-the integration evidence for it" is inaccurate and should be corrected; also "not mutation-testable
-the same way cargo-mutants can reach" -- cargo-mutants can reach `worker_loop`, its mutants would
-just all be MISSED. Fix options: correct the wording, or extract the job-change block (cache update
-+ blob copy) into a testable function.
+the integration evidence for it" is inaccurate. **Correcting that sentence is a merge condition**
+(same edit as F2). Extracting the job-change block (cache update + blob copy) into a testable
+function is a non-blocking follow-up.
+Checked and withdrawn: I first wrote that cargo-mutants could reach the call site. `cargo mutants
+--list -f src/miner.rs` lists 34 `worker_loop` mutants, none at lines 638-639 (operators/returns
+only). NET-10's "not mutation-testable the same way" is **accurate**. Count that as a false
+positive that I raised and then retracted myself.
 
 ### Reproduced
+- Doc placement checked: main's lines above `#[allow]` are `classify_share`'s closing brace, with no
+  `///` block, so `is_new_job` orphans nothing. The `stream` field's doc ends at `stream:`, and the new
+  `current_job` doc attaches to its own field. Commit messages scanned: no undisclosed errors
+  beyond the two NET-10 already owns.
+- Working-tree hygiene: one mutation-B command aborted on a shell error before its restore step,
+  which left `src/miner.rs` dirty briefly. I restored it from the scratchpad copy in the next command and
+  verified it with `cmp` and `git diff --quiet`. Every other mutation was restored and verified the same way.
 - `rtk proxy cargo test --release --locked`: 200 passed / 0 failed / 3 ignored (lib) + 20 (bin). Matches.
 - `cargo clippy --all-targets -- -D warnings` and `--release`: both exit 0. Matches.
 - `./scripts/mutants.sh 'is_new_job' 'miner::'`: exit 0, 3 mutants, 3 caught (7s baseline, 12s). Matches.
@@ -78,7 +89,9 @@ just all be MISSED. Fix options: correct the wording, or extract the job-change 
 NET-10 is not on origin/main (`grep -cF NET-10` = 0), so in-place correction is fine. Stale text:
 "Review: Not yet reviewed -- no PR has been opened"; "Commits (4, ...; no PR opened yet)" while the
 list has 5 entries (4 hashes + "this commit", 1058a1d); "Not Established: No PR opened ... no CI
-run"; tasks/NET-10.md "No PR opened yet, no review". Needs a `**Review (Opus, round 1): ...**`
+run"; tasks/NET-10.md "No PR opened yet, no review". The PR #56 body says "(status: Active -- no review yet)" and lists independent review as outstanding.
+Update it after this review. Its test counts and break-test descriptions match what I reproduced.
+Needs a `**Review (Opus, round 1): ...**`
 paragraph recording this review's findings and false positives.
 
 ### F3 (note) -- no expected review findings recorded before this review
@@ -99,9 +112,8 @@ The diff touches no JIT code, so those jobs cannot be affected by its substance,
 required checks.
 
 ## Verdict
-Mergeable after F2 is fixed (audit text) and the required jit checks go green. The code change is
+Mergeable once three things are done: (a) F2's stale audit/PR text is fixed; (b) F1's "integration evidence"
+sentence is corrected; (c) the required jit checks go green. The code change is
 correct: the install invariant holds at all 4 sites, the predicate is right for every case, it is
-ABA-safe, and no other identity comparison in worker_loop was missed. F1 should be addressed at
-least in wording: NET-10 should stop calling the helper-body break-tests evidence for the call site.
-Not verified: behaviour against a live pool that actually reuses job_id (none known, as NET-10
+ABA-safe, and no other identity comparison in worker_loop was missed. Not verified: behaviour against a live pool that actually reuses job_id (none known, as NET-10
 states); the JIT CI jobs, which were still pending.

@@ -427,12 +427,11 @@
 
 ## Current task
 
-**RELEASE-02 — Cut and publish v0.1.3, the first-ever GitHub Release.**
-Completed. Tagged `v0.1.3` at `990a9b1`, `make dist` built the apple-m1
-tarball, `release.yml` fired and created the draft (first time this workflow
-has ever actually run), assets uploaded, published with notes. Decided not
-to sign the binary, matching standard practice among comparable open-source
-CLI projects. See [`tasks/RELEASE-02.md`](tasks/RELEASE-02.md).
+**DOC-05 — Refresh README's "How fast is it" headline figures; delete stale
+committed log.** Completed. Peak and sustained hashrate updated from an
+8-hour, 11-thread overnight run (~5,470 / ~5,280 H/s); `LIVE8H_RUN.log`
+deleted, its finding already closed via #40. See
+[`tasks/DOC-05.md`](tasks/DOC-05.md).
 
 Every task has its own file in [`tasks/`](tasks/), newest last in
 [`tasks/README.md`](tasks/README.md). The matching `AUDIT.md` entry is the
